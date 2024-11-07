@@ -74,24 +74,6 @@ def is_video_platform(url: str) -> bool:
     domain = parsed_url.netloc.lower()
     return any(platform in domain for platform in VIDEO_PLATFORMS)
 
-class YouTubeMetadata(Enum):
-    TITLE = 'title'
-    DESCRIPTION = 'description'
-    UPLOAD_DATE = 'upload_date'
-    UPLOADER = 'uploader'
-    VIEW_COUNT = 'view_count'
-    LIKE_COUNT = 'like_count'
-    DURATION = 'duration'
-    TAGS = 'tags'
-    CATEGORY = 'categories'
-    THUMBNAIL_URL = 'thumbnail'
-
-    @classmethod
-    def extract(cls, info: Dict[str, Any]) -> Dict[str, Any]:
-        return {field.name.lower(): info.get(field.value, 'N/A') for field in cls}
-
-DEFAULT_METADATA = list(YouTubeMetadata)
-
 def format_metadata(metadata: Dict[str, Any]) -> str:
     metadata_text = "Video Metadata:\n\n"
     for key, value in metadata.items():
@@ -647,22 +629,6 @@ def scrape_url(url: str, text_only: bool = False, ai_extraction: bool = False, v
             return chunks
     return extraction
     
-def extract_metadata(video_info: Dict[str, Any], metadata_fields: List) -> Dict[str, Any]:
-    metadata = {}
-    for field in metadata_fields:
-        metadata[field] = video_info.get(field, 'N/A')
-    return metadata
-
-def format_metadata(metadata: dict) -> str:
-    metadata_text = "Video Metadata:\n\n"
-    for key, value in metadata.items():
-        if isinstance(value, list):
-            value = ', '.join(map(str, value))
-        elif not isinstance(value, str):
-            value = str(value)
-        metadata_text += f"{key.capitalize()}: {value}\n"
-    return metadata_text
-
 def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
     import whisper
     from moviepy.editor import VideoFileClip
