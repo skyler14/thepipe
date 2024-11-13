@@ -19,7 +19,6 @@ from .chunker import chunk_by_page, chunk_by_document, chunk_by_section, chunk_s
 import tempfile
 import mimetypes
 import dotenv
-import shutil
 from magika import Magika
 import markdownify
 dotenv.load_dotenv()
@@ -72,16 +71,6 @@ def is_video_platform(url: str) -> bool:
     parsed_url = urlparse(url)
     domain = parsed_url.netloc.lower()
     return any(platform in domain for platform in VIDEO_PLATFORMS)
-
-def format_metadata(metadata: Dict[str, Any]) -> str:
-    metadata_text = "Video Metadata:\n\n"
-    for key, value in metadata.items():
-        if isinstance(value, list):
-            value = ', '.join(map(str, value))
-        elif not isinstance(value, str):
-            value = str(value)
-        metadata_text += f"{key.capitalize()}: {value}\n"
-    return metadata_text
 
 def detect_source_type(source: str) -> str:
     # otherwise, try to detect the file type by its extension
