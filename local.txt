@@ -31,3 +31,5 @@ modal
 scikit-learn
 webvtt-py
 yt-dlp
+rookiepy
+pipgoogle-api-python-client

@@ -26,6 +26,8 @@ from enum import Enum, auto
 from .enums import YouTubeEnum
 from typing import Union, Optional, Dict, Any, List
 yt_dlp = None
+dotenv.load_dotenv()
+from .drive_utils import is_drive_url
 
 def initialize_video_processing():
     global yt_dlp
@@ -584,31 +586,93 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
     # Normal scraping process
     if not local:
         endpoint = f"{HOST_URL}/scrape"
-        headers = {
-            "Authorization": f"Bearer {THEPIPE_API_KEY}"
-        }
+        headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}
         data = {
             "text_only": str(text_only).lower(),
             "ai_extraction": str(ai_extraction).lower(),
-            "chunking_method": chunking_method.__name__
+            "chunking_method": chunking_method.__name__,
+            "options": json.dumps(options) if options else None,
+            "urls": url
         }
-        if options:
-            data["options"] = json.dumps(options)
-        data["urls"] = url
+        
         response = requests.post(endpoint, headers=headers, data=data, stream=True)
         if "error" in response.content.decode('utf-8'):
             error_message = json.loads(response.content.decode('utf-8'))['error']
             raise ValueError(f"Error scraping {url}: {error_message}")
+            
         response.raise_for_status()
-        results = []
+        chunks = []
         for line in response.iter_lines():
             if line:
                 chunk_data = json.loads(line)
+                chunks.append(chunk_data['result'])
+    else:
+        chunks = []
+        try:
+            if is_drive_url(url):
+                chunks = scrape_drive(url, text_only=text_only,
+                                    ai_extraction=ai_extraction,
+                                    verbose=verbose, options=options)
+            elif is_video_platform(url):
+                chunks = scrape_youtube(url, text_only=text_only,
+                                      verbose=verbose, options=options)
+            elif any(url.startswith(domain) for domain in TWITTER_DOMAINS):
+                chunks = scrape_tweet(url=url, text_only=text_only,
+                                    verbose=verbose, options=options)
+            elif any(url.startswith(domain) for domain in GITHUB_DOMAINS):
+                chunks = scrape_github(github_url=url, include_regex=include_regex,
+                                     include_patterns=include_patterns,
+                                     text_only=text_only, ai_extraction=ai_extraction,
+                                     verbose=verbose, options=options)
+            else:
+                # Handle other content types
+                parsed_url = urlparse(url)
+                file_extension = os.path.splitext(parsed_url.path)[1].lower()
+                if file_extension in ['pdf', 'docx', 'txt', 'csv', 'xlsx']:
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        file_path = os.path.join(temp_dir, os.path.basename(url))
+                        response = requests.get(url)
+                        if (FILESIZE_LIMIT_MB and 
+                            int(response.headers.get('Content-Length', 0)) > FILESIZE_LIMIT_MB * 1024 * 1024):
+                            raise ValueError(f"File size exceeds {FILESIZE_LIMIT_MB} MB limit.")
+                        with open(file_path, 'wb') as file:
+                            file.write(response.content)
+                        chunks = scrape_file(filepath=file_path, ai_extraction=ai_extraction,
+                                           text_only=text_only, verbose=verbose,
+                                           local=local, chunking_method=chunking_method,
+                                           options=options)
+                else:
+                    chunk = extract_page_content(url=url, text_only=text_only,
+                                               verbose=verbose, options=options)
+                    chunks = chunking_method([chunk])
+                    if not any(chunk.texts for chunk in chunks) and not any(chunk.images for chunk in chunks):
+                        raise ValueError("No content extracted from URL.")
+                        
+        except ImportError as e:
+            raise ImportError(f"Required dependencies not found: {str(e)}")
+        except Exception as e:
+            if verbose:
+                print(f"[thepipe] Error processing URL: {str(e)}")
+            raise
+
     # Process any cookie options if present
     if cookie_options:
         from .cookie_utils import process_cookie_options
         return process_cookie_options(url, chunks, cookie_options)
     return chunks
+
+def scrape_drive(drive_url: str, text_only: bool = False, ai_extraction: bool = False, 
+                 verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    # Lazy load drive utils
+    from .drive_utils import extract_drive_id, process_drive_content
+    
+    drive_id = extract_drive_id(drive_url)
+    if not drive_id:
+        raise ValueError(f"Could not extract valid Drive ID from URL: {drive_url}")
+    
+    return process_drive_content(drive_url=drive_url,drive_id=drive_id,
+        text_only=text_only,ai_extraction=ai_extraction,verbose=verbose,
+        options=options)
     
 def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
     import whisper
