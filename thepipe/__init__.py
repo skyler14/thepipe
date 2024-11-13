@@ -6,7 +6,7 @@ def main() -> None:
     args = parse_arguments()
     chunks = None
     if args.source.startswith("http"):
-        chunks = scrape_url(args.source, text_only=args.text_only, ai_extraction=args.ai_extraction, verbose=args.verbose, local=args.local, options=args.options)
+        chunks = scrape_url(args.source, text_only=args.text_only, include_regex=args.include_regex, include_patterns=args.include_patterns, ai_extraction=args.ai_extraction, verbose=args.verbose, local=args.local, options=args.options)
     elif os.path.isdir(args.source):
         chunks = scrape_directory(args.source, include_regex=args.include_regex, include_patterns=args.include_patterns, verbose=args.verbose, ai_extraction=args.ai_extraction, text_only=args.text_only, local=args.local, options=args.options)
     else:
