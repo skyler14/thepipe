@@ -60,11 +60,13 @@ class YouTubeEnum(Enum):
 
     @staticmethod
     def format_metadata(metadata: Dict[str, Any]) -> str:
-        formatted_metadata = []
+        metadata_text = "Video Metadata:\n\n"
         for key, value in metadata.items():
             if isinstance(value, list):
                 value = ', '.join(map(str, value))
-            formatted_metadata.append(f"{key.replace('_', ' ').title()}: {value}")
-        return '\n'.join(formatted_metadata)
+            elif not isinstance(value, str):
+                value = str(value)
+            metadata_text += f"{key.capitalize()}: {value}\n"
+        return metadata_text
 
 DEFAULT_METADATA_FIELDS = list(YouTubeEnum)
