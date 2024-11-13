@@ -169,25 +169,46 @@ def save_outputs(chunks: List[Chunk], verbose: bool = False, text_only: bool = F
     if not os.path.exists('outputs'):
         os.makedirs('outputs')
     text = ""
+    current_path = None
+    page_number = 1
 
-    # Save the text and images to the outputs directory
-    for i, chunk in enumerate(chunks):
-        if chunk is None:
+    def is_paginated_format(path: str) -> bool:
+        """Check if the file format typically has pages."""
+        return path.lower().endswith('.pdf')
+
+    # First write: output with minimal headers
+    for chunk in chunks:
+        if chunk is None or (not chunk.texts and not chunk.images):
             continue
-        if chunk.path is not None:
-            text += f'{chunk.path}:\n'
+
+        # Only write path when it changes
+        if chunk.path != current_path:
+            current_path = chunk.path
+            if current_path is not None:
+                if text:  # Add spacing between documents
+                    text += "\n"
+                text += f"{current_path}\n\n"
+            page_number = 1
+        elif current_path and is_paginated_format(current_path):
+            # Just add page number for PDFs
+            text += f"\n{page_number}\n\n"
+            page_number += 1
+
         if chunk.texts:
             for chunk_text in chunk.texts:
-                text += f'```\n{chunk_text}\n```\n'
-        if chunk.images and not text_only:
-            for j, image in enumerate(chunk.get_valid_images()):
-                try:
-                    image.convert('RGB').save(f'outputs/{i}_{j}.jpg')
-                except Exception as e:
-                    if verbose:
-                        print(f"[thepipe] Error saving image at index {j} in chunk {i}: {str(e)}")
+                text += f"{chunk_text}\n\n"
 
-    # Save the text
+        if chunk.images and not text_only:
+            try:
+                img_index = len([f for f in os.listdir('outputs') if f.endswith('.jpg')])
+                for j, image in enumerate(chunk.get_valid_images()):
+                    image.convert('RGB').save(f'outputs/{img_index + j}.jpg')
+            except Exception as e:
+                if verbose:
+                    print(f"[thepipe] Error saving image: {str(e)}")
+
+    # Clean up excessive newlines and write
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
     with open('outputs/prompt.txt', 'w', encoding='utf-8') as file:
         file.write(text)
     
@@ -216,7 +237,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--ai_extraction', action='store_true', help='Use ai_extraction to extract text from images.')
     parser.add_argument('--text_only', nargs='?', const='default', default=None, 
                         choices=['default', 'transcribe', 'ai', 'uploaded'],
-                        help='Extract only text from the source. Options: default (try all methods), transcribe (force local transcription), ai (prefer AI-generated), uploaded (prefer uploaded)')
+                        help='Extract only text from the source. Video Options: default (try all methods), transcribe (force local transcription), ai (prefer AI-generated), uploaded (prefer uploaded)')
     parser.add_argument('--verbose', action='store_true', help='Print status messages.')
     parser.add_argument('--local', action='store_true', help='Use local processing instead of API.')
     parser.add_argument('--options', type=str, help='JSON string of type-specific options')
