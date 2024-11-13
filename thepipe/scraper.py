@@ -25,8 +25,7 @@ import markdownify
 dotenv.load_dotenv()
 from enum import Enum, auto
 from .enums import YouTubeEnum
-
-# Global variables to hold the imported video modules
+from typing import Union, Optional, Dict, Any, List
 yt_dlp = None
 
 def initialize_video_processing():
@@ -904,17 +903,36 @@ def format_timestamp(seconds: float, chunk_index: int = 0, chunk_duration: int =
     milliseconds = int((seconds - int(seconds)) * 1000)
     return f"{hours:02}:{minutes:02}:{int(seconds):02}.{milliseconds:03}"
 
-def scrape_github(github_url: str, include_regex: Optional[str] = None, text_only: bool = False, ai_extraction: bool = False, branch: str = 'main', verbose: bool = False) -> List[Chunk]:
-    files_contents = []
-    if not GITHUB_TOKEN:
-        raise ValueError("GITHUB_TOKEN environment variable is not set.")
-    # make new tempdir for cloned repo
+def scrape_github(github_url: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, text_only: bool = False, ai_extraction: bool = False, branch: str = 'main', verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """Scrape content from a GitHub repository with optional authentication."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        # requires git
-        os.system(f"git clone {github_url} {temp_dir} --quiet")
-        files_contents = scrape_directory(dir_path=temp_dir, include_regex=include_regex, verbose=verbose, ai_extraction=ai_extraction, text_only=text_only, local=True)
-    return files_contents
-
+        # Try unauthenticated clone first
+        clone_result = os.system(f"git clone {github_url} {temp_dir} --quiet")
+        
+        # If clone fails and we don't have a token, extract error message
+        if clone_result != 0 and not GITHUB_TOKEN:
+            error = "Authentication required. Set GITHUB_TOKEN environment variable"
+            if verbose:
+                print(f"[thepipe] {error}")
+            raise ValueError(error)
+            
+        # If clone fails but we have a token, try authenticated clone
+        if clone_result != 0:
+            auth_url = github_url.replace("https://", f"https://{GITHUB_TOKEN}@")
+            clone_result = os.system(f"git clone {auth_url} {temp_dir} --quiet")
+            if clone_result != 0:
+                raise ValueError(f"Failed to clone repository even with authentication: {github_url}")
+        files_contents = scrape_directory(
+            dir_path=temp_dir,
+            include_regex=include_regex,
+            include_patterns=include_patterns,
+            verbose=verbose,
+            ai_extraction=ai_extraction,
+            text_only=text_only,
+            local=True
+        )        
+        return files_contents
+    
 def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
     from docx import Document
     from docx.oxml.table import CT_Tbl
