@@ -206,8 +206,8 @@ def save_outputs(chunks: List[Chunk], verbose: bool = False, text_only: bool = F
         print(f"[thepipe] Outputs saved to 'outputs' folder")
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description='Compress project files into a context prompt.')
-    parser.add_argument('source', type=str, help='The source file or directory to compress.')
+    parser = argparse.ArgumentParser(description='Process files or display cookies.')
+    parser.add_argument('source', type=str, help='The source file, directory, or URL to process')
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--include_regex', type=str, nargs='?', const='.*', default=None, 
                        help='Regex pattern to match in a directory. Use quotes for patterns with special characters.')
@@ -220,6 +220,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--verbose', action='store_true', help='Print status messages.')
     parser.add_argument('--local', action='store_true', help='Use local processing instead of API.')
     parser.add_argument('--options', type=str, help='JSON string of type-specific options')
+    parser.add_argument('--browser_type', type=str, choices=['chrome', 'firefox', 'edge', 'brave', 'safari'],
+                       help='Specific browser to extract cookies from')
+    parser.add_argument('--show_cookies', nargs='?', const='format', choices=['format', 'credentials'],
+                       help='Display cookies instead of processing content. Use "credentials" for full cookie data.')
+
     args = parser.parse_args()
     
     if args.options:
