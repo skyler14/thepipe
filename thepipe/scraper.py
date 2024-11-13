@@ -575,7 +575,24 @@ def create_chunk_from_data(result: Dict, host_images: bool) -> Chunk:
         images=images
     )
 
-def scrape_url(url: str, text_only: bool = False, ai_extraction: bool = False, verbose: bool = False, local: bool = False, chunking_method: Optional[Callable] = chunk_by_page, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+def scrape_url(url: str, include_regex: Optional[str] = None, 
+               include_patterns: Optional[List[str]] = None, 
+               text_only: bool = False, ai_extraction: bool = False, 
+               verbose: bool = False, local: bool = False, 
+               chunking_method: Optional[Callable] = chunk_by_page, 
+               options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    cookie_options = options.get('cookies', {}) if options else {}
+    
+    # Handle cookie test mode early
+    if cookie_options.get('show') == "test" and cookie_options.get('to_terminal', True):
+        from .cookie_utils import process_cookie_options
+        cookie_info = process_cookie_options(url, [], cookie_options)
+        if isinstance(cookie_info, str):
+            print(cookie_info)
+            return []
+        return cookie_info
+
+    # Normal scraping process
     if not local:
         endpoint = f"{HOST_URL}/scrape"
         headers = {
@@ -598,35 +615,11 @@ def scrape_url(url: str, text_only: bool = False, ai_extraction: bool = False, v
         for line in response.iter_lines():
             if line:
                 chunk_data = json.loads(line)
-                results.append(chunk_data['result'])
-        return results
-    if is_video_platform(url):
-        return scrape_youtube(url, text_only=text_only, verbose=verbose, options=options)
-    elif any(url.startswith(domain) for domain in TWITTER_DOMAINS):
-        extraction = scrape_tweet(url=url, text_only=text_only, verbose=verbose, options=options)
-    elif any(url.startswith(domain) for domain in GITHUB_DOMAINS):
-        extraction = scrape_github(github_url=url, text_only=text_only, ai_extraction=ai_extraction, verbose=verbose, options=options)
-    else:
-        # Handle other types of content
-        parsed_url = urlparse(url)
-        file_extension = parsed_url.path.split('.')[-1].lower()
-        if file_extension in ['pdf', 'docx', 'txt', 'csv', 'xlsx']:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                file_path = os.path.join(temp_dir, os.path.basename(url))
-                response = requests.get(url)
-                if FILESIZE_LIMIT_MB and int(response.headers['Content-Length']) > FILESIZE_LIMIT_MB * 1024 * 1024:
-                    raise ValueError(f"File size exceeds {FILESIZE_LIMIT_MB} MB limit.")
-                with open(file_path, 'wb') as file:
-                    file.write(response.content)
-                extraction = scrape_file(filepath=file_path, ai_extraction=ai_extraction, text_only=text_only, verbose=verbose, local=local, chunking_method=chunking_method, options=options)
-        else:
-            chunk = extract_page_content(url=url, text_only=text_only, verbose=verbose, options=options)
-            chunks = chunking_method([chunk])
-            # if no text or images were extracted, return error
-            if not any(chunk.texts for chunk in chunks) and not any(chunk.images for chunk in chunks):
-                raise ValueError("No content extracted from URL.")
-            return chunks
-    return extraction
+    # Process any cookie options if present
+    if cookie_options:
+        from .cookie_utils import process_cookie_options
+        return process_cookie_options(url, chunks, cookie_options)
+    return chunks
     
 def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
     import whisper
