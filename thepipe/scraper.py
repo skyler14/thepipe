@@ -228,15 +228,15 @@ def scrape_directory(dir_path: str, include_regex: Optional[str] = None, include
     
     return extraction
 
-def scrape_zip(file_path: str, include_regex: Optional[str] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False) -> List[Chunk]:
+def scrape_zip(file_path: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False) -> List[Chunk]:
     chunks = []
     with tempfile.TemporaryDirectory() as temp_dir:
         with zipfile.ZipFile(file_path, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
-        chunks =scrape_directory(dir_path=temp_dir, include_regex=include_regex, verbose=verbose, ai_extraction=ai_extraction, text_only=text_only, local=local)
+        chunks =scrape_directory(dir_path=temp_dir, include_regex=include_regex, include_patterns=include_patterns, verbose=verbose, ai_extraction=ai_extraction, text_only=text_only, local=local)
     return chunks
 
-def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only: Optional[bool] = False, ai_model: Optional[str] = DEFAULT_AI_MODEL, verbose: Optional[bool] = False) -> List[Chunk]:    
+def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only: Optional[bool] = False, ai_model: Optional[str] = DEFAULT_AI_MODEL, verbose: Optional[bool] = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:    
     chunks = []
     MAX_PAGES = 128
 
