@@ -11,12 +11,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from .core import Chunk
 
-def is_drive_url(url: str) -> bool:
-    """Check if URL is a Google Drive URL."""
-    parsed_url = urlparse(url)
-    drive_domains = ['drive.google.com', 'docs.google.com']
-    return any(domain in parsed_url.netloc for domain in drive_domains)
-
 def extract_drive_id(url: str) -> Optional[str]:
     """Extract folder or file ID from Drive URL."""
     parsed_url = urlparse(url)

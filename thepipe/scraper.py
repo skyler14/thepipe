@@ -27,7 +27,6 @@ from .enums import YouTubeEnum
 from typing import Union, Optional, Dict, Any, List
 yt_dlp = None
 dotenv.load_dotenv()
-from .drive_utils import is_drive_url
 
 def initialize_video_processing():
     global yt_dlp
@@ -46,13 +45,14 @@ def get_subtitle_parser():
     initialize_subtitle_libraries()
     return webvtt
 
+DRIVE_DOMAINS = ['https://drive.google.com','https://docs.google.com']
 FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
 FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
 GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", None)
 USER_AGENT_STRING: str = os.getenv("USER_AGENT_STRING", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
 MAX_WHISPER_DURATION = 600 # 10 minutes
 TWITTER_DOMAINS = ['https://twitter.com', 'https://www.twitter.com', 'https://x.com', 'https://www.x.com']
-GITHUB_DOMAINS = ['https://github.com', 'https://www.github.com']
+GIT_DOMAINS = ['https://github.com','https://gitlab.com','https://bitbucket.org','https://git.*',  'https://*/git',  'https://*/gitlab','https://*/gitea','https://*/gerrit','https://dev.azure.com','https://codecommit.*.amazonaws.com','https://sourceforge.net','https://codeberg.org','https://gitea.io']
 SCRAPING_PROMPT = os.getenv("EXTRACTION_PROMPT", """An open source document is given. Output the entire extracted contents from the document in detailed markdown format.
 Be sure to correctly format markdown for headers, paragraphs, lists, tables, menus, equations, full text contents, etc.
 Always reply immediately with only markdown. Do not output anything else.""")
@@ -68,11 +68,6 @@ VIDEO_PLATFORMS = {
     "mixer", "younow", "smashcast", "niconico", "vlive", "afreecatv", 
     "kakao", "naver", "line", "iflix", "hooq", "viu", "mubi"
 }
-
-def is_video_platform(url: str) -> bool:
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc.lower()
-    return any(platform in domain for platform in VIDEO_PLATFORMS)
 
 def detect_source_type(source: str) -> str:
     # otherwise, try to detect the file type by its extension
@@ -572,6 +567,7 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
                verbose: bool = False, local: bool = False, 
                chunking_method: Optional[Callable] = chunk_by_page, 
                options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """Scrape content from a URL."""
     cookie_options = options.get('cookies', {}) if options else {}
     
     # Handle cookie test mode early
@@ -609,29 +605,29 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
     else:
         chunks = []
         try:
-            if is_drive_url(url):
+            if matches_domain(url, DRIVE_DOMAINS):
                 chunks = scrape_drive(url, text_only=text_only,
                                     ai_extraction=ai_extraction,
                                     verbose=verbose, options=options)
-            elif is_video_platform(url):
+            elif matches_domain(url,VIDEO_PLATFORMS):
                 chunks = scrape_youtube(url, text_only=text_only,
                                       verbose=verbose, options=options)
-            elif any(url.startswith(domain) for domain in TWITTER_DOMAINS):
+            elif matches_domain(url, TWITTER_DOMAINS):
                 chunks = scrape_tweet(url=url, text_only=text_only,
                                     verbose=verbose, options=options)
-            elif any(url.startswith(domain) for domain in GITHUB_DOMAINS):
+            elif matches_domain(url, GIT_DOMAINS):
                 chunks = scrape_github(github_url=url, include_regex=include_regex,
                                      include_patterns=include_patterns,
                                      text_only=text_only, ai_extraction=ai_extraction,
                                      verbose=verbose, options=options)
             else:
                 # Handle other content types
-                parsed_url = urlparse(url)
+                parsed_url = urlparse(normalize_url(url))
                 file_extension = os.path.splitext(parsed_url.path)[1].lower()
                 if file_extension in ['pdf', 'docx', 'txt', 'csv', 'xlsx']:
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        file_path = os.path.join(temp_dir, os.path.basename(url))
-                        response = requests.get(url)
+                        file_path = os.path.join(temp_dir, os.path.basename(parsed_url.path))
+                        response = requests.get(normalize_url(url))
                         if (FILESIZE_LIMIT_MB and 
                             int(response.headers.get('Content-Length', 0)) > FILESIZE_LIMIT_MB * 1024 * 1024):
                             raise ValueError(f"File size exceeds {FILESIZE_LIMIT_MB} MB limit.")
@@ -1203,3 +1199,20 @@ def scrape_tweet(url: str, text_only: bool = False, verbose: bool = False) -> Li
 
     return chunks
 
+def normalize_url(url: str) -> str:
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    return url
+
+def matches_domain(url: str, domains: List[str]) -> bool:
+    url = normalize_url(url)
+    
+    for domain in domains:
+        pattern = domain.replace('*', '.*')
+        if pattern.startswith('https://'):
+            pattern = f'https?://{pattern[8:]}'
+        if not pattern.startswith('https?://www.'):
+            pattern = pattern.replace('https?://', 'https?://(www.)?')
+        if re.match(f'^{pattern}', url):
+            return True
+    return False
