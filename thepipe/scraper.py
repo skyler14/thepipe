@@ -949,35 +949,49 @@ def format_timestamp(seconds: float, chunk_index: int = 0, chunk_duration: int =
     milliseconds = int((seconds - int(seconds)) * 1000)
     return f"{hours:02}:{minutes:02}:{int(seconds):02}.{milliseconds:03}"
 
-def scrape_github(github_url: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, text_only: bool = False, ai_extraction: bool = False, branch: str = 'main', verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+def scrape_github(github_url: str, include_regex: Optional[str] = None,
+                 include_patterns: Optional[List[str]] = None, 
+                 text_only: bool = False, ai_extraction: bool = False,
+                 branch: str = 'main', verbose: bool = False,
+                 options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Scrape content from a GitHub repository with optional authentication."""
     with tempfile.TemporaryDirectory() as temp_dir:
         # Try unauthenticated clone first
         clone_result = os.system(f"git clone {github_url} {temp_dir} --quiet")
         
-        # If clone fails and we don't have a token, extract error message
-        if clone_result != 0 and not GITHUB_TOKEN:
-            error = "Authentication required. Set GITHUB_TOKEN environment variable"
-            if verbose:
-                print(f"[thepipe] {error}")
-            raise ValueError(error)
-            
-        # If clone fails but we have a token, try authenticated clone
+        # If clone fails and we have token options/env, try authenticated clone
         if clone_result != 0:
-            auth_url = github_url.replace("https://", f"https://{GITHUB_TOKEN}@")
-            clone_result = os.system(f"git clone {auth_url} {temp_dir} --quiet")
-            if clone_result != 0:
-                raise ValueError(f"Failed to clone repository even with authentication: {github_url}")
-        files_contents = scrape_directory(
-            dir_path=temp_dir,
-            include_regex=include_regex,
-            include_patterns=include_patterns,
-            verbose=verbose,
-            ai_extraction=ai_extraction,
-            text_only=text_only,
-            local=True
-        )        
-        return files_contents
+            # Check options first, then environment variable
+            token = None
+            if options:
+                token = options.get('github_token') or options.get('github', {}).get('token')
+            if not token:
+                token = os.getenv('GITHUB_TOKEN')
+                
+            if token:
+                if verbose:
+                    print(f"[thepipe] Attempting authenticated clone...")
+                auth_url = github_url.replace("https://", f"https://{token}@")
+                clone_result = os.system(f"git clone {auth_url} {temp_dir} --quiet")
+                if clone_result != 0:
+                    return [Chunk(path=github_url, texts=[f"Failed to clone repository even with authentication: {github_url}"])]
+            else:
+                return [Chunk(path=github_url, texts=[f"Repository requires authentication. Set GITHUB_TOKEN environment variable or provide token in options"])]
+
+        try:
+            return scrape_directory(
+                dir_path=temp_dir,
+                include_regex=include_regex,
+                include_patterns=include_patterns,
+                verbose=verbose,
+                ai_extraction=ai_extraction,
+                text_only=text_only,
+                local=True
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[thepipe] Error processing repository contents: {str(e)}")
+            return [Chunk(path=github_url, texts=[f"Error processing repository contents: {str(e)}"])]
     
 def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
     from docx import Document
