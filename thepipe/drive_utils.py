@@ -15,22 +15,22 @@ def extract_drive_id(url: str) -> Optional[str]:
     """Extract folder or file ID from Drive URL."""
     parsed_url = urlparse(url)
     
-    # Handle folder URLs
-    folder_match = re.search(r'folders/([a-zA-Z0-9_-]+)', parsed_url.path)
-    if folder_match:
-        return folder_match.group(1)
-    
-    # Handle all Google Doc types (docs, sheets, presentations)
-    doc_match = re.search(r'/(?:document|presentation|spreadsheets)/d/([a-zA-Z0-9_-]+)', parsed_url.path)
-    if doc_match:
-        return doc_match.group(1)
-    
-    # Handle file URLs
+    # Direct file links
     file_match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', parsed_url.path)
     if file_match:
         return file_match.group(1)
     
-    # Handle direct links
+    # Folder links
+    folder_match = re.search(r'folders/([a-zA-Z0-9_-]+)', parsed_url.path)
+    if folder_match:
+        return folder_match.group(1)
+    
+    # Google Doc types (docs, sheets, presentations)
+    doc_match = re.search(r'/(?:document|presentation|spreadsheets)/d/([a-zA-Z0-9_-]+)', parsed_url.path)
+    if doc_match:
+        return doc_match.group(1)
+    
+    # Query parameter IDs (used in open/uc links)
     query_params = parse_qs(parsed_url.query)
     if 'id' in query_params:
         return query_params['id'][0]
@@ -128,72 +128,181 @@ def get_mime_type(file_metadata: Dict[str, Any]) -> Tuple[str, str]:
             
     return mime_type, extension
 
+def is_workspace_doc(url: str, mime_type: Optional[str] = None) -> bool:
+    """
+    Check if the file is a Google Workspace document that needs export.
+    """
+    workspace_patterns = {
+        'document': 'application/vnd.google-apps.document',
+        'presentation': 'application/vnd.google-apps.presentation',
+        'spreadsheet': 'application/vnd.google-apps.spreadsheet'
+    }
+    
+    # Check URL patterns first
+    if any(f"/{doc_type}/" in url.lower() for doc_type in workspace_patterns.keys()):
+        return True
+        
+    # Check MIME type if available
+    if mime_type and any(mime_type.startswith(wtype) for wtype in workspace_patterns.values()):
+        return True
+        
+    return False
+
 def try_public_access(file_id: str, original_url: str = "", verbose: bool = False) -> Optional[Tuple[bytes, str]]:
     """Try to access file as public without authentication."""
     import requests
+    import mimetypes
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': '*/*'
+    }
+    
+    # Try to get file metadata first (includes MIME type)
+    metadata_url = f"https://drive.google.com/file/d/{file_id}/view"
+    try:
+        response = requests.get(metadata_url, headers=headers)
+        content = response.text.lower()
+        
+        # Try to detect file type from page content
+        type_match = re.search(r'<div.*?data-mime-type=["\']([^"\']+)["\']', content)
+        mime_type = type_match.group(1) if type_match else None
+        
+        if verbose and mime_type:
+            print(f"[thepipe] Detected MIME type: {mime_type}")
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Could not detect MIME type: {e}")
+        mime_type = None
 
-    # Determine type from original URL if available
-    url_lower = original_url.lower()
-    if '/spreadsheets/' in url_lower:
-        urls_to_try = [
-            (f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=csv", '.csv'),
-            (f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=txt", '.txt'),  # fallback
-        ]
-    elif '/document/' in url_lower:
-        urls_to_try = [
-            (f"https://docs.google.com/document/d/{file_id}/export?format=docx", '.docx'),
-            (f"https://docs.google.com/document/d/{file_id}/export?format=txt", '.txt'),  # fallback
-        ]
-    elif '/presentation/' in url_lower:
-        urls_to_try = [
-            (f"https://docs.google.com/presentation/d/{file_id}/export/pdf", '.pdf'),
-            (f"https://docs.google.com/presentation/d/{file_id}/export/txt", '.txt'),  # fallback
-        ]
-    else:
-        # Generic/unknown type - just try direct download
-        urls_to_try = [(f"https://drive.google.com/uc?id={file_id}", '.bin')]
+    # For Workspace docs, use export
+    if is_workspace_doc(original_url, mime_type):
+        if verbose:
+            print("[thepipe] Detected Google Workspace document, using export...")
+        return try_export_url(file_id, original_url, verbose)
+
+    # For regular files, try direct download
+    download_urls = [
+        f"https://drive.google.com/uc?id={file_id}&export=download",
+        f"https://drive.google.com/uc?id={file_id}",
+    ]
+
+    session = requests.Session()
+    
+    for url in download_urls:
+        try:
+            if verbose:
+                print(f"[thepipe] Attempting direct download: {url}")
+            
+            response = session.get(url, headers=headers, allow_redirects=True)
+            
+            # Handle download warning/confirmation page
+            if 'quota exceeded' in response.text.lower():
+                if verbose:
+                    print("[thepipe] Download quota exceeded, trying alternative method...")
+                continue
+                
+            if 'verify=t' in response.url or 'confirm=t' in response.url:
+                if verbose:
+                    print("[thepipe] Handling download confirmation...")
+                # Extract confirmation token
+                token_match = re.search(r'"([^"]+)"', response.text)
+                if token_match:
+                    confirm_token = token_match.group(1)
+                    url = f"{url}&confirm={confirm_token}"
+                    response = session.get(url, headers=headers)
+
+            if response.status_code == 200:
+                content_type = response.headers.get('Content-Type', '')
+                
+                # Skip if we got an HTML error page
+                if 'text/html' in content_type and 'google' in response.text.lower():
+                    if verbose:
+                        print("[thepipe] Received HTML error page, skipping...")
+                    continue
+                
+                # Try to get filename and extension from headers
+                cd = response.headers.get('content-disposition')
+                if cd:
+                    fname = re.findall("filename=(.+)", cd)
+                    if fname:
+                        filename = fname[0].strip('"')
+                        extension = os.path.splitext(filename)[1]
+                        if extension:
+                            return response.content, extension
+                
+                # Fallback to mime type for extension
+                extension = mimetypes.guess_extension(content_type)
+                if not extension:
+                    # Common mappings that might be missing
+                    ext_map = {
+                        'application/pdf': '.pdf',
+                        'image/jpeg': '.jpg',
+                        'image/png': '.png',
+                        'application/zip': '.zip',
+                        'text/plain': '.txt'
+                    }
+                    extension = ext_map.get(content_type, '.bin')
+                
+                return response.content, extension
+
+        except Exception as e:
+            if verbose:
+                print(f"[thepipe] Download attempt failed: {str(e)}")
+            continue
+
+    # If all direct downloads fail, try export as last resort
+    if verbose:
+        print("[thepipe] Direct download failed, trying export as fallback...")
+    return try_export_url(file_id, original_url, verbose)
+
+def try_export_url(file_id: str, original_url: str, verbose: bool = False) -> Optional[Tuple[bytes, str]]:
+    """Try to export Google Workspace document."""
+    import requests
+
+    if verbose:
+        print("[thepipe] Attempting document export...")
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
 
-    for url, extension in urls_to_try:
+    export_formats = []
+    if '/presentation/' in original_url:
+        export_formats = [
+            ('pdf', '.pdf'),
+            ('txt', '.txt')
+        ]
+    elif '/document/' in original_url:
+        export_formats = [
+            ('docx', '.docx'),
+            ('pdf', '.pdf'),
+            ('txt', '.txt')
+        ]
+    elif '/spreadsheets/' in original_url:
+        export_formats = [
+            ('xlsx', '.xlsx'),
+            ('csv', '.csv'),
+            ('pdf', '.pdf')
+        ]
+    else:
+        if verbose:
+            print("[thepipe] Unknown document type")
+        return None
+
+    for format_type, extension in export_formats:
+        url = f"https://docs.google.com/{urlparse(original_url).path.split('/')[1]}/d/{file_id}/export?format={format_type}"
         try:
             if verbose:
-                print(f"[thepipe] Trying public access URL: {url}")
-            
-            response = requests.get(url, headers=headers, allow_redirects=True)
-            
-            if verbose:
-                print(f"[thepipe] Response status: {response.status_code}")
-            
-            if response.status_code != 200 or 'accounts.google.com' in response.url:
-                continue
-                
-            if b'Google Drive - Error' in response.content[:1000]:
-                continue
-
-            if 'content-disposition' in response.headers:
-                filename = response.headers['content-disposition']
-                if verbose:
-                    print(f"[thepipe] Found filename: {filename}")
-                filename_match = re.search(r'filename="([^"]*)"', filename)
-                if filename_match:
-                    _, ext = os.path.splitext(filename_match.group(1))
-                    if ext:
-                        extension = ext.split(';')[0]  # Remove any encoding info
-
-            if verbose:
-                print(f"[thepipe] Successfully accessed file with extension {extension}")
-            return response.content, extension
-
+                print(f"[thepipe] Trying export as {format_type}: {url}")
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                return response.content, extension
         except Exception as e:
             if verbose:
-                print(f"[thepipe] Error trying URL {url}: {str(e)}")
+                print(f"[thepipe] Export attempt failed: {str(e)}")
             continue
 
-    if verbose:
-        print("[thepipe] Could not access file through public URLs")
     return None
 
 def download_file(file_id: str, service) -> Tuple[bytes, str]:

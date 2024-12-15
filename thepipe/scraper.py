@@ -14,78 +14,38 @@ import zipfile
 from PIL import Image
 import requests
 import json
+
+from thepipe.file_utils import detect_source_type, find_audio_file, find_subtitle_files, find_video_file
+from thepipe.media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
 from .core import HOST_URL, THEPIPE_API_KEY, HOST_IMAGES, Chunk, make_image_url
 from .chunker import chunk_by_page, chunk_by_document, chunk_by_section, chunk_semantic, chunk_by_keywords
 import tempfile
-import mimetypes
 import dotenv
-from magika import Magika
 import markdownify
 dotenv.load_dotenv()
-from enum import Enum, auto
+from .web_utils import DEFAULT_AI_MODEL, DRIVE_DOMAINS, GIT_DOMAINS, SCRAPING_PROMPT, TWITTER_DOMAINS, extract_page_content, matches_domain, normalize_url
 from .enums import YouTubeEnum
 from typing import Union, Optional, Dict, Any, List
 yt_dlp = None
 dotenv.load_dotenv()
 
-def initialize_video_processing():
-    global yt_dlp
-    if yt_dlp is None:
-        import yt_dlp
-
-webvtt = None
-
-def initialize_subtitle_libraries():
-    global webvtt
-    if webvtt is None:
-        import webvtt
-
-@lru_cache(maxsize=1)
-def get_subtitle_parser():
-    initialize_subtitle_libraries()
-    return webvtt
-
-DRIVE_DOMAINS = ['https://drive.google.com','https://docs.google.com']
 FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
 FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
 GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", None)
-USER_AGENT_STRING: str = os.getenv("USER_AGENT_STRING", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
-MAX_WHISPER_DURATION = 600 # 10 minutes
-TWITTER_DOMAINS = ['https://twitter.com', 'https://www.twitter.com', 'https://x.com', 'https://www.x.com']
-GIT_DOMAINS = ['https://github.com','https://gitlab.com','https://bitbucket.org','https://git.*',  'https://*/git',  'https://*/gitlab','https://*/gitea','https://*/gerrit','https://dev.azure.com','https://codecommit.*.amazonaws.com','https://sourceforge.net','https://codeberg.org','https://gitea.io']
-SCRAPING_PROMPT = os.getenv("EXTRACTION_PROMPT", """An open source document is given. Output the entire extracted contents from the document in detailed markdown format.
-Be sure to correctly format markdown for headers, paragraphs, lists, tables, menus, equations, full text contents, etc.
-Always reply immediately with only markdown. Do not output anything else.""")
-DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o-mini")
 FILESIZE_LIMIT_MB = os.getenv("FILESIZE_LIMIT_MB", 50)
-VIDEO_PLATFORMS = {
-    "youtube", "youtu", "netflix", "amazon", "hulu", "disneyplus", "vimeo", 
-    "twitch", "tiktok", "dailymotion", "vevo", "kick",
-    "crunchyroll", "peacocktv", "hbomax", "roku", "pluto", 
-    "tubitv", "iqiyi", "v.qq", "youku", "bilibili", "flicknexs", 
-    "brightcove", "wistia", "jwplayer", "kaltura", "panopto", "vidyard", 
-    "vk", "rutube", "metacafe", "veoh", "ustream", "livestream", "periscope", 
-    "mixer", "younow", "smashcast", "niconico", "vlive", "afreecatv", 
-    "kakao", "naver", "line", "iflix", "hooq", "viu", "mubi"
-}
 
-def detect_source_type(source: str) -> str:
-    # otherwise, try to detect the file type by its extension
-    _, extension = os.path.splitext(source)
-    if extension:
-        if extension == '.ipynb':
-            # special case for notebooks, mimetypes is not familiar
-            return 'application/x-ipynb+json'
-        guessed_mimetype = mimetypes.guess_type(source)[0]
-        if guessed_mimetype:
-            return guessed_mimetype
-    # if that fails, try AI detection with Magika
-    magika = Magika()
-    with open(source, 'rb') as file:
-        result = magika.identify_bytes(file.read())
-    mimetype = result.output.mime_type
-    return mimetype
+# Global variables for lazy loading
+yt_dlp = None
 
+def initialize_video_processing():
+    """Initialize video processing libraries."""
+    global yt_dlp
+    if yt_dlp is None:
+        try:
+            import yt_dlp
+        except ImportError:
+            raise ImportError("yt-dlp library not found. Please install it with: pip install yt-dlp")
+        
 def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = False, verbose: bool = False, local: bool = False, chunking_method: Optional[Callable] = chunk_by_page, ai_model: Optional[str] = DEFAULT_AI_MODEL, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
 
     if not local:
@@ -338,19 +298,6 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
             doc.close()
     return chunks
 
-def get_images_from_markdown(text: str) -> List[Image.Image]:
-    image_urls = re.findall(r"!\[.*?\]\((.*?)\)", text)
-    images = []
-    for url in image_urls:
-        extension = os.path.splitext(urlparse(url).path)[1]
-        if extension in {'.jpg', '.jpeg', '.png'}:
-            img = Image.open(requests.get(url, stream=True).raw)
-        else:
-            # ignore incompatible image extractions
-            continue
-        images.append(img)
-    return images
-
 def scrape_image(file_path: str, text_only: bool = False) -> List[Chunk]:
     import pytesseract
     img = Image.open(file_path)
@@ -379,165 +326,6 @@ def scrape_spreadsheet(file_path: str, source_type: str) -> List[Chunk]:
         item_json = json.dumps(item, indent=4)
         chunks.append(Chunk(path=file_path, texts=[item_json]))
     return chunks
-
-def ai_extract_webpage_content(url: str, text_only: Optional[bool] = False, verbose: Optional[bool] = False, ai_model: Optional[str] = DEFAULT_AI_MODEL) -> Chunk:
-    from playwright.sync_api import sync_playwright
-    from openai import OpenAI
-
-    #import modal
-    #app_name = "scrape-ui"
-    #function_name = "get_ui_layout_preds"
-    #fn = modal.Function.lookup(app_name, function_name)
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        context = browser.new_context(user_agent=USER_AGENT_STRING)
-        page = context.new_page()
-        page.goto(url, wait_until='domcontentloaded')
-        
-        viewport_height = page.viewport_size['height']
-        total_height = page.evaluate("document.body.scrollHeight")
-        current_scroll_position = 0
-        scrolldowns, max_scrolldowns = 0, 3
-        images = []
-
-        while current_scroll_position < total_height and scrolldowns < max_scrolldowns:
-            page.wait_for_timeout(1000)
-            screenshot = page.screenshot(full_page=False)
-            img = Image.open(io.BytesIO(screenshot))
-            images.append(img)
-
-            current_scroll_position += viewport_height
-            page.evaluate(f"window.scrollTo(0, {current_scroll_position})")
-            scrolldowns += 1
-            total_height = page.evaluate("document.body.scrollHeight")
-        
-        browser.close()
-
-    if images:
-        # Vertically stack the images
-        total_height = sum(img.height for img in images)
-        max_width = max(img.width for img in images)
-        stacked_image = Image.new('RGB', (max_width, total_height))
-        y_offset = 0
-        for img in images:
-            stacked_image.paste(img, (0, y_offset))
-            y_offset += img.height
-
-        # Process the stacked image with the UI model
-        #figures = fn.remote(stacked_image)
-
-        # Process the stacked image with VLM
-        openrouter_client = OpenAI(
-            base_url=os.environ["LLM_SERVER_BASE_URL"],
-            api_key=os.environ["LLM_SERVER_API_KEY"],
-        )
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": make_image_url(stacked_image, host_images=HOST_IMAGES)},
-                    {"type": "text", "text": SCRAPING_PROMPT},
-                ]
-            },
-        ]
-        response = openrouter_client.chat.completions.create(
-            model=ai_model,
-            messages=messages,
-            temperature=0
-        )
-        llm_response = response.choices[0].message.content
-        chunk = Chunk(path=url, texts=[llm_response], images=[stacked_image])
-    else:
-        raise ValueError("Model received 0 images from webpage")
-
-    return chunk
-
-def extract_page_content(url: str, text_only: bool = False, verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> Chunk:
-    from urllib.parse import urlparse
-    from bs4 import BeautifulSoup
-    from playwright.sync_api import sync_playwright
-    import base64
-    import requests
-    
-    texts = []
-    images = []
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        context = browser.new_context(user_agent="USER_AGENT_STRING")
-        page = context.new_page()
-        page.goto(url, wait_until='domcontentloaded')
-        
-        # Scroll to the bottom of the page to load dynamic content
-        viewport_height = page.viewport_size['height']
-        total_height = page.evaluate("document.body.scrollHeight")
-        current_scroll_position = 0
-        scrolldowns, max_scrolldowns = 0, 20  # Finite to prevent infinite scroll
-        
-        while current_scroll_position < total_height and scrolldowns < max_scrolldowns:
-            page.wait_for_timeout(1000)  # Wait for dynamic content to load
-            current_scroll_position += viewport_height
-            page.evaluate(f"window.scrollTo(0, {current_scroll_position})")
-            scrolldowns += 1
-            total_height = page.evaluate("document.body.scrollHeight")
-        
-        # Extract HTML content
-        html_content = page.content()
-        
-        # Convert HTML to Markdown
-        soup = BeautifulSoup(html_content, 'html.parser')
-        markdown_content = markdownify.markdownify(str(soup), heading_style="ATX")
-        
-        # Remove excessive newlines in the markdown
-        markdown_content = re.sub(r'\n{3,}', '\n\n', markdown_content)
-        markdown_content = markdown_content.strip()
-
-        texts.append(markdown_content)
-        
-        if not text_only:
-            # Extract images from the page using heuristics
-            for img in page.query_selector_all('img'):
-                img_path = img.get_attribute('src')
-                if not img_path:
-                    continue
-                if img_path.startswith('data:image'):
-                    # Save base64 image to PIL Image
-                    decoded_data = base64.b64decode(img_path.split(',')[1])
-                    try:
-                        image = Image.open(BytesIO(decoded_data))
-                        images.append(image)
-                    except Exception as e:
-                        if verbose: print(f"[thepipe] Ignoring error loading image {img_path}: {e}")
-                        continue  # Ignore incompatible image extractions
-                else:
-                    try:
-                        image = Image.open(requests.get(img_path, stream=True).raw)
-                        images.append(image)
-                    except:
-                        if 'https://' not in img_path and 'http://' not in img_path:
-                            try:
-                                while img_path.startswith('/'):
-                                    img_path = img_path[1:]
-                                path_with_schema = urlparse(url).scheme + "://" + img_path
-                                image = Image.open(requests.get(path_with_schema, stream=True).raw)
-                                images.append(image)
-                            except:
-                                try:
-                                    path_with_schema_and_netloc = urlparse(url).scheme + "://" + urlparse(url).netloc + "/" + img_path
-                                    image = Image.open(requests.get(path_with_schema_and_netloc, stream=True).raw)
-                                    images.append(image)
-                                except:
-                                    if verbose: print(f"[thepipe] Ignoring error loading image {img_path}")
-                                    continue  # Ignore incompatible image extractions
-                        else:
-                            if verbose: print(f"[thepipe] Ignoring error loading image {img_path}")
-                            continue  # Ignore incompatible image extractions
-                
-        browser.close()
-    
-    return Chunk(path=url, texts=texts, images=images)
 
 # TODO: deprecate this in favor of Chunk.from_json or Chunk.from_message
 def create_chunk_from_data(result: Dict, host_images: bool) -> Chunk:
@@ -606,6 +394,8 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
         chunks = []
         try:
             if matches_domain(url, DRIVE_DOMAINS):
+                if verbose:
+                    print("[thepipe] Detected Google Drive/Docs URL, using drive scraper")
                 chunks = scrape_drive(url, text_only=text_only,
                                     ai_extraction=ai_extraction,
                                     verbose=verbose, options=options)
@@ -715,8 +505,13 @@ def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False)
         video.close()
     return chunks
 
-def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbose: bool = False, metadata_fields: Optional[List[YouTubeEnum]] = None, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbose: bool = False, 
+                   metadata_fields: Optional[List[YouTubeEnum]] = None, 
+                   options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """Scrape content from a YouTube URL."""
     initialize_video_processing()
+    if verbose:
+        print("[thepipe] Initializing YouTube content extraction...")
     
     ydl_opts = {
         'quiet': not verbose,
@@ -735,6 +530,7 @@ def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbo
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
+            'skip_download': False,  # Need to download for transcription
         })
     else:
         ydl_opts.update({
@@ -770,7 +566,10 @@ def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbo
 
     return chunks
 
-def process_video(ydl, video_info: Dict[str, Any], temp_dir: str, text_only: Optional[Union[bool, str]], verbose: bool, metadata_fields: Optional[List[YouTubeEnum]] = None) -> List[Chunk]:
+def process_video(ydl, video_info: Dict[str, Any], temp_dir: str, 
+                 text_only: Optional[Union[bool, str]], verbose: bool, 
+                 metadata_fields: Optional[List[YouTubeEnum]] = None) -> List[Chunk]:
+    """Process a single video and extract content based on specified options."""
     video_chunks = []
     video_url = video_info.get('webpage_url') or video_info.get('url')
     if not video_url:
@@ -785,8 +584,18 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str, text_only: Opt
         video_chunks.append(metadata_chunk)
 
         if text_only == 'transcribe':
-            # Directly download audio and transcribe
-            ydl.params['skip_download'] = False
+            # Direct transcription mode
+            if verbose:
+                print("[thepipe] Downloading audio for transcription...")
+            ydl.params.update({
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'skip_download': False
+            })
             ydl.process_ie_result(video_info, download=True)
             audio_file = find_audio_file(temp_dir, video_info['title'])
             if audio_file:
@@ -796,53 +605,63 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str, text_only: Opt
                 if verbose:
                     print(f"[thepipe] Failed to download audio for transcription: {video_url}")
                 video_chunks.append(Chunk(path=video_url, texts=["No transcription available"]))
-        elif text_only in [True, 'ai', 'uploaded']:
-            # Try to get subtitles
-            ydl.params['skip_download'] = True
-            ydl.process_ie_result(video_info, download=True)
-            subtitle_files = find_subtitle_files(temp_dir, video_info['title'])
-
-            if subtitle_files:
-                for subtitle_file in subtitle_files:
-                    subtitle_chunks = clean_subtitles(subtitle_file, video_url, debug=verbose)
-                    if subtitle_chunks:
-                        video_chunks.extend(subtitle_chunks)
-                        break  # Use the first meaningful subtitle file
-                    elif verbose:
-                        print(f"[thepipe] Subtitle file found but content is not meaningful: {subtitle_file}")
-
-            if len(video_chunks) == 1:  # Only metadata chunk
-                if verbose:
-                    print(f"[thepipe] No meaningful subtitles found for {text_only} option. Skipping transcription.")
-                video_chunks.append(Chunk(path=video_url, texts=[f"No {text_only} subtitles available"]))
-        else:  # text_only is False or None
-            # Try to get subtitles first
-            ydl.params['skip_download'] = True
-            ydl.process_ie_result(video_info, download=True)
-            subtitle_files = find_subtitle_files(temp_dir, video_info['title'])
-
-            if subtitle_files:
-                for subtitle_file in subtitle_files:
-                    subtitle_chunks = clean_subtitles(subtitle_file, video_url)
-                    if subtitle_chunks:
-                        video_chunks.extend(subtitle_chunks)
-                        break  # Use the first meaningful subtitle file
-                    elif verbose:
-                        print(f"[thepipe] Subtitle file found but content is not meaningful: {subtitle_file}")
-
-            # If no meaningful subtitles, download video
-            if len(video_chunks) == 1:  # Only metadata chunk
-                ydl.params['skip_download'] = False
-                ydl.params['format'] = 'bestvideo+bestaudio/best'
-                ydl.process_ie_result(video_info, download=True)
                 
-                video_file = find_video_file(temp_dir, video_info['title'])
-                if video_file:
+        elif text_only in [True, 'ai', 'uploaded']:
+            if verbose:
+                print("[thepipe] Attempting to extract subtitles...")
+            # First try to get subtitles
+            ydl.params.update({
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'skip_download': True
+            })
+            
+            if text_only == 'ai':
+                ydl.params['subtitleslangs'] = ['a.en,a.*', 'en,*']
+            elif text_only == 'uploaded':
+                ydl.params['subtitleslangs'] = ['en,*', 'a.en,a.*']
+            else:
+                ydl.params['subtitleslangs'] = ['en,*', 'a.en,a.*']
+                
+            try:
+                ydl.process_ie_result(video_info, download=True)
+                subtitle_files = find_subtitle_files(temp_dir, video_info['title'])
+                
+                if subtitle_files:
+                    for subtitle_file in subtitle_files:
+                        subtitle_chunks = clean_subtitles(subtitle_file, video_url, debug=verbose)
+                        if subtitle_chunks:
+                            video_chunks.extend(subtitle_chunks)
+                            break
+                
+                # If no subtitles found and we're in default mode, fall back to transcription
+                if not subtitle_files and text_only is True:
                     if verbose:
-                        print(f"[thepipe] Processing video file: {os.path.basename(video_file)}")
-                    video_chunks.extend(scrape_video(video_file, verbose=verbose, text_only=False))
-                else:
-                    video_chunks.append(Chunk(path=video_url, texts=["No video content available"]))
+                        print("[thepipe] No subtitles found, falling back to transcription...")
+                    # Update options for audio-only download
+                    ydl.params.update({
+                        'format': 'bestaudio/best',
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }],
+                        'skip_download': False
+                    })
+                    ydl.process_ie_result(video_info, download=True)
+                    audio_file = find_audio_file(temp_dir, video_info['title'])
+                    if audio_file:
+                        transcription_chunks = scrape_audio(audio_file, verbose=verbose)
+                        video_chunks.extend(transcription_chunks)
+                    else:
+                        video_chunks.append(Chunk(path=video_url, texts=["No transcription available"]))
+                elif not subtitle_files:
+                    video_chunks.append(Chunk(path=video_url, texts=[f"No {text_only} subtitles available"]))
+                    
+            except Exception as e:
+                if verbose:
+                    print(f"[thepipe] Error processing subtitles: {str(e)}")
+                video_chunks.append(Chunk(path=video_url, texts=[f"Error processing subtitles: {str(e)}"]))
 
     except Exception as e:
         if verbose:
@@ -850,73 +669,6 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str, text_only: Opt
         video_chunks.append(Chunk(path=video_url, texts=[f"Error: Unable to process video. {str(e)}"]))
 
     return video_chunks
-
-def clean_subtitles(subtitle_file: str, video_url: str, debug: bool = False) -> List[Chunk]:
-    webvtt = get_subtitle_parser()
-    captions = webvtt.read(subtitle_file)
-    
-    cleaned_entries = []
-    previous_entry = None
-    
-    for caption in captions:
-        text = re.sub(r'<[^>]+>', '', caption.text)
-        words = text.split()
-        
-        if previous_entry:
-            # Check for significant overlap with previous text
-            overlap = len(set(previous_entry['text'].split()[-5:]) & set(words)) / min(5, len(words))
-            if overlap < 0.5:  # Less than 50% overlap
-                cleaned_entries.append(previous_entry)
-                previous_entry = {'start': caption.start, 'end': caption.end, 'text': ' '.join(words)}
-            else:
-                # Merge with previous text, removing duplicates
-                merged_words = previous_entry['text'].split() + [word for word in words if word not in previous_entry['text'].split()[-5:]]
-                previous_entry['end'] = caption.end
-                previous_entry['text'] = ' '.join(merged_words)
-        else:
-            previous_entry = {'start': caption.start, 'end': caption.end, 'text': ' '.join(words)}
-    
-    if previous_entry:
-        cleaned_entries.append(previous_entry)
-    
-    chunks = []
-    for entry in cleaned_entries:
-        formatted_text = f"[{entry['start']} --> {entry['end']}]  {entry['text'].strip()}"
-        chunks.append(Chunk(path=video_url, texts=[formatted_text]))
-    
-    if debug:
-        with open("original_transcript.txt", "w", encoding="utf-8") as f:
-            for caption in captions:
-                f.write(f"[{caption.start} --> {caption.end}] {caption.text}\n")
-    
-    return chunks
-
-def find_subtitle_files(directory: str, video_title: str) -> List[str]:
-    subtitle_files = []
-    for file in os.listdir(directory):
-        if file.startswith(video_title) and file.endswith('.vtt'):
-            subtitle_files.append(os.path.join(directory, file))
-    return subtitle_files
-
-def find_audio_file(directory: str, video_title: str) -> Optional[str]:
-    for file in os.listdir(directory):
-        if file.startswith(video_title) and file.endswith(('.mp3', '.m4a', '.wav')):
-            return os.path.join(directory, file)
-    return None
-
-def find_video_file(directory: str, video_title: str) -> Optional[str]:
-    for file in os.listdir(directory):
-        if file.startswith(video_title) and file.endswith(('.mp4', '.webm', '.mkv')):
-            return os.path.join(directory, file)
-    return None
-
-def is_subtitle_meaningful(subtitle_text: str) -> bool:
-    # Remove timestamps and empty lines
-    content_lines = [line.strip() for line in subtitle_text.split('\n') 
-                     if line.strip() and not line.strip().replace('->', '').replace(':', '').isdigit()]
-    
-    # Check if there's meaningful content (more than just a few short words)
-    return len(content_lines) > 5 and any(len(line.split()) > 3 for line in content_lines)
 
 def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     import whisper
@@ -936,14 +688,6 @@ def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[s
     if verbose:
         print(f"[thepipe] Transcription completed for {file_path}")
     return [Chunk(path=file_path, texts=[transcription_text])]
-
-def format_timestamp(seconds: float, chunk_index: int = 0, chunk_duration: int = 0) -> str:
-    total_seconds = chunk_index * chunk_duration + seconds
-    hours = int(total_seconds // 3600)
-    minutes = int((total_seconds % 3600) // 60)
-    seconds = total_seconds % 60
-    milliseconds = int((seconds - int(seconds)) * 1000)
-    return f"{hours:02}:{minutes:02}:{int(seconds):02}.{milliseconds:03}"
 
 def scrape_github(github_url: str, include_regex: Optional[str] = None,
                  include_patterns: Optional[List[str]] = None, 
@@ -1198,21 +942,3 @@ def scrape_tweet(url: str, text_only: bool = False, verbose: bool = False) -> Li
         main_chunk.images = images
 
     return chunks
-
-def normalize_url(url: str) -> str:
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
-    return url
-
-def matches_domain(url: str, domains: List[str]) -> bool:
-    url = normalize_url(url)
-    
-    for domain in domains:
-        pattern = domain.replace('*', '.*')
-        if pattern.startswith('https://'):
-            pattern = f'https?://{pattern[8:]}'
-        if not pattern.startswith('https?://www.'):
-            pattern = pattern.replace('https?://', 'https?://(www.)?')
-        if re.match(f'^{pattern}', url):
-            return True
-    return False
