@@ -5,7 +5,7 @@ from io import BytesIO
 import io
 import math
 import re
-from typing import  List, Dict, Any, Callable, Optional,Tuple, Generator, Union
+from typing import List, Dict, Any, Callable, Optional, Tuple, Generator, Union
 import glob
 import os
 import tempfile
@@ -18,14 +18,20 @@ import json
 from .drive_utils import extract_drive_id, process_drive_content
 from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, find_video_file
 from .media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
-from .core import HOST_URL, THEPIPE_API_KEY, HOST_IMAGES, Chunk, make_image_url
+from .web_utils import (
+    HOST_URL, THEPIPE_API_KEY, HOST_IMAGES, 
+    DEFAULT_AI_MODEL, SCRAPING_PROMPT,
+    DRIVE_DOMAINS, GIT_DOMAINS, TWITTER_DOMAINS,
+    extract_page_content, matches_domain, normalize_url
+)
+from .enums import YouTubeEnum
+from .core import Chunk, make_image_url
 from .chunker import chunk_by_page
+
 import tempfile
 import dotenv
 import markdownify
 dotenv.load_dotenv()
-
-from typing import List, Dict, Tuple, Optional
 
 FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
 FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
@@ -43,7 +49,7 @@ def initialize_video_processing():
             import yt_dlp
         except ImportError:
             raise ImportError("yt-dlp library not found. Please install it with: pip install yt-dlp")
-        
+                
 def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = False, verbose: bool = False, local: bool = False, chunking_method: Optional[Callable] = chunk_by_page, ai_model: Optional[str] = DEFAULT_AI_MODEL, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
 
     if not local:
@@ -55,10 +61,10 @@ def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = Fa
                 data={
                     "text_only": str(text_only).lower(),
                     "ai_extraction": str(ai_extraction).lower(),
-                    "chunking_method": (
+                    "chunking_method": 
                         chunking_method.__name__,
                     'options': json.dumps(options) if options else None if chunking_method else None
-                    ),
+                    ,
                 },
             )
         response.raise_for_status()
@@ -395,27 +401,6 @@ def scrape_spreadsheet(file_path: str, source_type: str) -> List[Chunk]:
         item_json = json.dumps(item, indent=4)
         chunks.append(Chunk(path=file_path, texts=[item_json]))
     return chunks
-
-# TODO: deprecate this in favor of Chunk.from_json or Chunk.from_message
-def create_chunk_from_data(result: Dict, host_images: bool) -> Chunk:
-    texts = [
-        content["text"] for content in result["content"] if content["type"] == "text"
-    ]
-
-    images = []
-    for content in result["content"]:
-        if content["type"] == "image_url":
-            if host_images:
-                # If images are hosted, we keep the URL as is
-                images.append(content["image_url"])
-            else:
-                # If images are not hosted, we decode the base64 string
-                image_data = content["image_url"].split(",")[1]
-                image = Image.open(BytesIO(base64.b64decode(image_data)))
-                images.append(image)
-
-    return Chunk(path=result["source"], texts=texts, images=images)
-
 
 def scrape_url(url: str, include_regex: Optional[str] = None, 
                include_patterns: Optional[List[str]] = None, 
@@ -776,17 +761,9 @@ def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[s
 
 
 def scrape_github(
-    github_url: str,
-    include_regex: Optional[str] = None,
-                 include_patterns: Optional[List[str]] = None, 
-                
-    text_only: bool = False,
-    ai_extraction: bool = False,
-                
-    branch: str = "main",
-    verbose: bool = False,
-,
-                 options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    github_url: str,include_regex: Optional[str] = None,include_patterns: Optional[List[str]] = None,
+    text_only: bool = False,ai_extraction: bool = False,branch: str = "main",verbose: bool = False,
+    options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Scrape content from a GitHub repository with optional authentication."""
     with tempfile.TemporaryDirectory() as temp_dir:
         # Try unauthenticated clone first
