@@ -16,7 +16,25 @@ class test_scraper(unittest.TestCase):
             for file in os.listdir(self.outputs_directory):
                 os.remove(os.path.join(self.outputs_directory, file))
             os.rmdir(self.outputs_directory)
-    
+
+    def test_scrape_html(self):
+        filepath = self.files_directory+"/example.html"
+        chunks = scraper.scrape_file(filepath, verbose=True, local=True)
+        # verify it scraped the url into chunks
+        self.assertEqual(type(chunks), list)
+        self.assertNotEqual(len(chunks), 0)
+        # verify it scraped markdown data
+        self.assertTrue(any(len(chunk.texts) > 0 for chunk in chunks))
+        # verify it scraped to markdown correctly
+        print("html to markdown: ", chunks[0].texts)
+        self.assertTrue(any('# Heading 1' in chunk.texts[0] for chunk in chunks))
+        self.assertTrue(any('## Heading 2' in chunk.texts[0] for chunk in chunks))
+        self.assertTrue(any('### Heading 3' in chunk.texts[0] for chunk in chunks))
+        self.assertTrue(any('| Name | Age | Country |' in chunk.texts[0] for chunk in chunks))
+        self.assertTrue(any('some **bold text** and some *italic text*' in chunk.texts[0] for chunk in chunks))
+        # ensure javascript was not scraped
+        self.assertFalse(any('function highlightText()' in chunk.texts[0] for chunk in chunks))
+
     def test_scrape_zip(self):
         chunks = scraper.scrape_file(self.files_directory+"/example.zip", verbose=True, local=True)
         # verify it scraped the zip file into chunks
@@ -40,15 +58,15 @@ class test_scraper(unittest.TestCase):
         self.assertTrue(any(len(chunk.images) > 0 for chunk in chunks))
 
     # requires modal token to run
-    #def test_scrape_pdf_with_ai_extraction(self):
-    #    chunks = scraper.scrape_file("tests/files/example.pdf", ai_extraction=True, verbose=True, local=True)
-    #    # verify it scraped the pdf file into chunks
-    #    self.assertEqual(type(chunks), list)
-    #    self.assertNotEqual(len(chunks), 0)
-    #    self.assertEqual(type(chunks[0]), core.Chunk)
-    #    # verify it scraped the data
-    #    for chunk in chunks:
-    #        self.assertIsNotNone(chunk.texts or chunk.images)
+    def test_scrape_pdf_with_ai_extraction(self):
+        chunks = scraper.scrape_file("tests/files/example.pdf", ai_extraction=True, verbose=True, local=True)
+        # verify it scraped the pdf file into chunks
+        self.assertEqual(type(chunks), list)
+        self.assertNotEqual(len(chunks), 0)
+        self.assertEqual(type(chunks[0]), core.Chunk)
+        # verify it scraped the data
+        for chunk in chunks:
+            self.assertIsNotNone(chunk.texts or chunk.images)
     
     def test_scrape_docx(self):
         chunks = scraper.scrape_file(self.files_directory+"/example.docx", verbose=True, local=True)
@@ -147,6 +165,18 @@ class test_scraper(unittest.TestCase):
         # verify file url scrape result
         chunks = scraper.scrape_url('https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf', local=True)
         self.assertEqual(len(chunks), 1)
+
+    def test_scrape_url_with_ai_extraction(self):
+        # verify web page scrape result with ai extraction
+        chunks = scraper.scrape_url('https://en.wikipedia.org/wiki/Piping', ai_extraction=True, local=True)
+        for chunk in chunks:
+            self.assertEqual(type(chunk), core.Chunk)
+            self.assertEqual(chunk.path, 'https://en.wikipedia.org/wiki/Piping')
+        # assert if any of the texts in chunk.texts contains 'pipe'
+        self.assertGreater(len(chunk.texts), 0)
+        self.assertIn('pipe', chunk.texts[0])
+        # verify if at least one image was scraped
+        self.assertTrue(any(len(chunk.images) > 0 for chunk in chunks))
 
     @unittest.skipUnless(os.environ.get('GITHUB_TOKEN'), "requires GITHUB_TOKEN")
     def test_scrape_github(self):
