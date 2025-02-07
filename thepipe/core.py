@@ -223,13 +223,31 @@ def save_outputs(
     if not os.path.exists("outputs"):
         os.makedirs("outputs")
     text = ""
+    current_path = None
+    page_number = 1
 
-    # Save the text and images to the outputs directory
-    for i, chunk in enumerate(chunks):
-        if chunk is None:
+    def is_paginated_format(path: str) -> bool:
+        """Check if the file format typically has pages."""
+        return path.lower().endswith('.pdf')
+
+    # First write: output with minimal headers
+    for chunk in chunks:
+        if chunk is None or (not chunk.texts and not chunk.images):
             continue
-        if chunk.path is not None:
-            text += f"{chunk.path}:\n"
+
+        # Only write path when it changes
+        if chunk.path != current_path:
+            current_path = chunk.path
+            if current_path is not None:
+                if text:  # Add spacing between documents
+                    text += "\n"
+                text += f"{current_path}\n\n"
+            page_number = 1
+        elif current_path and is_paginated_format(current_path):
+            # Just add page number for PDFs
+            text += f"\n{page_number}\n\n"
+            page_number += 1
+
         if chunk.texts:
             for chunk_text in chunk.texts:
                 text += f"```\n{chunk_text}\n```\n"
@@ -241,7 +259,8 @@ def save_outputs(
                     if verbose:
                         print(f"[thepipe] Error saving image at index {j} in chunk {i}: {str(e)}")
 
-    # Save the text
+    # Clean up excessive newlines and write
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
     with open("outputs/prompt.txt", "w", encoding="utf-8") as file:
         file.write(text)
 
@@ -258,34 +277,37 @@ def save_outputs(
             print(f"[thepipe] Estimated {estimated_tokens} tokens saved to outputs folder (based on character count)")
         print(f"[thepipe] Outputs saved to 'outputs' folder")
 
-
-
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compress project files into a context prompt."
+        description="Process files or display cookies."
     )
     parser.add_argument(
-        "source", type=str, help="The source file or directory to compress."
+        "source", type=str, help="The source file, directory, or URL to process"
     )
     group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--include_regex",
-        type=str, nargs='?', const='.*',
-        default=None, 
-                      
-        help="Regex pattern to match in a directory. Use quotes for patterns with special characters.",
-    )
-    group.add_argument('--include_pattern', type=str, nargs='?', const='*', default=None, 
-                       help='Glob pattern to match files in a directory (e.g., "*.tsx"). Use quotes for patterns with special characters.')    
-    parser.add_argument(
-        "--ai_extraction",
-        action="store_true",
-        help="Use ai_extraction to extract text from images.",
-    )
-    parser.add_argument(
-        "--text_only", action="store_true", help="Extract only text from the source."
-    )
-    parser.add_argument("--verbose", action="store_true", help="Print status messages.")
-    parser.add_argument("--local", action="store_true", help="Use local processing instead of API.")
+    group.add_argument('--include_regex', type=str, nargs='?', const='.*', default=None, 
+                       help='Regex pattern to match in a directory. Use quotes for patterns with special characters.')
+    group.add_argument('--include_patterns', type=str, nargs='+', default=None,
+                       help='Glob patterns to match files in a directory (e.g., "*.tsx" "*.ts"). Use quotes for patterns with special characters.')
+    parser.add_argument('--ai_extraction', action='store_true', help='Use ai_extraction to extract text from images.')
+    parser.add_argument('--text_only', nargs='?', const='default', default=None, 
+                        choices=['default', 'transcribe', 'ai', 'uploaded'],
+                        help='Extract only text from the source. Video Options: default (try all methods), transcribe (force local transcription), ai (prefer AI-generated), uploaded (prefer uploaded)')
+    parser.add_argument('--verbose', action='store_true', help='Print status messages.')
+    parser.add_argument('--local', action='store_true', help='Use local processing instead of API.')
+    parser.add_argument('--options', type=str, help='JSON string of type-specific options')
+    parser.add_argument('--browser_type', type=str, choices=['chrome', 'firefox', 'edge', 'brave', 'safari'],
+                       help='Specific browser to extract cookies from')
+    parser.add_argument('--show_cookies', nargs='?', const='format', choices=['format', 'credentials'],
+                       help='Display cookies instead of processing content. Use "credentials" for full cookie data.')
+
     args = parser.parse_args()
+    
+    if args.options:
+        try:
+            args.options = json.loads(args.options)
+        except json.JSONDecodeError:
+            print("Error: Invalid JSON in options")
+            exit(1)
+    
     return args
