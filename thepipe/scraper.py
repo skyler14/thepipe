@@ -24,11 +24,8 @@ import tempfile
 import dotenv
 import markdownify
 dotenv.load_dotenv()
-from .web_utils import DEFAULT_AI_MODEL, DRIVE_DOMAINS, GIT_DOMAINS, SCRAPING_PROMPT, TWITTER_DOMAINS, extract_page_content, matches_domain, normalize_url
-from .enums import YouTubeEnum
-from typing import Union, Optional, Dict, Any, List
-yt_dlp = None
-dotenv.load_dotenv()
+
+from typing import List, Dict, Tuple, Optional
 
 FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
 FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
@@ -50,32 +47,51 @@ def initialize_video_processing():
 def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = False, verbose: bool = False, local: bool = False, chunking_method: Optional[Callable] = chunk_by_page, ai_model: Optional[str] = DEFAULT_AI_MODEL, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
 
     if not local:
-        with open(filepath, 'rb') as f:
+        with open(filepath, "rb") as f:
             response = requests.post(
                 url=f"{HOST_URL}/scrape",
                 headers={"Authorization": f"Bearer {THEPIPE_API_KEY}"},
-                files={'files': (os.path.basename(filepath), f)},
+                files={"files": (os.path.basename(filepath), f)},
                 data={
-                    'text_only': str(text_only).lower(),
-                    'ai_extraction': str(ai_extraction).lower(),
-                    'chunking_method': chunking_method.__name__,
-                    'options': json.dumps(options) if options else None
-                }
+                    "text_only": str(text_only).lower(),
+                    "ai_extraction": str(ai_extraction).lower(),
+                    "chunking_method": (
+                        chunking_method.__name__,
+                    'options': json.dumps(options) if options else None if chunking_method else None
+                    ),
+                },
             )
-        if "error" in response.content.decode('utf-8'):
-            error_message = json.loads(response.content.decode('utf-8'))['error']
-            raise ValueError(f"Error scraping {filepath}: {error_message}")
         response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            # each line is its own JSON object
+            if not line.strip():
+                continue  # skip blank lines
+            data = json.loads(line)
+            # If the server sent an error for this chunk, handle it
+            if "error" in data:
+                raise ValueError(f"Error scraping: {data['error']}")
+
         chunks = []
         for line in response.iter_lines():
             if line:
                 data = json.loads(line)
-                if 'result' in data:
+                if "result" in data:
                     chunk = Chunk(
-                        path=data['result']['source'],
-                        texts=[content['text'] for content in data['result']['content'] if content['type'] == 'text'],
-                        images=[Image.open(BytesIO(base64.b64decode(content['image_url'].split(',')[1]))) 
-                                for content in data['result']['content'] if content['type'] == 'image_url']
+                        path=data["result"]["source"],
+                        texts=[
+                            content["text"]
+                            for content in data["result"]["content"]
+                            if content["type"] == "text"
+                        ],
+                        images=[
+                            Image.open(
+                                BytesIO(
+                                    base64.b64decode(content["image_url"].split(",")[1])
+                                )
+                            )
+                            for content in data["result"]["content"]
+                            if content["type"] == "image_url"
+                        ],
                     )
                     chunks.append(chunk)
         return chunks
@@ -87,7 +103,7 @@ def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = Fa
         if verbose:
             print(f"[thepipe] Unsupported source type: {filepath}")
         return scraped_chunks
-    if verbose: 
+    if verbose:
         print(f"[thepipe] Scraping {source_type}: {filepath}...")
     if source_type == 'application/pdf':
         scraped_chunks = scrape_pdf(file_path=filepath, ai_extraction=ai_extraction, text_only=text_only, verbose=verbose, ai_model=ai_model, options=options)
@@ -115,18 +131,22 @@ def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = Fa
         try:
             scraped_chunks = scrape_plaintext(file_path=filepath)
         except Exception as e:
-            if verbose: 
+            if verbose:
                 print(f"[thepipe] Error extracting from {filepath}: {e}")
-    if verbose: 
+    if verbose:
         if scraped_chunks:
             print(f"[thepipe] Extracted from {filepath}")
         else:
             print(f"[thepipe] No content extracted from {filepath}")
-    scraped_chunks = chunking_method(scraped_chunks)
+    if chunking_method:
+        scraped_chunks = chunking_method(scraped_chunks)
     return scraped_chunks
 
-def scrape_html(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+
+def scrape_html(
+    file_path: str, verbose: bool = False, text_only: bool = False
+) -> List[Chunk]:
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         html_content = file.read()
     markdown_content = markdownify.markdownify(html_content, heading_style="ATX")
     if text_only:
@@ -134,8 +154,9 @@ def scrape_html(file_path: str, verbose: bool = False, text_only: bool = False) 
     images = get_images_from_markdown(html_content)
     return [Chunk(path=file_path, texts=[markdown_content], images=images)]
 
+
 def scrape_plaintext(file_path: str) -> List[Chunk]:
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         text = file.read()
     return [Chunk(path=file_path, texts=[text])]
 
@@ -172,14 +193,14 @@ def scrape_directory(dir_path: str, include_regex: Optional[str] = None, include
     with ThreadPoolExecutor() as executor:
         results = executor.map(
             lambda file_path: scrape_file(
-                filepath=file_path, 
-                ai_extraction=ai_extraction, 
-                text_only=text_only, 
-                verbose=verbose, 
+                filepath=file_path,
+                ai_extraction=ai_extraction,
+                text_only=text_only,
+                verbose=verbose,
                 local=local,
-                options=options
-            ), 
-            all_files
+                options=options,
+            ),
+            all_files,
         )
         for result in results:
             extraction.extend(result)
@@ -189,7 +210,7 @@ def scrape_directory(dir_path: str, include_regex: Optional[str] = None, include
 def scrape_zip(file_path: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False) -> List[Chunk]:
     chunks = []
     with tempfile.TemporaryDirectory() as temp_dir:
-        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+        with zipfile.ZipFile(file_path, "r") as zip_ref:
             zip_ref.extractall(temp_dir)
         chunks =scrape_directory(dir_path=temp_dir, include_regex=include_regex, include_patterns=include_patterns, verbose=verbose, ai_extraction=ai_extraction, text_only=text_only, local=local)
     return chunks
@@ -210,7 +231,8 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
             num_pages = len(doc)
 
             if num_pages > MAX_PAGES:
-                return f"Error: PDF has {num_pages} pages (max is {MAX_PAGES} for AI extraction)."
+                err = f"Error: PDF has {num_pages} pages (max is {MAX_PAGES} for AI extraction)."
+                raise Exception(err)
 
             openrouter_client = OpenAI(
                 base_url=os.environ.get("LLM_SERVER_BASE_URL"),
@@ -227,34 +249,49 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "image_url", "image_url": make_image_url(image, host_images=HOST_IMAGES)},
-                            {"type": "text", "text": f"```{text}```\n{SCRAPING_PROMPT}"},
-                        ]
+                            {
+                                "type": "image_url",
+                                "image_url": make_image_url(
+                                    image, host_images=HOST_IMAGES
+                                ),
+                            },
+                            {
+                                "type": "text",
+                                "text": f"```{text}```\n{SCRAPING_PROMPT}",
+                            },
+                        ],
                     },
                 ]
                 response = openrouter_client.chat.completions.create(
-                    model=ai_model,
+                    model=ai_model if ai_model else DEFAULT_AI_MODEL,
                     messages=messages,
-                    temperature=0
+                    temperature=0,
                 )
                 try:
-                    llm_response = response.choices[0].message.content.strip()
-                    
+                    llm_response = response.choices[0].message.content
+                    if not llm_response:
+                        raise Exception(
+                            f"Failed to receive a message content from LLM Response: {response}"
+                        )
+
                     # remove markdown codeboxes if they are present
-                    if llm_response.startswith("```markdown"):
-                        llm_response = llm_response[len("```markdown"):]
-                    elif llm_response.startswith("```"):
-                        llm_response = llm_response[len("```"):]
-                    if llm_response.endswith("```"):
-                        llm_response = llm_response[:-len("```")]
                     llm_response = llm_response.strip()
+                    if llm_response.startswith("```markdown"):
+                        llm_response = llm_response[len("```markdown") :]
+                    elif llm_response.startswith("```"):
+                        llm_response = llm_response[len("```") :]
+                    if llm_response.endswith("```"):
+                        llm_response = llm_response[: -len("```")]
 
                     return page_num, llm_response, image
                 except Exception as e:
                     raise ValueError(f"{e} (unable to read LLM response: {response})")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(process_page, page_num) for page_num in range(num_pages)]
+                futures = [
+                    executor.submit(process_page, page_num)
+                    for page_num in range(num_pages)
+                ]
                 page_results = OrderedDict()
                 for future in concurrent.futures.as_completed(futures):
                     page_num, llm_response, image = future.result()
@@ -263,20 +300,30 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
             chunks = []
             for page_num in sorted(page_results.keys()):
                 llm_response, image = page_results[page_num]
-                chunks.append(Chunk(path=file_path, texts=[llm_response], images=[] if text_only else [image]))
+                chunks.append(
+                    Chunk(
+                        path=file_path,
+                        texts=[llm_response],
+                        images=[] if text_only else [image],
+                    )
+                )
 
             return chunks
     else:
         # if not using AI extraction, for each page, extract markdown and (optionally) full page images
         import fitz
+
         doc = fitz.open(file_path)
         try:
             import pymupdf4llm
-            md_reader = pymupdf4llm.helpers.pymupdf_rag.to_markdown(doc, page_chunks=True)
+
+            md_reader = pymupdf4llm.helpers.pymupdf_rag.to_markdown(
+                doc, page_chunks=True
+            )
             for i, page in enumerate(doc):
                 text = md_reader[i]["text"]
                 # remove excessive newlines
-                text = re.sub(r'\n{3,}', '\n\n', text)
+                text = re.sub(r"\n{3,}", "\n\n", text)
                 text = text.strip()
                 if text_only:
                     chunks.append(Chunk(path=file_path, texts=[text]))
@@ -286,7 +333,7 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
                     chunks.append(Chunk(path=file_path, texts=[text], images=[img]))
             doc.close()
         except:
-            # try with default pumupdf, since pymupdf4llm often fails
+            # try with default pumupdf if pymupdf4llm fails
             for i in range(len(doc)):
                 page = doc[i]
                 text = page.get_text()
@@ -299,8 +346,24 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
             doc.close()
     return chunks
 
+
+def get_images_from_markdown(text: str) -> List[Image.Image]:
+    image_urls = re.findall(r"!\[.*?\]\((.*?)\)", text)
+    images = []
+    for url in image_urls:
+        extension = os.path.splitext(urlparse(url).path)[1]
+        if extension in {".jpg", ".jpeg", ".png"}:
+            img = Image.open(requests.get(url, stream=True).raw)
+        else:
+            # ignore incompatible image extractions
+            continue
+        images.append(img)
+    return images
+
+
 def scrape_image(file_path: str, text_only: bool = False) -> List[Chunk]:
     import pytesseract
+
     img = Image.open(file_path)
     img.load()  # needed to close the file
     chunks = []
@@ -311,44 +374,48 @@ def scrape_image(file_path: str, text_only: bool = False) -> List[Chunk]:
         chunks.append(Chunk(path=file_path, images=[img]))
     return chunks
 
+
 def scrape_spreadsheet(file_path: str, source_type: str) -> List[Chunk]:
     import pandas as pd
-    if source_type == 'application/vnd.ms-excel':
+
+    if source_type == "application/vnd.ms-excel":
         df = pd.read_csv(file_path)
-    elif source_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+    elif (
+        source_type
+        == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ):
         df = pd.read_excel(file_path)
     else:
         raise ValueError("Unsupported file format")
-    dicts = df.to_dict(orient='records')
+    dicts = df.to_dict(orient="records")
     chunks = []
     for i, item in enumerate(dicts):
         # format each row as json along with the row index
-        item['row index'] = i
+        item["row index"] = i
         item_json = json.dumps(item, indent=4)
         chunks.append(Chunk(path=file_path, texts=[item_json]))
     return chunks
 
 # TODO: deprecate this in favor of Chunk.from_json or Chunk.from_message
 def create_chunk_from_data(result: Dict, host_images: bool) -> Chunk:
-    texts = [content['text'] for content in result['content'] if content['type'] == 'text']
-    
+    texts = [
+        content["text"] for content in result["content"] if content["type"] == "text"
+    ]
+
     images = []
-    for content in result['content']:
-        if content['type'] == 'image_url':
+    for content in result["content"]:
+        if content["type"] == "image_url":
             if host_images:
                 # If images are hosted, we keep the URL as is
-                images.append(content['image_url'])
+                images.append(content["image_url"])
             else:
                 # If images are not hosted, we decode the base64 string
-                image_data = content['image_url'].split(',')[1]
+                image_data = content["image_url"].split(",")[1]
                 image = Image.open(BytesIO(base64.b64decode(image_data)))
                 images.append(image)
-    
-    return Chunk(
-        path=result['source'],
-        texts=texts,
-        images=images
-    )
+
+    return Chunk(path=result["source"], texts=texts, images=images)
+
 
 def scrape_url(url: str, include_regex: Optional[str] = None, 
                include_patterns: Optional[List[str]] = None, 
@@ -381,11 +448,16 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
         }
         
         response = requests.post(endpoint, headers=headers, data=data, stream=True)
-        if "error" in response.content.decode('utf-8'):
-            error_message = json.loads(response.content.decode('utf-8'))['error']
-            raise ValueError(f"Error scraping {url}: {error_message}")
-            
         response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            # each line is its own JSON object
+            if not line.strip():
+                continue  # skip blank lines
+            data = json.loads(line)
+            # If the server sent an error for this chunk, handle it
+            if "error" in data:
+                raise ValueError(f"Error scraping: {data['error']}")
+
         chunks = []
         for line in response.iter_lines():
             if line:
@@ -489,21 +561,25 @@ def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False)
             frame = video.get_frame(frame_time)
             image = Image.fromarray(frame)
             # save the audio to a temporary file
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio_file:
+            with tempfile.NamedTemporaryFile(
+                suffix=".wav", delete=False
+            ) as temp_audio_file:
                 audio_path = temp_audio_file.name
             audio = video.subclip(start_time, end_time).audio
             transcription = None
             # transcribe it
             if audio is not None:
-                audio.write_audiofile(audio_path, codec='pcm_s16le')
+                audio.write_audiofile(audio_path, codec="pcm_s16le")
                 result = model.transcribe(audio=audio_path, verbose=verbose)
                 # Format transcription with timestamps
                 formatted_transcription = []
-                for segment in result['segments']:
-                    start = format_timestamp(segment['start'], i, MAX_WHISPER_DURATION)
-                    end = format_timestamp(segment['end'], i, MAX_WHISPER_DURATION)
-                    formatted_transcription.append(f"[{start} --> {end}]  {segment['text']}")
-                transcription = '\n'.join(formatted_transcription)
+                for segment in result["segments"]:
+                    start = format_timestamp(segment["start"], i, MAX_WHISPER_DURATION)
+                    end = format_timestamp(segment["end"], i, MAX_WHISPER_DURATION)
+                    formatted_transcription.append(
+                        f"[{start} --> {end}]  {segment['text']}"
+                    )
+                transcription = "\n".join(formatted_transcription)
                 os.remove(audio_path)
             texts = [transcription] if transcription else []
             images = [image] if not text_only else []
@@ -680,16 +756,17 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str,
 
 def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     import whisper
+
     model = whisper.load_model("base")
     if verbose:
         print(f"[thepipe] Transcribing audio file: {file_path}")
     result = model.transcribe(audio=file_path, verbose=verbose)
     # Format transcription with timestamps
     transcript = []
-    for segment in result['segments']:
-        start = format_timestamp(segment['start'], 0, 0)
-        end = format_timestamp(segment['end'], 0, 0)
-        if segment['text'].strip():
+    for segment in result["segments"]:
+        start = format_timestamp(segment["start"], 0, 0)
+        end = format_timestamp(segment["end"], 0, 0)
+        if segment["text"].strip():
             transcript.append(f"[{start} --> {end}]  {segment['text']}")
     # join the formatted transcription into a single string
     transcription_text = '\n'.join(transcript)
@@ -697,10 +774,18 @@ def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[s
         print(f"[thepipe] Transcription completed for {file_path}")
     return [Chunk(path=file_path, texts=[transcription_text])]
 
-def scrape_github(github_url: str, include_regex: Optional[str] = None,
+
+def scrape_github(
+    github_url: str,
+    include_regex: Optional[str] = None,
                  include_patterns: Optional[List[str]] = None, 
-                 text_only: bool = False, ai_extraction: bool = False,
-                 branch: str = 'main', verbose: bool = False,
+                
+    text_only: bool = False,
+    ai_extraction: bool = False,
+                
+    branch: str = "main",
+    verbose: bool = False,
+,
                  options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Scrape content from a GitHub repository with optional authentication."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -753,17 +838,17 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
 
     # helper function to iterate through blocks in the document
     def iter_block_items(parent):
-        if parent.__class__.__name__ == 'Document':
+        if parent.__class__.__name__ == "Document":
             parent_elm = parent.element.body
-        elif parent.__class__.__name__ == '_Cell':
+        elif parent.__class__.__name__ == "_Cell":
             parent_elm = parent._tc
         else:
             raise ValueError("Unsupported parent type")
         # iterate through each child element in the parent element
         for child in parent_elm.iterchildren():
-            if child.__class__.__name__ == 'CT_P':
+            if child.__class__.__name__ == "CT_P":
                 yield Paragraph(child, parent)
-            elif child.__class__.__name__ == 'CT_Tbl':
+            elif child.__class__.__name__ == "CT_Tbl":
                 yield Table(child, parent)
 
     # helper function to read tables in the document
@@ -780,9 +865,9 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
 
     # Define namespaces
     nsmap = {
-        'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-        'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
-        'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
+        "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     }
     chunks = []
     image_counter = 0
@@ -797,17 +882,25 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
                 if not text_only:
                     # "runs" are the smallest units in a paragraph
                     for run in block.runs:
-                        if 'pic:pic' in run.element.xml:
+                        if "pic:pic" in run.element.xml:
                             # extract images from the paragraph
-                            for pic in run.element.findall('.//pic:pic', nsmap):
-                                cNvPr = pic.find('.//pic:cNvPr', nsmap)
-                                name_attr = cNvPr.get("name") if cNvPr is not None else f"image_{image_counter}"
-                                
-                                blip = pic.find('.//a:blip', nsmap)
+                            for pic in run.element.findall(".//pic:pic", nsmap):
+                                cNvPr = pic.find(".//pic:cNvPr", nsmap)
+                                name_attr = (
+                                    cNvPr.get("name")
+                                    if cNvPr is not None
+                                    else f"image_{image_counter}"
+                                )
+
+                                blip = pic.find(".//a:blip", nsmap)
                                 if blip is not None:
-                                    embed_attr = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                                    embed_attr = blip.get(
+                                        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+                                    )
                                     if embed_attr:
-                                        image_part = document.part.related_parts[embed_attr]
+                                        image_part = document.part.related_parts[
+                                            embed_attr
+                                        ]
                                         image_data = io.BytesIO(image_part._blob)
                                         image = Image.open(image_data)
                                         image.load()
@@ -817,7 +910,9 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
                 table_text = read_docx_tables(block)
                 block_texts.append(table_text)
             if block_texts or block_images:
-                chunks.append(Chunk(path=file_path, texts=block_texts, images=block_images))
+                chunks.append(
+                    Chunk(path=file_path, texts=block_texts, images=block_images)
+                )
 
     finally:
         # Close any open image files
@@ -833,9 +928,13 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
 
     return chunks
 
-def scrape_pptx(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
+
+def scrape_pptx(
+    file_path: str, verbose: bool = False, text_only: bool = False
+) -> List[Chunk]:
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
+
     prs = Presentation(file_path)
     chunks = []
     # iterate through each slide in the presentation
@@ -848,7 +947,7 @@ def scrape_pptx(file_path: str, verbose: bool = False, text_only: bool = False) 
                 for paragraph in shape.text_frame.paragraphs:
                     text = paragraph.text
                     if len(slide_texts) == 0:
-                        text = '# ' + text # header for first text of a slide
+                        text = "# " + text  # header for first text of a slide
                     slide_texts.append(text)
             # extract images from shapes
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE and not text_only:
@@ -861,38 +960,45 @@ def scrape_pptx(file_path: str, verbose: bool = False, text_only: bool = False) 
     # return all chunks
     return chunks
 
-def scrape_ipynb(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
-    with open(file_path, 'r', encoding='utf-8') as file:
+
+def scrape_ipynb(
+    file_path: str, verbose: bool = False, text_only: bool = False
+) -> List[Chunk]:
+    with open(file_path, "r", encoding="utf-8") as file:
         notebook = json.load(file)
     chunks = []
     # parse cells in the notebook
-    for cell in notebook['cells']:
+    for cell in notebook["cells"]:
         texts = []
         images = []
         # parse cell content based on type
-        if cell['cell_type'] == 'markdown':
-            text = ''.join(cell['source'])
+        if cell["cell_type"] == "markdown":
+            text = "".join(cell["source"])
             if not text_only:
                 images = get_images_from_markdown(text)
             texts.append(text)
-        elif cell['cell_type'] == 'code':
-            source = ''.join(cell['source'])
+        elif cell["cell_type"] == "code":
+            source = "".join(cell["source"])
             texts.append(source)
             output_texts = []
             # code cells can have outputs
-            if 'outputs' in cell:
-                for output in cell['outputs']:
-                    if 'data' in output and 'image/png' in output['data'] and not text_only:
-                        image_data = output['data']['image/png']
+            if "outputs" in cell:
+                for output in cell["outputs"]:
+                    if (
+                        "data" in output
+                        and "image/png" in output["data"]
+                        and not text_only
+                    ):
+                        image_data = output["data"]["image/png"]
                         image = Image.open(BytesIO(base64.b64decode(image_data)))
                         images.append(image)
-                    elif 'data' in output and 'text/plain' in output['data']:
-                        output_text = ''.join(output['data']['text/plain'])
+                    elif "data" in output and "text/plain" in output["data"]:
+                        output_text = "".join(output["data"]["text/plain"])
                         output_texts.append(output_text)
             if output_texts:
                 texts.extend(output_texts)
-        elif cell['cell_type'] == 'raw':
-            text = ''.join(cell['source'])
+        elif cell["cell_type"] == "raw":
+            text = "".join(cell["source"])
             texts.append(text)
         if texts or images:
             chunks.append(Chunk(path=file_path, texts=texts, images=images))
@@ -903,22 +1009,19 @@ def scrape_tweet(url: str, text_only: bool = False, verbose: bool = False) -> Li
     # unofficial, could break at any time
     def get_token(id: str) -> str:
         result = (float(id) / 1e15) * math.pi
-        base_36_result = ''
-        characters = '0123456789abcdefghijklmnopqrstuvwxyz'
+        base_36_result = ""
+        characters = "0123456789abcdefghijklmnopqrstuvwxyz"
         while result > 0:
-            remainder = int(result % (6 ** 2))
+            remainder = int(result % (6**2))
             base_36_result = characters[remainder] + base_36_result
-            result = (result - remainder) // (6 ** 2)
-        base_36_result = re.sub(r'(0+|\.)', '', base_36_result)
+            result = (result - remainder) // (6**2)
+        base_36_result = re.sub(r"(0+|\.)", "", base_36_result)
         return base_36_result
-    tweet_id = url.split('status/')[-1].split('?')[0]
+
+    tweet_id = url.split("status/")[-1].split("?")[0]
     token = get_token(tweet_id)
     tweet_api_url = "https://cdn.syndication.twimg.com/tweet-result"
-    params = {
-        "id": tweet_id,
-        "language": "en",
-        "token": token
-    }
+    params = {"id": tweet_id, "language": "en", "token": token}
     response = requests.get(tweet_api_url, params=params)
     if response.status_code != 200:
         raise ValueError(f"Failed to fetch tweet. Status code: {response.status_code}")
