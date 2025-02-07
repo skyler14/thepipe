@@ -15,10 +15,11 @@ from PIL import Image
 import requests
 import json
 
-from thepipe.file_utils import detect_source_type, find_audio_file, find_subtitle_files, find_video_file
-from thepipe.media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
+from .drive_utils import extract_drive_id, process_drive_content
+from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, find_video_file
+from .media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
 from .core import HOST_URL, THEPIPE_API_KEY, HOST_IMAGES, Chunk, make_image_url
-from .chunker import chunk_by_page, chunk_by_document, chunk_by_section, chunk_semantic, chunk_by_keywords
+from .chunker import chunk_by_page
 import tempfile
 import dotenv
 import markdownify
@@ -447,18 +448,25 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
         return process_cookie_options(url, chunks, cookie_options)
     return chunks
 
-def scrape_drive(drive_url: str, text_only: bool = False, ai_extraction: bool = False, 
-                 verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
-    # Lazy load drive utils
-    from .drive_utils import extract_drive_id, process_drive_content
-    
+def scrape_drive(drive_url: str, text_only: bool = False, 
+                ai_extraction: bool = False, verbose: bool = False, 
+                options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """Process Google Drive URLs (both files and folders)."""
+    if verbose:
+        print(f"[thepipe] Processing Drive URL: {drive_url}")
+
     drive_id = extract_drive_id(drive_url)
     if not drive_id:
-        raise ValueError(f"Could not extract valid Drive ID from URL: {drive_url}")
-    
-    return process_drive_content(drive_url=drive_url,drive_id=drive_id,
-        text_only=text_only,ai_extraction=ai_extraction,verbose=verbose,
-        options=options)
+        raise ValueError(f"Could not extract Drive ID from URL: {drive_url}")
+        
+    return process_drive_content(
+        drive_url=drive_url,
+        drive_id=drive_id,
+        text_only=text_only,
+        ai_extraction=ai_extraction,
+        verbose=verbose,
+        options=options
+    )
     
 def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
     import whisper

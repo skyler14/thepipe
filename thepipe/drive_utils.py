@@ -1,15 +1,284 @@
 import re
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Any, Set
+from pathlib import Path
 import json
 import os
+import requests
 import tempfile
 import io
-from typing import Dict, List, Optional, Any, Tuple, BinaryIO
+from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 from .core import Chunk
+
+@dataclass
+class DriveFile:
+    id: str
+    name: str
+    mime_type: str
+    parent_folder: Optional[str]
+    size: Optional[int] = None
+    download_url: Optional[str] = None
+    relative_path: Optional[str] = None
+
+class DriveFolderCrawler:
+    def __init__(self, max_depth: int = 3, verbose: bool = False):
+        self.max_depth = max_depth
+        self.verbose = verbose
+        self.files: Dict[str, DriveFile] = {}
+        self.folders: Set[str] = set()
+        self.visited: Set[str] = set()
+
+    def get_drive_api_key(self) -> Optional[str]:
+        """Get Drive API key from config file or module."""
+        try:
+            # First try the module
+            from .drive_api import DRIVE_API_KEY
+            if DRIVE_API_KEY:
+                if self.verbose:
+                    print("[thepipe] Using Drive API key from module")
+                return DRIVE_API_KEY
+        except ImportError:
+            if self.verbose:
+                print("[thepipe] No Drive API key found in module")
+
+        # Then try config file
+        try:
+            config_path = Path.home() / '.thepipe' / 'drive_api_key.json'
+            if not config_path.exists():
+                if self.verbose:
+                    print("[thepipe] No Drive API key config file found at:", config_path)
+                return None
+
+            with open(config_path) as f:
+                content = f.read().strip()
+                if not content:
+                    if self.verbose:
+                        print("[thepipe] Drive API key config file is empty")
+                    return None
+
+                try:
+                    config = json.loads(content)
+                except json.JSONDecodeError:
+                    if self.verbose:
+                        print("[thepipe] Drive API key config file contains invalid JSON")
+                    return None
+
+                key = config.get('drive_api_key')
+                if not key:
+                    if self.verbose:
+                        print("[thepipe] No 'drive_api_key' found in config")
+                    return None
+
+                if self.verbose:
+                    print("[thepipe] Using Drive API key from config file")
+                return key
+
+        except Exception as e:
+            if self.verbose:
+                print(f"[thepipe] Error loading Drive API key config: {str(e)}")
+                print("[thepipe] Please ensure your drive_api_key.json is properly configured")
+                print("[thepipe] Run: echo '{\"drive_api_key\": \"YOUR_API_KEY\"}' > ~/.thepipe/drive_api_key.json")
+
+        return None
+
+
+    def get_folder_contents(self, folder_id: str, depth: int = 0) -> List[DriveFile]:
+        """Get contents of a folder using Drive API v3."""
+        if depth > self.max_depth or folder_id in self.visited:
+            return []
+                
+        self.visited.add(folder_id)
+        self.folders.add(folder_id)
+        
+        if self.verbose:
+            print(f"[thepipe] Scanning folder: {folder_id} (depth {depth})")
+
+        try:
+            url = "https://www.googleapis.com/drive/v3/files"
+            params = {
+                'q': f"'{folder_id}' in parents",
+                'key': 'AIzaSyCFGnys4kCyv9rRZ9hoDjpyfl1jviZYU9c'  # Hardcode working key for test
+            }
+
+            if self.verbose:
+                # Print exact URL that would be used
+                constructed_url = f"{url}?q='{folder_id}'+in+parents&key={params['key']}"
+                print(f"[thepipe] Using URL: {constructed_url}")
+                print(f"[thepipe] Curl equivalent: curl \"{constructed_url}\"")
+
+            # Make request exactly like curl
+            response = requests.get(url, params=params)
+            
+            if self.verbose:
+                print(f"[thepipe] Response status: {response.status_code}")
+                print(f"[thepipe] Response: {response.text[:200]}")  # First 200 chars of response
+
+            if response.status_code != 200:
+                raise Exception(f"API request failed with status {response.status_code}: {response.text}")
+
+            data = response.json()
+            files = data.get('files', [])
+            
+            if self.verbose:
+                print(f"[thepipe] Found {len(files)} items in folder")
+
+            for file in files:
+                file_id = file.get('id')
+                if not file_id:
+                    continue
+                    
+                if file_id not in self.files and file_id not in self.folders:
+                    mime_type = file.get('mimeType', 'unknown')
+                    
+                    if mime_type == 'application/vnd.google-apps.folder':
+                        if depth < self.max_depth:
+                            self.get_folder_contents(file_id, depth + 1)
+                    else:
+                        drive_file = DriveFile(
+                            id=file_id,
+                            name=file.get('name', 'Unnamed'),
+                            mime_type=mime_type,
+                            parent_folder=folder_id,
+                            download_url=f"https://drive.google.com/uc?export=download&id={file_id}"
+                        )
+                        self.files[file_id] = drive_file
+                        
+                        if self.verbose:
+                            print(f"[thepipe] Added file: {drive_file.name}")
+
+        except Exception as e:
+            if self.verbose:
+                print(f"[thepipe] Error accessing Drive API: {str(e)}")
+            raise
+
+        if self.verbose:
+            print(f"[thepipe] Found total of {len(self.files)} files in folder {folder_id}")
+
+        return list(self.files.values())
+
+    def process_files(self, output_dir: str = "drive_downloads") -> List[Chunk]:
+        """Process all collected files."""
+        chunks = []
+        
+        if self.verbose:
+            print(f"[thepipe] Processing {len(self.files)} files from folder")
+        
+        for file_id, drive_file in self.files.items():
+            try:
+                if self.verbose:
+                    print(f"[thepipe] Processing: {drive_file.name}")
+                
+                # Get file content
+                content = self.download_file(file_id)
+                if not content:
+                    continue
+
+                # Process with temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=self.get_extension(drive_file)) as temp_file:
+                    temp_file.write(content)
+                    temp_path = temp_file.name
+
+                try:
+                    # Process file with scraper
+                    from .scraper import scrape_file
+                    file_chunks = scrape_file(
+                        filepath=temp_path,
+                        verbose=self.verbose,
+                        local=True
+                    )
+                    
+                    # Update paths to include original drive path
+                    for chunk in file_chunks:
+                        chunk.path = f"drive://{file_id}/{drive_file.name}"
+                    
+                    chunks.extend(file_chunks)
+                    
+                finally:
+                    # Clean up temporary file
+                    try:
+                        os.unlink(temp_path)
+                    except Exception as e:
+                        if self.verbose:
+                            print(f"[thepipe] Warning: Could not remove temporary file {temp_path}: {e}")
+                
+            except Exception as e:
+                if self.verbose:
+                    print(f"[thepipe] Error processing {drive_file.name}: {e}")
+                continue
+        
+        return chunks
+
+    def download_file(self, file_id: str) -> Optional[bytes]:
+        """Download a file from Drive."""
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        try:
+            session = requests.Session()
+            response = session.get(url, stream=True)
+            
+            if response.status_code == 200:
+                # Handle download warning page
+                if 'download_warning' in response.cookies:
+                    token = response.cookies['download_warning']
+                    response = session.get(f"{url}&confirm={token}", stream=True)
+                    
+                return response.content
+                
+        except Exception as e:
+            if self.verbose:
+                print(f"[thepipe] Error downloading file {file_id}: {e}")
+                
+        return None
+
+    def get_extension(self, drive_file: DriveFile) -> str:
+        """Get file extension based on MIME type."""
+        mime_to_ext = {
+            'application/pdf': '.pdf',
+            'text/plain': '.txt',
+            'application/vnd.google-apps.document': '.txt',
+            'application/vnd.google-apps.spreadsheet': '.csv',
+            'application/vnd.google-apps.presentation': '.pdf'
+        }
+        
+        # Try to get extension from filename first
+        name_ext = os.path.splitext(drive_file.name)[1]
+        if name_ext:
+            return name_ext
+            
+        # Fall back to MIME type mapping
+        return mime_to_ext.get(drive_file.mime_type, '.bin')
+    
+def is_folder_url(url: str) -> bool:
+    """Check if URL is a Drive folder."""
+    return bool(re.search(r'drive\.google\.com/(?:drive/)?folders/|drive\.google\.com/drive/u/\d+/folders/', url))
+
+def extract_drive_id(url: str) -> Optional[str]:
+    """Extract folder or file ID from Drive URL."""
+    parsed_url = urlparse(url)
+    
+    # Direct file links
+    file_match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', parsed_url.path)
+    if file_match:
+        return file_match.group(1)
+    
+    # Folder links
+    folder_match = re.search(r'folders/([a-zA-Z0-9_-]+)', parsed_url.path)
+    if folder_match:
+        return folder_match.group(1)
+    
+    # Google Doc types
+    doc_match = re.search(r'/(?:document|presentation|spreadsheets)/d/([a-zA-Z0-9_-]+)', parsed_url.path)
+    if doc_match:
+        return doc_match.group(1)
+    
+    # Query parameter IDs
+    query_params = parse_qs(parsed_url.query)
+    if 'id' in query_params:
+        return query_params['id'][0]
+    
+    return None
 
 def extract_drive_id(url: str) -> Optional[str]:
     """Extract folder or file ID from Drive URL."""
@@ -358,79 +627,24 @@ def process_drive_content(
     if verbose:
         print(f"[thepipe] Processing Drive content: {drive_url}")
 
-    # Try to get filename first
+    # Check if it's a folder first
+    if is_folder_url(drive_url):
+        if verbose:
+            print(f"[thepipe] Detected Drive folder: {drive_url}")
+        
+        max_depth = options.get('max_depth', 3) if options else 3
+        crawler = DriveFolderCrawler(max_depth=max_depth, verbose=verbose)
+        
+        # First get the contents
+        folder_files = crawler.get_folder_contents(drive_id)
+        
+        if verbose:
+            print(f"[thepipe] Found {len(folder_files)} files in folder")
+        
+        # Then process them
+        return crawler.process_files()
+
+    # Rest of the function remains the same for single file handling
     filename = get_file_metadata(drive_id)
     if filename and verbose:
         print(f"[thepipe] Found file name: {filename}")
-
-    # Try public access
-    public_result = try_public_access(drive_id, original_url=drive_url, verbose=verbose)
-    if public_result:
-        content, extension = public_result
-    else:
-        try:
-            service = init_drive_service(
-                service_account_info=options.get('service_account_info') if options else None,
-                service_account_file=options.get('service_account_file') if options else None
-            )
-        except ValueError as e:
-            if "Authentication required" in str(e):
-                return [Chunk(
-                    path=drive_url,
-                    texts=["This Google Drive file requires authentication.\n"
-                          "Please provide service account credentials via options:\n"
-                          '--options \'{"service_account_file": "path/to/credentials.json"}\'\n'
-                          "Or provide the service account JSON directly in service_account_info"]
-                )]
-            raise
-
-        try:
-            content, extension = download_file(drive_id, service)
-        except Exception as e:
-            error_msg = str(e)
-            if "File not found" in error_msg:
-                error_msg = f"File not found. Please verify the file exists and you have permission to access it."
-            elif "access not granted" in error_msg.lower():
-                error_msg = f"Access denied. Please verify the service account has proper access rights."
-                
-            if verbose:
-                print(f"[thepipe] Error processing Drive file: {error_msg}")
-                
-            return [Chunk(
-                path=drive_url,
-                texts=[f"Failed to process Google Drive file: {error_msg}"]
-            )]
-
-    # Process the content
-    from .scraper import scrape_file
-    
-    temp_file_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            temp_file_path = temp_file.name
-            temp_file.write(content)
-            
-        file_chunks = scrape_file(
-            filepath=temp_file_path,
-            text_only=text_only,
-            ai_extraction=ai_extraction,
-            verbose=verbose,
-            local=True,
-            options=options
-        )
-        
-        # Construct clean file path
-        base_path = f"drive://{drive_id}/{filename if filename else 'document'}{extension}"
-        
-        # Update paths for all chunks
-        for chunk in file_chunks:
-            chunk.path = base_path
-        
-        return file_chunks
-        
-    finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.unlink(temp_file_path)
-            except:
-                pass
