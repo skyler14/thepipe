@@ -345,7 +345,7 @@ def init_drive_service(service_account_info: Optional[Dict] = None,
 def get_file_metadata(file_id: str) -> Optional[str]:
     """Get filename from Drive file without authentication."""
     import requests
-    
+    print(f"reading {file_id}")
     # Try to get filename from the public presentation/doc page
     urls_to_try = [
         f"https://docs.google.com/presentation/d/{file_id}/view",
@@ -360,7 +360,10 @@ def get_file_metadata(file_id: str) -> Optional[str]:
     for url in urls_to_try:
         try:
             response = requests.get(url, headers=headers, allow_redirects=True)
+            print(f"request to {url}")
             if response.status_code == 200:
+                print(f"succeeded with {url}")
+                print((response.text[0:300]))
                 match = re.search(r'<title>(.*?)(?:\s*[-–]\s*Google\s+(?:Docs|Slides|Sheets))?</title>', 
                                 response.text, 
                                 re.IGNORECASE)
@@ -648,3 +651,75 @@ def process_drive_content(
     filename = get_file_metadata(drive_id)
     if filename and verbose:
         print(f"[thepipe] Found file name: {filename}")
+
+    # Try public access
+    public_result = try_public_access(drive_id, original_url=drive_url, verbose=verbose)
+    if public_result:
+        content, extension = public_result
+    else:
+        try:
+            service = init_drive_service(
+                service_account_info=options.get('service_account_info') if options else None,
+                service_account_file=options.get('service_account_file') if options else None
+            )
+        except ValueError as e:
+            if "Authentication required" in str(e):
+                return [Chunk(
+                    path=drive_url,
+                    texts=["This Google Drive file requires authentication.\n"
+                          "Please provide service account credentials via options:\n"
+                          '--options \'{"service_account_file": "path/to/credentials.json"}\'\n'
+                          "Or provide the service account JSON directly in service_account_info"]
+                )]
+            raise
+
+        try:
+            content, extension = download_file(drive_id, service)
+        except Exception as e:
+            error_msg = str(e)
+            if "File not found" in error_msg:
+                error_msg = f"File not found. Please verify the file exists and you have permission to access it."
+            elif "access not granted" in error_msg.lower():
+                error_msg = f"Access denied. Please verify the service account has proper access rights."
+                
+            if verbose:
+                print(f"[thepipe] Error processing Drive file: {error_msg}")
+                
+            return [Chunk(
+                path=drive_url,
+                texts=[f"Failed to process Google Drive file: {error_msg}"]
+            )]
+
+    # Process the content
+    from .scraper import scrape_file
+    
+    temp_file_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file_path = temp_file.name
+            temp_file.write(content)
+            
+        file_chunks = scrape_file(
+            filepath=temp_file_path,
+            text_only=text_only,
+            ai_extraction=ai_extraction,
+            verbose=verbose,
+            local=True,
+            options=options
+        )
+        
+        # Construct clean file path
+        base_path = f"drive://{drive_id}/{filename if filename else 'document'}{extension}"
+        
+        # Update paths for all chunks
+        for chunk in file_chunks:
+            chunk.path = base_path
+        
+        return file_chunks
+        
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+            except:
+                pass

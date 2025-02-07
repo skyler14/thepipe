@@ -277,8 +277,6 @@ def save_outputs(
             print(f"[thepipe] Estimated {estimated_tokens} tokens saved to outputs folder (based on character count)")
         print(f"[thepipe] Outputs saved to 'outputs' folder")
 
-
-
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Process files or display cookies."

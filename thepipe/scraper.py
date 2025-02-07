@@ -14,18 +14,16 @@ import zipfile
 from PIL import Image
 import requests
 import json
-
 from .drive_utils import extract_drive_id, process_drive_content
 from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, find_video_file
 from .media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
 from .web_utils import (
-    HOST_URL, THEPIPE_API_KEY, HOST_IMAGES, 
-    DEFAULT_AI_MODEL, SCRAPING_PROMPT,
+    SCRAPING_PROMPT,
     DRIVE_DOMAINS, GIT_DOMAINS, TWITTER_DOMAINS,
     extract_page_content, matches_domain, normalize_url
 )
 from .enums import YouTubeEnum
-from .core import Chunk, make_image_url
+from .core import Chunk, HOST_URL, THEPIPE_API_KEY, HOST_IMAGES, make_image_url
 from .chunker import chunk_by_page
 
 import tempfile
@@ -37,6 +35,7 @@ FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*',
 FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
 GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", None)
 FILESIZE_LIMIT_MB = os.getenv("FILESIZE_LIMIT_MB", 50)
+DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o-mini")
 
 # Global variables for lazy loading
 yt_dlp = None
@@ -675,7 +674,7 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str,
                     print(f"[thepipe] Failed to download audio for transcription: {video_url}")
                 video_chunks.append(Chunk(path=video_url, texts=["No transcription available"]))
                 
-        elif text_only in [True, 'ai', 'uploaded']:
+        elif text_only in ['default', 'ai', 'uploaded']:
             if verbose:
                 print("[thepipe] Attempting to extract subtitles...")
             # First try to get subtitles
@@ -704,7 +703,7 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str,
                             break
                 
                 # If no subtitles found and we're in default mode, fall back to transcription
-                if not subtitle_files and text_only is True:
+                if not subtitle_files and text_only is 'default':
                     if verbose:
                         print("[thepipe] No subtitles found, falling back to transcription...")
                     # Update options for audio-only download
