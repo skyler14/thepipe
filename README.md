@@ -154,6 +154,7 @@ thepipe path/to/folder --include_regex .*\.tsx --local
 | YouTube Video (known issues)    | YouTube video URLs starting with `https://youtube.com` or `https://www.youtube.com`.  | ✔️   | Uses pytube for video download and Whisper for transcription. For consistent extraction, you may need to modify your `pytube` installation to send a valid user agent header (see [this issue](https://github.com/pytube/pytube/issues/399)). |
 | Tweet                    | URLs starting with `https://twitter.com` or `https://x.com`    | ✔️                  | Uses unofficial API, may break unexpectedly |
 | GitHub Repository        | GitHub repo URLs starting with `https://github.com` or `https://www.github.com` | ✔️       | Requires GITHUB_TOKEN environment variable |
+| Google Drive        | Google Drive/Doc URL for doc, spreadsheet, presentation, or directory  | ✔️       | Only Public/shared by URL support currently |
 
 ## How it works 🛠️
 
