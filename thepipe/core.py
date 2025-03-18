@@ -282,7 +282,7 @@ def parse_arguments() -> argparse.Namespace:
         description="Process files or display cookies."
     )
     parser.add_argument(
-        "source", type=str, help="The source file, directory, or URL to process"
+        "source", type=str, help="The source file, directory, URL or database to process"
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--include_regex', type=str, nargs='?', const='.*', default=None, 
@@ -300,14 +300,20 @@ def parse_arguments() -> argparse.Namespace:
                        help='Specific browser to extract cookies from')
     parser.add_argument('--show_cookies', nargs='?', const='format', choices=['format', 'credentials'],
                        help='Display cookies instead of processing content. Use "credentials" for full cookie data.')
+    parser.add_argument('--db', nargs='*',
+        help='Database query. Format: --db ["query"] [db_type] [mode]. '
+             'If empty, shows preview. Mode can be "schema" or "preview".')
 
     args = parser.parse_args()
     
-    if args.options:
+    # Process options
+    if args.options and isinstance(args.options, str):
         try:
             args.options = json.loads(args.options)
         except json.JSONDecodeError:
             print("Error: Invalid JSON in options")
             exit(1)
-    
+    elif not hasattr(args, 'options') or args.options is None:
+        args.options = {}
+        
     return args

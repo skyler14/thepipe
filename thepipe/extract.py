@@ -66,14 +66,24 @@ def extract_from_chunk(
     multiple_extractions: bool,
     extraction_prompt: str,
     host_images: bool,
+    api_key: Optional[str] = None,
+    api_base: Optional[str] = None,
 ) -> Tuple[Dict, int]:
     response_dict = {"chunk_index": chunk_index, "source": source}
     tokens_used = 0
     try:
-        openrouter_client = OpenAI(
-            base_url=os.environ["LLM_SERVER_BASE_URL"],
-            api_key=os.environ["LLM_SERVER_API_KEY"],
-        )
+        # Configure OpenAI client with provided credentials
+        client_args = {
+            "api_key": api_key or os.environ.get("OPENAI_API_KEY", os.environ.get("LLM_SERVER_API_KEY")),
+        }
+        
+        # Set API base if provided
+        if api_base:
+            client_args["base_url"] = api_base
+        elif os.environ.get("LLM_SERVER_BASE_URL"):
+            client_args["base_url"] = os.environ.get("LLM_SERVER_BASE_URL")
+            
+        openrouter_client = OpenAI(**client_args)
 
         corrected_extraction_prompt = extraction_prompt.replace("{schema}", schema)
         if multiple_extractions:
@@ -105,36 +115,37 @@ def extract_from_chunk(
         input_tokens = calculate_tokens([chunk])
         output_tokens = calculate_tokens([Chunk(texts=[llm_response])])
         tokens_used += input_tokens + output_tokens
-        try:
-            llm_response_dict = extract_json_from_response(llm_response)
-            if llm_response_dict:
-                if multiple_extractions:
-                    if (
-                        isinstance(llm_response_dict, dict)
-                        and "extraction" in llm_response_dict
-                    ):
-                        response_dict["extraction"] = llm_response_dict["extraction"]
-                    elif isinstance(llm_response_dict, list):
-                        response_dict["extraction"] = llm_response_dict
-                    else:
-                        response_dict["extraction"] = [llm_response_dict]
+        
+        # Process the response
+        llm_response_dict = extract_json_from_response(llm_response)
+        if llm_response_dict:
+            if multiple_extractions:
+                if (
+                    isinstance(llm_response_dict, dict)
+                    and "extraction" in llm_response_dict
+                ):
+                    response_dict["extraction"] = llm_response_dict["extraction"]
+                elif isinstance(llm_response_dict, list):
+                    response_dict["extraction"] = llm_response_dict
                 else:
-                    if isinstance(llm_response_dict, dict):
-                        response_dict.update(llm_response_dict)
-                    elif isinstance(llm_response_dict, list):
-                        response_dict["error"] = (
-                            f"Expected a single JSON object but received a list: {llm_response_dict}. Try enabling multiple extractions."
-                        )
-                    else:
-                        response_dict["error"] = (
-                            f"Invalid JSON structure in LLM response: {llm_response_dict}"
-                        )
+                    response_dict["extraction"] = [llm_response_dict]
             else:
-                response_dict["error"] = (
-                    f"Failed to extract valid JSON from LLM response: {llm_response}"
-                )
-        except Exception as e:
-            response_dict["error"] = f"Error processing LLM response: {e}"
+                if isinstance(llm_response_dict, dict):
+                    response_dict.update(llm_response_dict)
+                elif isinstance(llm_response_dict, list):
+                    response_dict["error"] = (
+                        f"Expected a single JSON object but received a list: {llm_response_dict}. Try enabling multiple extractions."
+                    )
+                else:
+                    response_dict["error"] = (
+                        f"Invalid JSON structure in LLM response: {llm_response_dict}"
+                    )
+        else:
+            response_dict["error"] = (
+                f"Failed to extract valid JSON from LLM response: {llm_response}"
+            )
+            
+        # If not using multiple extractions, ensure all schema keys are present
         if not multiple_extractions:
             schema_keys = (
                 json.loads(schema).keys() if isinstance(schema, str) else schema.keys()
@@ -146,7 +157,6 @@ def extract_from_chunk(
         response_dict = {"chunk_index": chunk_index, "source": source, "error": str(e)}
     return response_dict, tokens_used
 
-
 def extract(
     chunks: List[Chunk],
     schema: Union[str, Dict],
@@ -154,6 +164,7 @@ def extract(
     multiple_extractions: Optional[bool] = False,
     extraction_prompt: Optional[str] = DEFAULT_EXTRACTION_PROMPT,
     host_images: Optional[bool] = False,
+    options: Optional[Dict[str, Any]] = None
 ) -> Tuple[List[Dict], int]:
     if isinstance(schema, dict):
         schema = json.dumps(schema)
@@ -170,6 +181,16 @@ def extract(
         host_images = False
     if multiple_extractions is None:
         multiple_extractions = False
+        
+    # Get LLM configuration from options if provided
+    llm_config = options.get("llm_extractor", {}) if options else {}
+    api_key = llm_config.get("api_key")
+    api_base = llm_config.get("api_base")
+    model_name = llm_config.get("model")
+    
+    # Override model if specified in llm_config
+    if model_name:
+        ai_model = model_name
 
     with ThreadPoolExecutor() as executor:
         future_to_chunk = {
@@ -183,6 +204,8 @@ def extract(
                 multiple_extractions=multiple_extractions,
                 extraction_prompt=extraction_prompt,
                 host_images=host_images,
+                api_key=api_key,
+                api_base=api_base
             ): i
             for i, chunk in enumerate(chunks)
         }
@@ -218,6 +241,7 @@ def extract_from_url(
     verbose: bool = False,
     chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
     local: bool = False,
+    options: Optional[Dict[str, Any]] = None
 ) -> List[Dict]:
     if local:
         chunks = scrape_url(
@@ -227,7 +251,10 @@ def extract_from_url(
             verbose=verbose,
             local=local,
             chunking_method=chunking_method,
+            options=options
         )
+        
+        # Pass through options dictionary that might contain LLM config
         return extract(
             chunks=chunks,
             schema=schema,
@@ -235,6 +262,7 @@ def extract_from_url(
             multiple_extractions=multiple_extractions,
             extraction_prompt=extraction_prompt,
             host_images=host_images,
+            options=options
         )[0]
     else:
         headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}
@@ -248,7 +276,9 @@ def extract_from_url(
             "text_only": str(text_only).lower(),
             "ai_extraction": str(ai_extraction).lower(),
             "chunking_method": chunking_method.__name__,
+            "options": json.dumps(options) if options else None
         }
+        
         response = requests.post(
             f"{HOST_URL}/extract", headers=headers, data=data, stream=True
         )
@@ -287,7 +317,6 @@ def extract_from_url(
 
         return results
 
-
 def extract_from_file(
     file_path: str,
     schema: Union[str, Dict],
@@ -300,6 +329,7 @@ def extract_from_file(
     verbose: bool = False,
     chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
     local: bool = False,
+    options: Optional[Dict[str, Any]] = None
 ) -> List[Dict]:
     if local:
         chunks = scrape_file(
@@ -309,7 +339,10 @@ def extract_from_file(
             verbose=verbose,
             local=local,
             chunking_method=chunking_method,
+            options=options
         )
+        
+        # Pass through options dictionary that might contain LLM config
         return extract(
             chunks=chunks,
             schema=schema,
@@ -317,6 +350,7 @@ def extract_from_file(
             multiple_extractions=multiple_extractions,
             extraction_prompt=extraction_prompt,
             host_images=host_images,
+            options=options
         )[0]
     else:
         headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}
@@ -329,6 +363,7 @@ def extract_from_file(
             "text_only": str(text_only).lower(),
             "ai_extraction": str(ai_extraction).lower(),
             "chunking_method": chunking_method.__name__,
+            "options": json.dumps(options) if options else None
         }
         files = {"files": (os.path.basename(file_path), open(file_path, "rb"))}
 

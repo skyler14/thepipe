@@ -60,10 +60,8 @@ def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = Fa
                 data={
                     "text_only": str(text_only).lower(),
                     "ai_extraction": str(ai_extraction).lower(),
-                    "chunking_method": 
-                        chunking_method.__name__,
-                    'options': json.dumps(options) if options else None if chunking_method else None
-                    ,
+                    "chunking_method": chunking_method.__name__ if chunking_method else None,
+                    'options': json.dumps(options) if options else None,
                 },
             )
         response.raise_for_status()
@@ -101,29 +99,46 @@ def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = Fa
                     chunks.append(chunk)
         return chunks
 
-    # returns chunks of scraped content from any source (file, URL, etc.)
+    # Local processing
     scraped_chunks = []
     source_type = detect_source_type(filepath)
     if source_type is None:
         if verbose:
             print(f"[thepipe] Unsupported source type: {filepath}")
         return scraped_chunks
+        
     if verbose:
         print(f"[thepipe] Scraping {source_type}: {filepath}...")
+        
+    # Call the appropriate scraper based on file type
     if source_type == 'application/pdf':
-        scraped_chunks = scrape_pdf(file_path=filepath, ai_extraction=ai_extraction, text_only=text_only, verbose=verbose, ai_model=ai_model, options=options)
+        scraped_chunks = scrape_pdf(
+            file_path=filepath, 
+            ai_extraction=ai_extraction, 
+            text_only=text_only, 
+            verbose=verbose, 
+            ai_model=ai_model, 
+            options=options
+        )
     elif source_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        scraped_chunks = scrape_docx(file_path=filepath, verbose=verbose, text_only=text_only,)
+        scraped_chunks = scrape_docx(file_path=filepath, verbose=verbose, text_only=text_only)
     elif source_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-        scraped_chunks = scrape_pptx(file_path=filepath, verbose=verbose, text_only=text_only,)
+        scraped_chunks = scrape_pptx(file_path=filepath, verbose=verbose, text_only=text_only)
     elif source_type.startswith('image/'):
-        scraped_chunks = scrape_image(file_path=filepath, text_only=text_only,)
+        scraped_chunks = scrape_image(file_path=filepath, text_only=text_only)
     elif source_type.startswith('application/vnd.ms-excel') or source_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-        scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_type,)
+        scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_type)
     elif source_type == 'application/x-ipynb+json':
-        scraped_chunks = scrape_ipynb(file_path=filepath, verbose=verbose, text_only=text_only,)
+        scraped_chunks = scrape_ipynb(file_path=filepath, verbose=verbose, text_only=text_only)
     elif source_type == 'application/zip' or source_type == 'application/x-zip-compressed':
-        scraped_chunks = scrape_zip(file_path=filepath, verbose=verbose, ai_extraction=ai_extraction, text_only=text_only, local=local,)
+        scraped_chunks = scrape_zip(
+            file_path=filepath, 
+            verbose=verbose, 
+            ai_extraction=ai_extraction, 
+            text_only=text_only, 
+            local=local,
+            options=options
+        )
     elif source_type.startswith('video/'):
         scraped_chunks = scrape_video(file_path=filepath, verbose=verbose, text_only=text_only, options=options)
     elif source_type.startswith('audio/'):
@@ -138,15 +153,17 @@ def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = Fa
         except Exception as e:
             if verbose:
                 print(f"[thepipe] Error extracting from {filepath}: {e}")
+                
     if verbose:
         if scraped_chunks:
             print(f"[thepipe] Extracted from {filepath}")
         else:
             print(f"[thepipe] No content extracted from {filepath}")
+            
     if chunking_method:
         scraped_chunks = chunking_method(scraped_chunks)
+        
     return scraped_chunks
-
 
 def scrape_html(
     file_path: str, verbose: bool = False, text_only: bool = False
@@ -212,7 +229,7 @@ def scrape_directory(dir_path: str, include_regex: Optional[str] = None, include
     
     return extraction
 
-def scrape_zip(file_path: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False) -> List[Chunk]:
+def scrape_zip(file_path: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     chunks = []
     with tempfile.TemporaryDirectory() as temp_dir:
         with zipfile.ZipFile(file_path, "r") as zip_ref:
@@ -239,10 +256,18 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
                 err = f"Error: PDF has {num_pages} pages (max is {MAX_PAGES} for AI extraction)."
                 raise Exception(err)
 
-            openrouter_client = OpenAI(
-                base_url=os.environ.get("LLM_SERVER_BASE_URL"),
-                api_key=os.environ["LLM_SERVER_API_KEY"],
-            )
+            # Get LLM configuration from options if available
+            llm_config = options.get("llm_extractor", {}) if options else {}
+            api_key = llm_config.get("api_key", os.environ.get("LLM_SERVER_API_KEY", os.environ.get("OPENAI_API_KEY")))
+            api_base = llm_config.get("api_base", os.environ.get("LLM_SERVER_BASE_URL"))
+            model = llm_config.get("model", ai_model or DEFAULT_AI_MODEL)
+            
+            # Configure OpenAI client
+            client_args = {"api_key": api_key}
+            if api_base:
+                client_args["base_url"] = api_base
+                
+            openrouter_client = OpenAI(**client_args)
 
             def process_page(page_num):
                 page = doc[page_num]
@@ -268,7 +293,7 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
                     },
                 ]
                 response = openrouter_client.chat.completions.create(
-                    model=ai_model if ai_model else DEFAULT_AI_MODEL,
+                    model=model,
                     messages=messages,
                     temperature=0,
                 )
@@ -350,7 +375,6 @@ def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only:
                     chunks.append(Chunk(path=file_path, texts=[text], images=[img]))
             doc.close()
     return chunks
-
 
 def get_images_from_markdown(text: str) -> List[Image.Image]:
     image_urls = re.findall(r"!\[.*?\]\((.*?)\)", text)
@@ -524,54 +548,55 @@ def scrape_drive(drive_url: str, text_only: bool = False,
         options=options
     )
     
-def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
-    import whisper
-    from moviepy.editor import VideoFileClip
+def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    # import whisper
+    # from moviepy.editor import VideoFileClip
 
-    model = whisper.load_model("base")
-    video = VideoFileClip(file_path)
-    num_chunks = math.ceil(video.duration / MAX_WHISPER_DURATION)
-    chunks = []
-    # split the video into chunks of fixed duration
-    # here, we transcribe each chunk and extract its frame
-    try:
-        for i in range(num_chunks):
-            start_time = i * MAX_WHISPER_DURATION
-            end_time = start_time + MAX_WHISPER_DURATION
-            if end_time > video.duration:
-                end_time = video.duration
-            # get the frame in the middle of the chunk
-            frame_time = (start_time + end_time) / 2
-            frame = video.get_frame(frame_time)
-            image = Image.fromarray(frame)
-            # save the audio to a temporary file
-            with tempfile.NamedTemporaryFile(
-                suffix=".wav", delete=False
-            ) as temp_audio_file:
-                audio_path = temp_audio_file.name
-            audio = video.subclip(start_time, end_time).audio
-            transcription = None
-            # transcribe it
-            if audio is not None:
-                audio.write_audiofile(audio_path, codec="pcm_s16le")
-                result = model.transcribe(audio=audio_path, verbose=verbose)
-                # Format transcription with timestamps
-                formatted_transcription = []
-                for segment in result["segments"]:
-                    start = format_timestamp(segment["start"], i, MAX_WHISPER_DURATION)
-                    end = format_timestamp(segment["end"], i, MAX_WHISPER_DURATION)
-                    formatted_transcription.append(
-                        f"[{start} --> {end}]  {segment['text']}"
-                    )
-                transcription = "\n".join(formatted_transcription)
-                os.remove(audio_path)
-            texts = [transcription] if transcription else []
-            images = [image] if not text_only else []
-            if texts or images:
-                chunks.append(Chunk(path=file_path, texts=texts, images=images))
-    finally:
-        video.close()
-    return chunks
+    # model = whisper.load_model("base")
+    # video = VideoFileClip(file_path)
+    # num_chunks = math.ceil(video.duration / MAX_WHISPER_DURATION)
+    # chunks = []
+    # # split the video into chunks of fixed duration
+    # # here, we transcribe each chunk and extract its frame
+    # try:
+    #     for i in range(num_chunks):
+    #         start_time = i * MAX_WHISPER_DURATION
+    #         end_time = start_time + MAX_WHISPER_DURATION
+    #         if end_time > video.duration:
+    #             end_time = video.duration
+    #         # get the frame in the middle of the chunk
+    #         frame_time = (start_time + end_time) / 2
+    #         frame = video.get_frame(frame_time)
+    #         image = Image.fromarray(frame)
+    #         # save the audio to a temporary file
+    #         with tempfile.NamedTemporaryFile(
+    #             suffix=".wav", delete=False
+    #         ) as temp_audio_file:
+    #             audio_path = temp_audio_file.name
+    #         audio = video.subclip(start_time, end_time).audio
+    #         transcription = None
+    #         # transcribe it
+    #         if audio is not None:
+    #             audio.write_audiofile(audio_path, codec="pcm_s16le")
+    #             result = model.transcribe(audio=audio_path, verbose=verbose)
+    #             # Format transcription with timestamps
+    #             formatted_transcription = []
+    #             for segment in result["segments"]:
+    #                 start = format_timestamp(segment["start"], i, MAX_WHISPER_DURATION)
+    #                 end = format_timestamp(segment["end"], i, MAX_WHISPER_DURATION)
+    #                 formatted_transcription.append(
+    #                     f"[{start} --> {end}]  {segment['text']}"
+    #                 )
+    #             transcription = "\n".join(formatted_transcription)
+    #             os.remove(audio_path)
+    #         texts = [transcription] if transcription else []
+    #         images = [image] if not text_only else []
+    #         if texts or images:
+    #             chunks.append(Chunk(path=file_path, texts=texts, images=images))
+    # finally:
+    #     video.close()
+    # return chunks
+    return []
 
 def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbose: bool = False, 
                    metadata_fields: Optional[List[YouTubeEnum]] = None, 
@@ -904,6 +929,57 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
 
     return chunks
 
+def scrape_database(
+    filepath: str,
+    query: Optional[str] = None,
+    db_type: Optional[str] = None,
+    verbose: bool = False,
+    local: bool = True,
+    options: Optional[Dict[str, Any]] = None
+) -> List[Chunk]:
+    """
+    Scrape content from a database connection or file.
+    
+    Args:
+        filepath: Connection string or database file path
+        query: Natural language question or SQL query
+        db_type: Database type (auto-detected if possible)
+        verbose: If True, print detailed logs
+        local: If True, process locally (ignored, always True for databases)
+        options: Additional options including:
+            - tables: List of specific tables to query
+            - max_rows: Maximum rows to return (default: 1000)
+            - schema_only: Only return schema information
+            - preview: Return schema plus data summary
+            
+    Returns:
+        List of Chunk objects with extracted data
+    """
+    # Only process locally for now, no API support yet
+    if not local:
+        if verbose:
+            print("[thepipe] Database operations only supported locally, ignoring local=False")
+    
+    # Import database utilities
+    from .database_utils import process_database
+    
+    # Determine mode from options
+    mode = None
+    if options:
+        if options.get("schema_only"):
+            mode = "schema"
+        elif options.get("preview"):
+            mode = "preview"
+    
+    # Process the database
+    return process_database(
+        connection_info=filepath,
+        query=query,
+        db_type=db_type,
+        mode=mode,
+        verbose=verbose,
+        options=options
+    )
 
 def scrape_pptx(
     file_path: str, verbose: bool = False, text_only: bool = False

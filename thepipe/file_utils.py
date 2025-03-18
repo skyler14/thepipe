@@ -26,6 +26,39 @@ def detect_source_type(source: str) -> str:
     mimetype = result.output.mime_type
     return mimetype
 
+def is_database_source(source: str) -> bool:
+    """
+    Check if a source is likely a database connection string or database file.
+    
+    Args:
+        source: File path or connection string
+        
+    Returns:
+        True if the source appears to be a database
+    """
+    # Check for database connection strings
+    db_prefixes = [
+        "postgresql://", "postgres://",
+        "mysql://", "sqlite://", 
+        "mssql://", "oracle://"
+    ]
+    
+    # Check prefixes
+    if any(source.startswith(prefix) for prefix in db_prefixes):
+        return True
+        
+    # Check file extensions for database files
+    db_extensions = [
+        ".parquet", ".parq",
+        ".db", ".sqlite", ".sqlite3",
+        ".duckdb"
+    ]
+    
+    if any(source.endswith(ext) for ext in db_extensions):
+        return True
+        
+    return False
+
 def find_subtitle_files(directory: str, video_title: str) -> List[str]:
     subtitle_files = []
     for file in os.listdir(directory):
