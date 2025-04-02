@@ -15,7 +15,7 @@ from .core import Chunk
 
 # Import the JupySQL middleware
 from .jupysql_middleware import Database
-from .database_analysis import get_table_name,get_specialized_sql_examples,fix_sql_syntax,execute_intent_based_fallback,get_auto_analysis
+from .database_analysis import execute_fallback, format_analysis_for_llm, get_sql_examples_for_intent, get_table_name,fix_sql_syntax,get_auto_analysis
 # Constants
 DEFAULT_MAX_ROWS = 15
 DEFAULT_PREVIEW_ROWS = 5
@@ -542,7 +542,7 @@ class DatabaseManager:
     
     def process_nl_query(self, natural_language_query: str, llm_config: Optional[Dict[str, Any]] = None) -> List[Chunk]:
         """
-        Process natural language query using an LLM to convert to SQL with improved data type handling.
+        Process natural language query using an LLM to convert to SQL.
         
         Args:
             natural_language_query: Natural language question to convert to SQL
@@ -556,47 +556,35 @@ class DatabaseManager:
         
         if self.verbose:
             print(f"[thepipe] Processing natural language query: '{natural_language_query}'")
-            print(f"[thepipe] LLM config: {llm_config}")
         
         # Check if LLM configuration is provided
         if not llm_config:
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/error",
-                texts=["Natural language queries require LLM configuration. "
-                    "Please provide LLM configuration via the options parameter."]
+                texts=["Natural language queries require LLM configuration."]
             ))
             return chunks
         
         try:
-            # Import necessary components
             import os
             from openai import OpenAI
             
-            # Perform automatic analysis to enrich context
-            if self.verbose:
-                print(f"[thepipe] Performing automatic data analysis to enrich context")
-                
+            # Get analysis information
             analysis = get_auto_analysis(
-                    db_instance=self.db,
-                    db_type=self.db_type, 
-                    verbose=self.verbose
-                )
+                db_instance=self.db,
+                db_type=self.db_type, 
+                verbose=self.verbose
+            )
             
-            # Set up OpenAI client configuration
+            # Set up OpenAI client
             api_key = llm_config.get("api_key", os.environ.get("OPENAI_API_KEY"))
             api_base = llm_config.get("api_base", os.environ.get("OPENAI_API_BASE"))
             model = llm_config.get("model", "gpt-3.5-turbo")
             
-            if self.verbose:
-                print(f"[thepipe] Using LLM model: {model}")
-                print(f"[thepipe] API base URL: {api_base}")
-                print(f"[thepipe] API key provided: {'Yes' if api_key else 'No'}")
-            
             if not api_key:
                 chunks.append(Chunk(
                     path=f"database://{self.db_type}/error",
-                    texts=["API key is required for natural language queries. "
-                        "Please provide it via llm_config or set OPENAI_API_KEY environment variable."]
+                    texts=["API key is required for natural language queries."]
                 ))
                 return chunks
             
@@ -607,170 +595,34 @@ class DatabaseManager:
                 
             client = OpenAI(**client_args)
             
-            # Get schema information as text
-            schema_text = schema_chunk.texts[0] if schema_chunk.texts else ""
+            # Get view name
+            view_name = get_table_name(self.db, self.db_type, self.verbose)
             
-            # Extract table names and columns with their types for data-aware prompting
-            table_names = []
-            columns_info = {}
-            
-            table_pattern = r"### Table: (.*?)\n"
-            for match in re.finditer(table_pattern, schema_text):
-                table_names.append(match.group(1))
-            
-            # Extract column types from schema
-            column_pattern = r"\| (.*?) \| (.*?) \|"
-            current_table = None
-            
-            for line in schema_text.split('\n'):
-                table_match = re.search(r"### Table: (.*?)$", line)
-                if table_match:
-                    current_table = table_match.group(1)
-                    columns_info[current_table] = []
-                    continue
-                    
-                if current_table:
-                    col_match = re.search(column_pattern, line)
-                    if col_match:
-                        col_name = col_match.group(1).strip()
-                        col_type = col_match.group(2).strip()
-                        
-                        # Skip header rows in tables
-                        if col_name not in ["Column", "-----"] and col_type not in ["Type", "------"]:
-                            columns_info[current_table].append({
-                                "name": col_name,
-                                "type": col_type
-                            })
-            
-            # Categorize columns by data type for better prompting
-            text_columns = []
-            numeric_columns = []
-            date_columns = []
-            categorical_columns = []
-            
-            for table, columns in columns_info.items():
-                for col in columns:
-                    col_name = col["name"]
-                    col_type = col["type"].lower()
-                    
-                    # Categorize columns by data type
-                    if any(typ in col_type for typ in ["char", "text", "varchar", "string", "object"]):
-                        # Check if likely text field with multiple words
-                        if any(indicator in col_name.upper() for indicator in ["DESCRIPTION", "TEXT", "CONTENT", "COMMENT", "NOTE", "MESSAGE", "BIO"]):
-                            text_columns.append(col_name)
-                        else:
-                            categorical_columns.append(col_name)
-                    elif any(typ in col_type for typ in ["int", "float", "double", "decimal", "numeric"]):
-                        numeric_columns.append(col_name)
-                    elif any(typ in col_type for typ in ["date", "time", "timestamp"]):
-                        date_columns.append(col_name)
-                    # If type is unknown, check column name
-                    elif any(indicator in col_name.upper() for indicator in ["DATE", "TIME", "YEAR", "MONTH", "DAY"]):
-                        date_columns.append(col_name)
-                        
-            # Determine query intent for specialized prompting
-            intent_keywords = {
-                "text_analysis": ["word", "keyword", "text", "phrase", "description", "content", "mention", "say", "talk", "describe"],
-                "numeric_analysis": ["average", "sum", "count", "total", "maximum", "minimum", "mean", "median", "calculate", "value"],
-                "time_analysis": ["when", "trend", "time", "period", "date", "year", "month", "day", "since", "until", "before", "after"],
-                "categorization": ["group", "category", "type", "classify", "segment", "bucket", "cluster", "distribution"]
-            }
-            
-            # Determine query intent based on keywords
+            # Determine query intent
             query_intent = "general"
-            for intent, keywords in intent_keywords.items():
-                if any(kw in natural_language_query.lower() for kw in keywords):
-                    query_intent = intent
-                    break
-                                        
-            if self.verbose:
-                print(f"[thepipe] Query intent detected: {query_intent}")
-                print(f"[thepipe] Text columns: {text_columns}")
-                print(f"[thepipe] Numeric columns: {numeric_columns}")
-                print(f"[thepipe] Date columns: {date_columns}")
-                print(f"[thepipe] Categorical columns: {categorical_columns}")
+            query_lower = natural_language_query.lower()
             
-            # View name for queries
-            view_name = {
-                "parquet": "parquet_data",
-                "csv": "csv_data", 
-                "excel": "excel_data"
-            }.get(self.db_type, "parquet_data")
+            if any(word in query_lower for word in ["word", "text", "phrase", "mention"]):
+                query_intent = "text_analysis"
+            elif any(word in query_lower for word in ["average", "sum", "count", "max", "min"]):
+                query_intent = "numeric_analysis"
+            elif any(word in query_lower for word in ["trend", "time", "date", "year", "month"]):
+                query_intent = "time_analysis"
+            elif any(word in query_lower for word in ["group", "category", "type", "distribution"]):
+                query_intent = "categorization"
             
-            # Generate specialized SQL examples based on query intent
-            sql_examples = get_specialized_sql_examples(
-                query_intent=query_intent,
-                view_name=view_name,
-                text_columns=text_columns,
-                numeric_columns=numeric_columns,
-                date_columns=date_columns,
-                categorical_columns=categorical_columns
-            )
+            # Get analysis and examples
+            analysis_text = format_analysis_for_llm(analysis)
+            sql_examples = get_sql_examples_for_intent(query_intent, view_name)
             
-            # Create data type explanations for better prompt understanding
-            data_type_guidance = ""
-            
-            if text_columns and query_intent in ["text_analysis"]:
-                columns_list = ", ".join(text_columns)
-                data_type_guidance += f"""
-                IMPORTANT NOTE ABOUT TEXT FIELDS:
-                The columns {columns_list} contain text data that may include multiple words, sentences, or paragraphs. 
-                When analyzing text content:
-                1. Use regexp_split_to_array to break text into individual words for word frequency analysis
-                2. Properly tokenize text by splitting on whitespace ('\\\\s+')
-                3. Filter out common words and short words that aren't meaningful
-                4. For pattern matching, use regular expressions with proper syntax for DuckDB
-                5. For exact matches, use the IN operator with a list of relevant terms
-                """
-            
-            if numeric_columns and query_intent == "numeric_analysis":
-                columns_list = ", ".join(numeric_columns)
-                data_type_guidance += f"""
-                IMPORTANT NOTE ABOUT NUMERIC FIELDS:
-                The columns {columns_list} contain numeric data. 
-                When analyzing numeric data:
-                1. Use appropriate aggregate functions (SUM, AVG, MIN, MAX, etc.)
-                2. Handle NULL values correctly with IS NULL/IS NOT NULL checks
-                3. Use CAST or :: operators when type conversion is needed
-                4. Consider using window functions for running calculations or rankings
-                """
-            
-            if date_columns and query_intent == "time_analysis":
-                columns_list = ", ".join(date_columns)
-                data_type_guidance += f"""
-                IMPORTANT NOTE ABOUT DATE/TIME FIELDS:
-                The columns {columns_list} contain date or time data.
-                When analyzing date/time data:
-                1. Use date/time functions like EXTRACT to get components (year, month, day)
-                2. Format dates appropriately with TO_CHAR or similar functions
-                3. Use date arithmetic for time periods and ranges
-                4. Group by time periods for trend analysis
-                """
-            
-            # Create analysis summary text for LLM context
-            analysis_text = ""
-            if 'error' not in analysis:
-                analysis_text += f"Dataset contains {analysis.get('total_rows', 'unknown')} rows.\n\n"
-                
-                # Add categorical column information
-                if 'column_stats' in analysis:
-                    analysis_text += "Key column distributions:\n"
-                    cols_shown = 0
-                    for col, stats in analysis['column_stats'].items():
-                        if stats['type'] == 'categorical' and cols_shown < 3:
-                            cols_shown += 1
-                            analysis_text += f"\n{col}:\n"
-                            for val in stats['top_values'][:5]:  # Limit to top 5
-                                analysis_text += f"- {val['value']}: {val['count']} rows ({val['percentage']:.1f}%)\n"
-            
-            # Create prompt for the LLM
+            # Create prompt for LLM
             prompt = f"""
-            You are an SQL expert tasked with converting a natural language question into a DuckDB SQL query.
+            Convert this natural language question into a DuckDB SQL query.
+
+            QUESTION: {natural_language_query}
             
             DATABASE SCHEMA:
-            {schema_text}
-            
-            {data_type_guidance}
+            {schema_chunk.texts[0]}
             
             DATA ANALYSIS:
             {analysis_text}
@@ -778,105 +630,47 @@ class DatabaseManager:
             SQL EXAMPLES:
             {sql_examples}
             
-            QUESTION:
-            {natural_language_query}
-            
-            SPECIFIC INSTRUCTIONS:
-            1. Generate a SQL query for DuckDB that answers the question
-            2. Focus on columns that are most relevant to the question
-            3. Apply proper data type handling as described in the guidance notes
-            4. The SQL should be syntactically correct for DuckDB specifically
-            5. Return ONLY the SQL query with no explanations, comments or markdown formatting
+            Return ONLY the SQL query without any explanations or markdown.
             """
             
-            if self.verbose:
-                print("[thepipe] Sending request to LLM...")
-                print(f"[thepipe] Using {query_intent} specialized prompt")
-                
             # Get SQL query from LLM
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": "You are a database expert that converts questions to SQL. You always respond with ONLY the SQL query, nothing else."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a database expert that converts questions to SQL."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0
+            )
+            
+            sql_query = response.choices[0].message.content.strip()
+            
+            # Clean up the SQL query
+            if sql_query.startswith("```sql"):
+                sql_query = sql_query.split("```sql")[1]
+            elif sql_query.startswith("```"):
+                sql_query = sql_query.split("```")[1]
+                
+            if sql_query.endswith("```"):
+                sql_query = sql_query.split("```")[0]
+            
+            sql_query = sql_query.strip()
+            
+            # Fix common syntax errors
+            sql_query = fix_sql_syntax(sql_query)
+                
+            # Check if we got a valid query
+            if not sql_query or not sql_query.lower().startswith("select"):
+                return execute_fallback(
+                    query=natural_language_query,
+                    db_instance=self.db,
+                    view_name=view_name,
+                    verbose=self.verbose
                 )
-                
-                if self.verbose:
-                    print("[thepipe] Received response from LLM")
-                    print(f"[thepipe] Raw LLM response: {response.choices[0].message.content}")
-                
-                sql_query = response.choices[0].message.content.strip()
-                
-                # Clean up the SQL query (remove markdown formatting if present)
-                if sql_query.startswith("```sql"):
-                    sql_query = sql_query.split("```sql")[1]
-                elif sql_query.startswith("```"):
-                    sql_query = sql_query.split("```")[1]
-                    
-                if sql_query.endswith("```"):
-                    sql_query = sql_query.split("```")[0]
-                
-                sql_query = sql_query.strip()
-                
-                if self.verbose:
-                    print(f"[thepipe] Generated SQL after cleanup: '{sql_query}'")
-                
-                # Fix common syntax errors in the generated SQL
-                sql_query = fix_sql_syntax(sql_query, query_intent)
-                    
-                # Check if we actually got a query
-                if not sql_query or not sql_query.lower().startswith("select"):
-                    error_message = "LLM returned an empty or invalid SQL query. Using intent-based fallback query instead."
-                    if self.verbose:
-                        print(f"[thepipe] Warning: {error_message}")
-                        
-                    # Use an intent-based fallback query
-                    return execute_intent_based_fallback(
-                            chunks=chunks,
-                            query=natural_language_query,
-                            intent=query_intent,
-                            db_instance=self.db,  # No need to specify view_name
-                            text_columns=text_columns,
-                            numeric_columns=numeric_columns,
-                            date_columns=date_columns,
-                            categorical_columns=categorical_columns,
-                            db_type=self.db_type,
-                            verbose=self.verbose
-                        )
-                    
-            except Exception as e:
-                if self.verbose:
-                    print(f"[thepipe] Error getting SQL from LLM: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    
-                # Use an intent-based fallback query
-                return execute_intent_based_fallback(
-                        chunks=chunks,
-                        query=natural_language_query,
-                        intent=query_intent,
-                        view_name=view_name,
-                        text_columns=text_columns,
-                        numeric_columns=numeric_columns,
-                        date_columns=date_columns,
-                        categorical_columns=categorical_columns,
-                        db_type=self.db_type,
-                        db_instance=self.db,
-                        verbose=self.verbose
-                    )
             
             # Execute the generated SQL query
             try:
-                if self.verbose:
-                    print(f"[thepipe] Executing SQL: {sql_query}")
-                    
                 result = self.db.query(sql_query)
-                
-                if self.verbose:
-                    print(f"[thepipe] Query executed successfully. Result shape: {result.shape if hasattr(result, 'shape') else 'N/A'}")
                 
                 # Format the result
                 result_text = f"## Natural Language Query\n\n{natural_language_query}\n\n"
@@ -886,15 +680,12 @@ class DatabaseManager:
                     result_text += f"## Results ({len(result)} rows)\n\n"
                     
                     if not result.empty:
-                        # Convert to JSON for consistent formatting
                         result_text += "```json\n"
                         result_text += result.to_json(orient='records', indent=2)
                         result_text += "\n```"
                     else:
                         result_text += "*No rows returned*"
                 else:
-                    # Non-DataFrame result
-                    result_text += f"## Results\n\n"
                     result_text += "Query executed successfully."
                 
                 chunks.append(Chunk(
@@ -903,36 +694,18 @@ class DatabaseManager:
                 ))
                 
             except Exception as e:
-                if self.verbose:
-                    print(f"[thepipe] Error executing generated SQL: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    
-                # Use an intent-based fallback query
-                return execute_intent_based_fallback(
-                        chunks=chunks,
-                        query=natural_language_query,
-                        intent=query_intent,
-                        view_name=view_name,
-                        text_columns=text_columns,
-                        numeric_columns=numeric_columns,
-                        date_columns=date_columns,
-                        categorical_columns=categorical_columns,
-                        error=str(e),
-                        failed_query=sql_query,
-                        db_type=self.db_type,
-                        db_instance=self.db,
-                        verbose=self.verbose
-                    )
+                return execute_fallback(
+                    query=natural_language_query,
+                    view_name=view_name,
+                    error=str(e),
+                    failed_query=sql_query,
+                    db_instance=self.db,
+                    verbose=self.verbose
+                )
             
             return chunks
                 
         except Exception as e:
-            if self.verbose:
-                print(f"[thepipe] Error processing natural language query: {str(e)}")
-                import traceback
-                traceback.print_exc()
-            
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/error",
                 texts=[f"Error processing natural language query: {str(e)}"]
