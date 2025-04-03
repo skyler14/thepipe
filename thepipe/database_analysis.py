@@ -9,20 +9,19 @@ import pandas as pd
 import re
 from .core import Chunk
 
-def get_table_name(db_instance, db_type: str = None, verbose: bool = False) -> str:
-    """Determine the appropriate table or view name to use with a database connection."""
-    if verbose:
-        print(f"[thepipe] Getting table name for db_type: {db_type}")
+def get_all_tables(db_instance, db_type: str = None, verbose: bool = False) -> List[str]:
+    """Retrieve all available tables in the database."""
+    tables = []
     
     # Try jupysql metadata API
     try:
         if hasattr(db_instance, 'tables'):
-            tables = db_instance.tables()
-            if isinstance(tables, pd.DataFrame) and not tables.empty:
-                table_name = tables.iloc[0, 0]
+            tables_df = db_instance.tables()
+            if isinstance(tables_df, pd.DataFrame) and not tables_df.empty:
+                tables.extend(tables_df.iloc[:, 0].tolist())
                 if verbose:
-                    print(f"[thepipe] Found table via jupysql metadata: {table_name}")
-                return table_name
+                    print(f"[thepipe] Found {len(tables)} tables via jupysql metadata")
+                return tables
     except Exception as e:
         if verbose:
             print(f"[thepipe] Error getting tables via metadata API: {str(e)}")
@@ -31,44 +30,195 @@ def get_table_name(db_instance, db_type: str = None, verbose: bool = False) -> s
     try:
         tables_df = db_instance.query("SELECT name FROM sqlite_master WHERE type='table' OR type='view'")
         if not tables_df.empty:
-            table_name = tables_df['name'].iloc[0]
+            tables.extend(tables_df['name'].tolist())
             if verbose:
-                print(f"[thepipe] Found table via SQLite metadata: {table_name}")
-            return table_name
+                print(f"[thepipe] Found {len(tables)} tables via SQLite metadata")
+            return tables
     except Exception:
-        if verbose:
-            print("[thepipe] SQLite metadata approach failed")
+        pass
     
     # Try information_schema
     try:
         tables_df = db_instance.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
         if not tables_df.empty:
-            table_name = tables_df['table_name'].iloc[0]
+            tables.extend(tables_df['table_name'].tolist())
             if verbose:
-                print(f"[thepipe] Found table via information_schema: {table_name}")
-            return table_name
+                print(f"[thepipe] Found {len(tables)} tables via information_schema")
+            return tables
     except Exception:
         pass
     
-    # Try default view names based on db_type
-    default_views = {"parquet": "parquet_data", "csv": "csv_data", "excel": "excel_data"}
-    if db_type in default_views:
-        view_name = default_views[db_type]
+    # Default tables based on db_type
+    if db_type in ["parquet", "csv", "excel"]:
+        default_views = {"parquet": "parquet_data", "csv": "csv_data", "excel": "excel_data"}
+        tables.append(default_views.get(db_type))
+    
+    return tables
+
+def get_table_name(db_instance, db_type: str = None, verbose: bool = False) -> str:
+    """
+    Determine the appropriate table or view name to use with a database connection.
+    Simplified version that gets the first table from get_all_tables.
+    """
+    tables = get_all_tables(db_instance, db_type, verbose)
+    if not tables:
+        raise ValueError("Could not determine database table name. Please provide a table name explicitly.")
+    return tables[0]
+
+def get_schema_for_all_tables(db_instance, tables: List[str], verbose: bool = False) -> str:
+    """Generate schema information for all tables."""
+    schema_text = "## Database Schema\n\n"
+    
+    for table in tables:
         try:
-            db_instance.query(f"SELECT * FROM {view_name} LIMIT 1")
-            return view_name
+            sample_df = db_instance.query(f"SELECT * FROM {table} LIMIT 1")
+            
+            schema_text += f"### Table: {table}\n\n"
+            schema_text += "| Column | Type |\n"
+            schema_text += "|--------|------|\n"
+            
+            for col_name, dtype in sample_df.dtypes.items():
+                schema_text += f"| {col_name} | {dtype} |\n"
+            
+            schema_text += "\n"
+            
+        except Exception as e:
+            if verbose:
+                print(f"[thepipe] Error getting schema for table {table}: {str(e)}")
+            schema_text += f"### Table: {table}\n\n*Schema information not available*\n\n"
+    
+    return schema_text
+
+def detect_relationships(db_instance, tables: List[str], verbose: bool = False) -> List[Dict]:
+    """Detect potential relationships between tables."""
+    relationships = []
+    
+    # Only try for standard database types
+    try:
+        # Try standard FK information (works for MySQL, PostgreSQL)
+        fk_query = """
+        SELECT
+            tc.table_name as table_name,
+            kcu.column_name as column_name,
+            ccu.table_name AS foreign_table_name,
+            ccu.column_name AS foreign_column_name
+        FROM information_schema.table_constraints AS tc
+        JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name
+        JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name
+        WHERE constraint_type = 'FOREIGN KEY'
+        """
+        
+        try:
+            fk_df = db_instance.query(fk_query)
+            if not fk_df.empty:
+                for _, row in fk_df.iterrows():
+                    relationships.append({
+                        'table': row['table_name'],
+                        'column': row['column_name'],
+                        'foreign_table': row['foreign_table_name'],
+                        'foreign_column': row['foreign_column_name']
+                    })
+                return relationships
         except Exception:
             pass
+            
+        # If standard approach fails, try heuristic detection
+        # Look for columns with identical names across tables that might be join keys
+        common_columns = {}
+        
+        for table in tables:
+            try:
+                sample_df = db_instance.query(f"SELECT * FROM {table} LIMIT 1")
+                columns = sample_df.columns.tolist()
+                
+                for col in columns:
+                    if col.endswith('_id') or col == 'id':  # Potential key columns
+                        if col not in common_columns:
+                            common_columns[col] = []
+                        common_columns[col].append(table)
+            except Exception:
+                continue
+        
+        # Create relationship entries for columns that appear in multiple tables
+        for col, tables_list in common_columns.items():
+            if len(tables_list) > 1:
+                for i in range(len(tables_list)):
+                    for j in range(i+1, len(tables_list)):
+                        relationships.append({
+                            'table': tables_list[i],
+                            'column': col,
+                            'foreign_table': tables_list[j],
+                            'foreign_column': col,
+                            'confidence': 'heuristic'  # Flag as heuristic detection
+                        })
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error detecting relationships: {str(e)}")
     
-    # Try common view names
-    for view_name in ["parquet_data", "csv_data", "excel_data", "data"]:
-        try:
-            db_instance.query(f"SELECT * FROM {view_name} LIMIT 1")
-            return view_name
-        except Exception:
-            pass
+    return relationships
+
+def get_multi_table_examples(tables: List[str], relationships: List[Dict]) -> str:
+    """Generate SQL examples for queries across multiple tables."""
+    if len(tables) < 2:
+        return ""  # No multi-table examples needed
+        
+    examples = "# Multi-Table Query Examples:\n\n"
     
-    raise ValueError("Could not determine database table name. Please provide a table name explicitly.")
+    # If we have detected relationships, use them for examples
+    if relationships:
+        rel = relationships[0]  # Use the first relationship
+        examples += f"""
+        # Join Example:
+        SELECT 
+            t1.*, t2.column_name
+        FROM {rel['table']} t1
+        JOIN {rel['foreign_table']} t2 ON t1.{rel['column']} = t2.{rel['foreign_column']}
+        LIMIT 10;
+        """
+    else:
+        # Generic example with the first two tables
+        examples += f"""
+        # Generic Join Example:
+        SELECT 
+            t1.*, t2.*
+        FROM {tables[0]} t1
+        JOIN {tables[1]} t2 ON t1.id = t2.id
+        LIMIT 10;
+        """
+    
+    return examples
+
+def create_nl_query_prompt(natural_language_query: str, 
+                          schema_text: str, 
+                          analysis_text: str,
+                          sql_examples: str,
+                          multi_table_examples: str) -> str:
+    """Create a comprehensive prompt for natural language to SQL conversion."""
+    return f"""
+    Convert this natural language question into a SQL query.
+
+    QUESTION: {natural_language_query}
+    
+    DATABASE SCHEMA:
+    {schema_text}
+    
+    DATA ANALYSIS:
+    {analysis_text}
+    
+    SQL EXAMPLES:
+    {sql_examples}
+    
+    {multi_table_examples}
+    
+    IMPORTANT NOTES:
+    1. Consider ALL tables in the schema when formulating your query
+    2. Use JOIN operations when the question requires data from multiple tables
+    3. Make sure to use table aliases when joining (t1, t2, etc.)
+    4. Ensure column references are qualified with table names when using JOINs
+    
+    Return ONLY the SQL query without any explanations or markdown.
+    """
 
 def is_sql(query: str) -> bool:
     """Determine if a query is SQL or natural language."""
@@ -144,6 +294,7 @@ def format_analysis_for_llm(analysis: Dict[str, Any]) -> str:
         
     return analysis_text
 
+# MODIFIED: Added optional view_name parameter to avoid redundant calls
 def get_auto_analysis(db_instance, db_type: str = None, view_name: str = None, 
                     max_samples: int = 5, verbose: bool = False) -> Dict[str, Any]:
     """Automatically analyze database to generate useful insights."""
@@ -521,18 +672,22 @@ def execute_fallback(query: str, db_instance, view_name: str,
     chunks.append(Chunk(path=f"database://fallback", texts=[result_text]))
     return chunks
 
+# MODIFIED: Added tables parameter to avoid redundant calls
 def generate_data_insights(db_instance, natural_language_query: str, 
                          db_type: str = None, view_name: str = None,
+                         tables: List[str] = None, # Added parameter
                          llm_config: Optional[Dict[str, Any]] = None,
                          max_iterations: int = 1, verbose: bool = False) -> List[Chunk]:
     """Generate insights from database using LLM-driven analysis."""
-    # Auto-detect view_name if not provided
+    # Auto-detect tables and view_name if not provided
+    if tables is None:
+        tables = get_all_tables(db_instance, db_type, verbose)
+    
     if view_name is None:
-        try:
-            view_name = get_table_name(db_instance, db_type, verbose)
-        except ValueError as e:
+        view_name = tables[0] if tables else None
+        if not view_name:
             return [Chunk(path=f"database://{db_type or 'unknown'}/error", 
-                         texts=[f"Error determining table name: {str(e)}"])]
+                         texts=["Error determining table name: No tables found"])]
     
     # Get schema information
     schema_text = ""
@@ -580,11 +735,11 @@ def generate_data_insights(db_instance, natural_language_query: str,
             
         client = OpenAI(**client_args)
         
-        # Get initial data analysis
+        # Get initial data analysis - pass the view_name directly
         initial_analysis = get_auto_analysis(
             db_instance=db_instance,
             db_type=db_type,
-            view_name=view_name,
+            view_name=view_name, # Use the pre-fetched view_name
             verbose=verbose
         )
         

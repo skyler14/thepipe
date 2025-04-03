@@ -15,7 +15,7 @@ from .core import Chunk
 
 # Import the JupySQL middleware
 from .jupysql_middleware import Database
-from .database_analysis import execute_fallback, format_analysis_for_llm, get_sql_examples_for_intent, get_table_name,fix_sql_syntax,get_auto_analysis
+from .database_analysis import create_nl_query_prompt, detect_relationships, execute_fallback, format_analysis_for_llm, get_all_tables, get_multi_table_examples, get_schema_for_all_tables, get_sql_examples_for_intent, get_table_name,fix_sql_syntax,get_auto_analysis
 # Constants
 DEFAULT_MAX_ROWS = 15
 DEFAULT_PREVIEW_ROWS = 5
@@ -501,6 +501,14 @@ class DatabaseManager:
         chunks = [schema_chunk]
         
         try:
+            # Fix query syntax if SQLFluff is available
+            if is_sqlfluff_available():
+                dialect = get_sql_dialect(self.db_type)
+                original_query = query
+                query = lint_and_fix_sql(query, dialect)
+                if self.verbose and original_query != query:
+                    print(f"[thepipe] SQLFluff fixed query from:\n{original_query}\nto:\n{query}")
+            
             # Execute the query
             result = self.db.query(query, params=params)
             
@@ -539,7 +547,7 @@ class DatabaseManager:
             ))
             
             return chunks
-    
+
     def process_nl_query(self, natural_language_query: str, llm_config: Optional[Dict[str, Any]] = None) -> List[Chunk]:
         """
         Process natural language query using an LLM to convert to SQL.
@@ -549,13 +557,31 @@ class DatabaseManager:
             llm_config: Configuration for the LLM
             
         Returns:
-            List of Chunk objects with query results or insights
+            List of Chunk objects with query results
         """
-        schema_chunk = self.get_schema()
+        # FIXED: Get all tables once and reuse throughout the function
+        tables = get_all_tables(self.db, self.db_type, self.verbose)
+        
+        # Get the view_name from tables list instead of calling get_table_name
+        view_name = tables[0] if tables else None
+        if not view_name:
+            chunks = [Chunk(
+                path=f"database://{self.db_type}/error",
+                texts=["Could not determine database table name. Please provide a table name explicitly."]
+            )]
+            return chunks
+            
+        # Get schema information for all tables - reuse tables list
+        schema_text = get_schema_for_all_tables(self.db, tables, self.verbose)
+        schema_chunk = Chunk(
+            path=f"database://{self.db_type}/schema",
+            texts=[schema_text]
+        )
         chunks = [schema_chunk]
         
         if self.verbose:
             print(f"[thepipe] Processing natural language query: '{natural_language_query}'")
+            print(f"[thepipe] Found {len(tables)} tables")
         
         # Check if LLM configuration is provided
         if not llm_config:
@@ -569,10 +595,11 @@ class DatabaseManager:
             import os
             from openai import OpenAI
             
-            # Get analysis information
+            # FIXED: Pass the view_name directly to get_auto_analysis
             analysis = get_auto_analysis(
                 db_instance=self.db,
-                db_type=self.db_type, 
+                db_type=self.db_type,
+                view_name=view_name,  # Use already retrieved view_name
                 verbose=self.verbose
             )
             
@@ -595,9 +622,6 @@ class DatabaseManager:
                 
             client = OpenAI(**client_args)
             
-            # Get view name
-            view_name = get_table_name(self.db, self.db_type, self.verbose)
-            
             # Determine query intent
             query_intent = "general"
             query_lower = natural_language_query.lower()
@@ -615,23 +639,18 @@ class DatabaseManager:
             analysis_text = format_analysis_for_llm(analysis)
             sql_examples = get_sql_examples_for_intent(query_intent, view_name)
             
-            # Create prompt for LLM
-            prompt = f"""
-            Convert this natural language question into a DuckDB SQL query.
-
-            QUESTION: {natural_language_query}
+            # Detect relationships and get multi-table examples if needed
+            relationships = detect_relationships(self.db, tables, self.verbose)
+            multi_table_examples = get_multi_table_examples(tables, relationships) if len(tables) > 1 else ""
             
-            DATABASE SCHEMA:
-            {schema_chunk.texts[0]}
-            
-            DATA ANALYSIS:
-            {analysis_text}
-            
-            SQL EXAMPLES:
-            {sql_examples}
-            
-            Return ONLY the SQL query without any explanations or markdown.
-            """
+            # Create enhanced prompt
+            prompt = create_nl_query_prompt(
+                natural_language_query=natural_language_query,
+                schema_text=schema_text,
+                analysis_text=analysis_text,
+                sql_examples=sql_examples,
+                multi_table_examples=multi_table_examples
+            )
             
             # Get SQL query from LLM
             response = client.chat.completions.create(
@@ -656,7 +675,15 @@ class DatabaseManager:
             
             sql_query = sql_query.strip()
             
-            # Fix common syntax errors
+            # Fix SQL using SQLFluff
+            if is_sqlfluff_available():
+                dialect = get_sql_dialect(self.db_type)
+                original_query = sql_query
+                sql_query = lint_and_fix_sql(sql_query, dialect)
+                if self.verbose and original_query != sql_query:
+                    print(f"[thepipe] SQLFluff fixed query from:\n{original_query}\nto:\n{sql_query}")
+            
+            # Also apply our basic syntax fixes
             sql_query = fix_sql_syntax(sql_query)
                 
             # Check if we got a valid query
@@ -712,7 +739,7 @@ class DatabaseManager:
             ))
             
             return chunks
-  
+        
     def close(self):
         """Close the database connection and clean up resources."""
         if hasattr(self, '_temp_path') and os.path.exists(self._temp_path):
@@ -912,3 +939,69 @@ def is_sql(query: str) -> bool:
     
     # Check if query starts with any SQL keyword
     return any(query_lower.startswith(keyword) for keyword in sql_keywords)
+
+def is_sqlfluff_available() -> bool:
+    """Check if SQLFluff is available."""
+    try:
+        import sqlfluff
+        return True
+    except ImportError:
+        return False
+
+def get_sql_dialect(db_type: str) -> str:
+    """Get SQLFluff dialect for a database type."""
+    dialect_mapping = {
+        "postgres": "postgres",
+        "postgresql": "postgres",
+        "mysql": "mysql",
+        "sqlite": "sqlite",
+        "duckdb": "duckdb",
+        "parquet": "duckdb",
+        "csv": "duckdb",
+        "excel": "duckdb"
+    }
+    return dialect_mapping.get(db_type.lower(), "ansi")
+
+def is_templated_sql(sql_query: str) -> bool:
+    """Check if SQL query contains template syntax."""
+    template_patterns = [
+        r'{{.*?}}',  # Jinja/dbt style
+        r'\$\{.*?\}',  # String interpolation style
+        r':\w+',  # Named parameter style
+        r'\$\d+'   # Positional parameter style
+    ]
+    
+    return any(re.search(pattern, sql_query) for pattern in template_patterns)
+
+def lint_and_fix_sql(sql_query: str, dialect: str = "duckdb") -> str:
+    """Lint and fix SQL query using SQLFluff."""
+    if not is_sqlfluff_available():
+        return sql_query
+        
+    try:
+        import sqlfluff
+        
+        # Check for templating
+        templated = is_templated_sql(sql_query)
+        
+        # Remove trailing semicolons
+        sql_query = sql_query.strip()
+        if sql_query.endswith(';'):
+            sql_query = sql_query[:-1]
+            
+        # Configure SQLFluff
+        config = {
+            "dialect": dialect,
+            "templater": "jinja" if templated else "raw"
+        }
+        
+        # Fix the query
+        fixed_query = sqlfluff.fix(
+            sql_query,
+            config=config,
+            only_fix_lint_errors=True
+        )
+        
+        return fixed_query if fixed_query else sql_query
+    except Exception:
+        return sql_query
