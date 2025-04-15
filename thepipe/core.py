@@ -231,7 +231,7 @@ def save_outputs(
         return path.lower().endswith('.pdf')
 
     # First write: output with minimal headers
-    for chunk in chunks:
+    for i,chunk in enumerate(chunks):
         if chunk is None or (not chunk.texts and not chunk.images):
             continue
 

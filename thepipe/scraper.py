@@ -15,7 +15,7 @@ from PIL import Image
 import requests
 import json
 from .drive_utils import extract_drive_id, process_drive_content
-from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, find_video_file
+from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, get_filtered_files
 from .media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
 from .web_utils import (
     SCRAPING_PROMPT,
@@ -185,32 +185,23 @@ def scrape_plaintext(file_path: str) -> List[Chunk]:
 def scrape_directory(dir_path: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     extraction = []
     
-    if include_patterns is not None:
-        # Use glob patterns
-        all_files = []
-        for pattern in include_patterns:
-            pattern_path = os.path.join(dir_path, '**', pattern)
-            all_files.extend(glob.glob(pattern_path, recursive=True))
-    elif include_regex is not None:
-        # Use regex
-        all_files = []
-        for root, _, files in os.walk(dir_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                if re.search(include_regex, file_path, re.IGNORECASE):
-                    all_files.append(file_path)
-    else:
-        # Neither pattern nor regex specified, include all files
-        all_files = []
-        for root, _, files in os.walk(dir_path):
-            for file in files:
-                all_files.append(os.path.join(root, file))
+    # Process options
+    options = options or {}
     
-    # Ensure we're only dealing with files
-    all_files = [f for f in all_files if os.path.isfile(f)]
+    # Get blacklist files list (if any)
+    blacklist_files = options.get('blacklist_files', [])
+    
+    # Get filtered file list
+    all_files = get_filtered_files(
+        dir_path=dir_path,
+        include_regex=include_regex,
+        include_patterns=include_patterns,
+        blacklist_files=blacklist_files,
+        verbose=verbose
+    )
     
     if verbose:
-        print(f"[thepipe] Found {len(all_files)} files to process in {dir_path}")
+        print(f"[thepipe] Processing {len(all_files)} files in {dir_path}")
     
     with ThreadPoolExecutor() as executor:
         results = executor.map(
@@ -728,7 +719,7 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str,
                             break
                 
                 # If no subtitles found and we're in default mode, fall back to transcription
-                if not subtitle_files and text_only is 'default':
+                if not subtitle_files and text_only == 'default':  # Fixed comparison
                     if verbose:
                         print("[thepipe] No subtitles found, falling back to transcription...")
                     # Update options for audio-only download
@@ -785,8 +776,8 @@ def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[s
 
 
 def scrape_github(
-    github_url: str,include_regex: Optional[str] = None,include_patterns: Optional[List[str]] = None,
-    text_only: bool = False,ai_extraction: bool = False,branch: str = "main",verbose: bool = False,
+    github_url: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None,
+    text_only: bool = False, ai_extraction: bool = False, branch: str = "main", verbose: bool = False,
     options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Scrape content from a GitHub repository with optional authentication."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -813,6 +804,18 @@ def scrape_github(
                 return [Chunk(path=github_url, texts=[f"Repository requires authentication. Set GITHUB_TOKEN environment variable or provide token in options"])]
 
         try:
+            blacklist_files = options.get('blacklist_files', [])
+            if options.get('gitignore', False):
+                git_ignore_files = ['.gitignore', '.git/info/exclude']
+                for git_file in git_ignore_files:
+                    if os.path.exists(os.path.join(temp_dir, git_file)) and git_file not in blacklist_files:
+                        blacklist_files.append(git_file)
+                        if verbose:
+                            print(f"[thepipe] Adding {git_file} to blacklist files")
+            options['blacklist_files'] = blacklist_files
+            if verbose and blacklist_files:
+                print(f"[thepipe] Using blacklist files: {blacklist_files}")
+                
             return scrape_directory(
                 dir_path=temp_dir,
                 include_regex=include_regex,
@@ -820,13 +823,14 @@ def scrape_github(
                 verbose=verbose,
                 ai_extraction=ai_extraction,
                 text_only=text_only,
-                local=True
+                local=True,
+                options=options
             )
         except Exception as e:
             if verbose:
                 print(f"[thepipe] Error processing repository contents: {str(e)}")
             return [Chunk(path=github_url, texts=[f"Error processing repository contents: {str(e)}"])]
-    
+            
 def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
     from docx import Document
     from docx.oxml.table import CT_Tbl
