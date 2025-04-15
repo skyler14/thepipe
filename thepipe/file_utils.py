@@ -3,7 +3,7 @@ import os
 from typing import List, Optional
 from magika import Magika
 
-FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
+FOLDERS_TO_IGNORE = ['*node_modules*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
 
 FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
 
@@ -16,6 +16,8 @@ def detect_source_type(source: str) -> str:
         if extension == '.ipynb':
             # special case for notebooks, mimetypes is not familiar
             return 'application/x-ipynb+json'
+        elif extension =='. ts':
+            return 'text/'
         guessed_mimetype = mimetypes.guess_type(source)[0]
         if guessed_mimetype:
             return guessed_mimetype
