@@ -123,7 +123,6 @@ def detect_relationships(db_instance, tables: List[str], verbose: bool = False) 
             pass
             
         # If standard approach fails, try heuristic detection
-        # Look for columns with identical names across tables that might be join keys
         common_columns = {}
         
         for table in tables:
@@ -149,7 +148,7 @@ def detect_relationships(db_instance, tables: List[str], verbose: bool = False) 
                             'column': col,
                             'foreign_table': tables_list[j],
                             'foreign_column': col,
-                            'confidence': 'heuristic'  # Flag as heuristic detection
+                            'confidence': 'heuristic'
                         })
         
     except Exception as e:
@@ -157,68 +156,6 @@ def detect_relationships(db_instance, tables: List[str], verbose: bool = False) 
             print(f"[thepipe] Error detecting relationships: {str(e)}")
     
     return relationships
-
-def get_multi_table_examples(tables: List[str], relationships: List[Dict]) -> str:
-    """Generate SQL examples for queries across multiple tables."""
-    if len(tables) < 2:
-        return ""  # No multi-table examples needed
-        
-    examples = "# Multi-Table Query Examples:\n\n"
-    
-    # If we have detected relationships, use them for examples
-    if relationships:
-        rel = relationships[0]  # Use the first relationship
-        examples += f"""
-        # Join Example:
-        SELECT 
-            t1.*, t2.column_name
-        FROM {rel['table']} t1
-        JOIN {rel['foreign_table']} t2 ON t1.{rel['column']} = t2.{rel['foreign_column']}
-        LIMIT 10;
-        """
-    else:
-        # Generic example with the first two tables
-        examples += f"""
-        # Generic Join Example:
-        SELECT 
-            t1.*, t2.*
-        FROM {tables[0]} t1
-        JOIN {tables[1]} t2 ON t1.id = t2.id
-        LIMIT 10;
-        """
-    
-    return examples
-
-def create_nl_query_prompt(natural_language_query: str, 
-                          schema_text: str, 
-                          analysis_text: str,
-                          sql_examples: str,
-                          multi_table_examples: str) -> str:
-    """Create a comprehensive prompt for natural language to SQL conversion."""
-    return f"""
-    Convert this natural language question into a SQL query.
-
-    QUESTION: {natural_language_query}
-    
-    DATABASE SCHEMA:
-    {schema_text}
-    
-    DATA ANALYSIS:
-    {analysis_text}
-    
-    SQL EXAMPLES:
-    {sql_examples}
-    
-    {multi_table_examples}
-    
-    IMPORTANT NOTES:
-    1. Consider ALL tables in the schema when formulating your query
-    2. Use JOIN operations when the question requires data from multiple tables
-    3. Make sure to use table aliases when joining (t1, t2, etc.)
-    4. Ensure column references are qualified with table names when using JOINs
-    
-    Return ONLY the SQL query without any explanations or markdown.
-    """
 
 def is_sql(query: str) -> bool:
     """Determine if a query is SQL or natural language."""
@@ -294,11 +231,13 @@ def format_analysis_for_llm(analysis: Dict[str, Any]) -> str:
         
     return analysis_text
 
-# MODIFIED: Added optional view_name parameter to avoid redundant calls
 def get_auto_analysis(db_instance, db_type: str = None, view_name: str = None, 
-                    max_samples: int = 5, verbose: bool = False) -> Dict[str, Any]:
+                     max_samples: int = 5, verbose: bool = False,
+                     options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Automatically analyze database to generate useful insights."""
     analysis = {}
+    options = options or {}
+    max_samples = options.get("max_samples", max_samples)
     
     try:
         # Auto-detect view_name if not provided
@@ -355,7 +294,7 @@ def get_auto_analysis(db_instance, db_type: str = None, view_name: str = None,
         }
         
         # Analyze a few categorical columns
-        for col in categorical_columns[:5]:
+        for col in categorical_columns[:max_samples]:
             try:
                 value_counts = db_instance.query(f"""
                     SELECT 
@@ -378,7 +317,7 @@ def get_auto_analysis(db_instance, db_type: str = None, view_name: str = None,
                 pass
         
         # Analyze a few numeric columns
-        for col in numeric_columns[:5]:
+        for col in numeric_columns[:max_samples]:
             try:
                 stats = db_instance.query(f"""
                     SELECT 
@@ -431,113 +370,22 @@ def get_auto_analysis(db_instance, db_type: str = None, view_name: str = None,
 def get_sql_examples_for_intent(query_intent: str, view_name: str) -> str:
     """Generate simplified SQL examples based on query intent."""
     
-    # THIS IS THE ONE VERBOSE SECTION MAINTAINED FOR SPECIFIC ANALYSIS TYPES
-    analysis_types = {
-        "text_analysis": f"""
-        # Text Analysis Examples:
-        
-        # Word frequency in text column:
-        SELECT word, COUNT(*) as frequency
-        FROM (SELECT unnest(regexp_split_to_array(lower("text_column"), '\\\\s+')) as word FROM {view_name})
-        WHERE length(word) > 3
-        GROUP BY word
-        ORDER BY frequency DESC
-        LIMIT 20;
-        
-        # Finding specific terms:
-        SELECT * FROM {view_name}
-        WHERE lower("text_column") LIKE '%keyword%'
-        LIMIT 20;
-        """,
-        
-        "numeric_analysis": f"""
-        # Numeric Analysis Examples:
-        
-        # Basic statistics:
-        SELECT 
-            MIN("number_column") as minimum,
-            MAX("number_column") as maximum,
-            AVG("number_column") as average,
-            STDDEV("number_column") as standard_deviation
-        FROM {view_name}
-        WHERE "number_column" IS NOT NULL;
-        
-        # Value distribution into buckets:
-        SELECT 
-            FLOOR("number_column" / 10) * 10 as bucket,
-            COUNT(*) as count
-        FROM {view_name}
-        GROUP BY bucket
-        ORDER BY bucket;
-        """,
-        
-        "time_analysis": f"""
-        # Time Analysis Examples:
-        
-        # Trend by month:
-        SELECT 
-            DATE_TRUNC('month', "date_column") as month,
-            COUNT(*) as count
-        FROM {view_name}
-        WHERE "date_column" IS NOT NULL
-        GROUP BY month
-        ORDER BY month;
-        
-        # Year breakdown:
-        SELECT 
-            extract(YEAR FROM "date_column") as year,
-            COUNT(*) as count
-        FROM {view_name}
-        WHERE "date_column" IS NOT NULL
-        GROUP BY year
-        ORDER BY year;
-        """,
-        
-        "categorization": f"""
-        # Category Analysis Examples:
-        
-        # Basic distribution:
-        SELECT 
-            "category_column",
-            COUNT(*) as count,
-            CAST(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM {view_name}) AS DECIMAL(5,2)) as percentage
-        FROM {view_name}
-        GROUP BY "category_column"
-        ORDER BY count DESC
-        LIMIT 20;
-        
-        # Cross-tabulation:
-        SELECT 
-            "category1",
-            "category2",
-            COUNT(*) as count
-        FROM {view_name}
-        GROUP BY "category1", "category2"
-        ORDER BY count DESC
-        LIMIT 25;
-        """
+    # ONE-LINERS by query intent - minimal and concise
+    intent_examples = {
+        "text_analysis": f"SELECT word, COUNT(*) FROM (SELECT unnest(regexp_split_to_array(lower(text_column), '\\\\s+')) as word FROM {view_name}) GROUP BY word ORDER BY COUNT(*) DESC LIMIT 20;",
+        "numeric_analysis": f"SELECT MIN(num_column), MAX(num_column), AVG(num_column), STDDEV(num_column) FROM {view_name} WHERE num_column IS NOT NULL;",
+        "time_analysis": f"SELECT DATE_TRUNC('month', date_column) as month, COUNT(*) FROM {view_name} GROUP BY month ORDER BY month;",
+        "categorization": f"SELECT category_column, COUNT(*) as count FROM {view_name} GROUP BY category_column ORDER BY count DESC LIMIT 20;"
     }
     
-    # Default simple examples for all query types
-    examples = f"""
-    # Basic SQL Examples:
+    # Default simple example for all query types
+    example = f"SELECT * FROM {view_name} LIMIT 10;"
     
-    # Simple selection:
-    SELECT * FROM {view_name} LIMIT 10;
+    # Add specialized example if available
+    if query_intent in intent_examples:
+        example += f"\n{intent_examples[query_intent]}"
     
-    # Counting and grouping:
-    SELECT column_name, COUNT(*) as count 
-    FROM {view_name} 
-    GROUP BY column_name 
-    ORDER BY count DESC 
-    LIMIT 15;
-    """
-    
-    # Add specialized examples if we have them
-    if query_intent in analysis_types:
-        examples += analysis_types[query_intent]
-    
-    return examples
+    return example
 
 def fix_sql_syntax(sql_query: str) -> str:
     """Fix common SQL syntax errors in generated queries."""
@@ -671,199 +519,3 @@ def execute_fallback(query: str, db_instance, view_name: str,
     
     chunks.append(Chunk(path=f"database://fallback", texts=[result_text]))
     return chunks
-
-# MODIFIED: Added tables parameter to avoid redundant calls
-def generate_data_insights(db_instance, natural_language_query: str, 
-                         db_type: str = None, view_name: str = None,
-                         tables: List[str] = None, # Added parameter
-                         llm_config: Optional[Dict[str, Any]] = None,
-                         max_iterations: int = 1, verbose: bool = False) -> List[Chunk]:
-    """Generate insights from database using LLM-driven analysis."""
-    # Auto-detect tables and view_name if not provided
-    if tables is None:
-        tables = get_all_tables(db_instance, db_type, verbose)
-    
-    if view_name is None:
-        view_name = tables[0] if tables else None
-        if not view_name:
-            return [Chunk(path=f"database://{db_type or 'unknown'}/error", 
-                         texts=["Error determining table name: No tables found"])]
-    
-    # Get schema information
-    schema_text = ""
-    try:
-        sample_df = db_instance.query(f"SELECT * FROM {view_name} LIMIT 1")
-        
-        schema_text = "## Database Schema\n\n"
-        schema_text += f"### Table: {view_name}\n\n"
-        schema_text += "| Column | Type |\n"
-        schema_text += "|--------|------|\n"
-        
-        for col_name, dtype in sample_df.dtypes.items():
-            schema_text += f"| {col_name} | {dtype} |\n"
-    except Exception:
-        schema_text = "## Database Schema\n\nSchema information not available."
-    
-    schema_chunk = Chunk(path=f"database://{db_type}/schema", texts=[schema_text])
-    chunks = [schema_chunk]
-    
-    # Check if LLM configuration is provided
-    if not llm_config:
-        chunks.append(Chunk(path=f"database://{db_type}/error",
-                          texts=["Insight generation requires LLM configuration."]
-                         ))
-        return chunks
-    
-    try:
-        import os
-        from openai import OpenAI
-        
-        # Set up OpenAI client
-        api_key = llm_config.get("api_key", os.environ.get("OPENAI_API_KEY"))
-        api_base = llm_config.get("api_base", os.environ.get("OPENAI_API_BASE"))
-        model = llm_config.get("model", "gpt-3.5-turbo")
-        
-        if not api_key:
-            chunks.append(Chunk(path=f"database://{db_type}/error",
-                              texts=["API key is required for insight generation."]
-                             ))
-            return chunks
-        
-        client_args = {"api_key": api_key}
-        if api_base:
-            client_args["base_url"] = api_base
-            
-        client = OpenAI(**client_args)
-        
-        # Get initial data analysis - pass the view_name directly
-        initial_analysis = get_auto_analysis(
-            db_instance=db_instance,
-            db_type=db_type,
-            view_name=view_name, # Use the pre-fetched view_name
-            verbose=verbose
-        )
-        
-        analysis_summary = format_analysis_for_llm(initial_analysis)
-        
-        # Generate SQL queries to answer the question
-        prompt = f"""
-        You are a data analyst analyzing a database to answer this question:
-        
-        QUESTION: {natural_language_query}
-        
-        DATABASE SCHEMA:
-        {schema_text}
-        
-        DATA ANALYSIS:
-        {analysis_summary}
-        
-        Suggest 2 SQL queries that would help answer this question.
-        For each query, briefly explain what insight it will provide.
-        
-        Format:
-        QUERY 1:
-        ```sql
-        -- Your SQL query
-        ```
-        PURPOSE: What this query will show
-        
-        QUERY 2:
-        ```sql
-        -- Your SQL query
-        ```
-        PURPOSE: What this query will show
-        """
-        
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a data analyst expert in SQL."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3
-        )
-        
-        # Extract and execute queries
-        query_pattern = r"QUERY \d+:\s*```(?:sql)?\s*([\s\S]*?)```\s*PURPOSE:\s*([\s\S]*?)(?=QUERY \d+:|$)"
-        executed_queries = []
-        
-        for match in re.finditer(query_pattern, response.choices[0].message.content):
-            sql_query = match.group(1).strip()
-            purpose = match.group(2).strip()
-            
-            query_info = {"query": sql_query, "purpose": purpose}
-            
-            try:
-                result = db_instance.query(sql_query)
-                query_info["result"] = result
-                query_info["success"] = True
-                executed_queries.append(query_info)
-            except Exception as e:
-                query_info["error"] = str(e)
-                query_info["success"] = False
-        
-        # Generate insights from results
-        all_query_results = ""
-        for i, query_info in enumerate(executed_queries):
-            all_query_results += f"\nQUERY {i+1}: {query_info['query']}\n"
-            all_query_results += f"PURPOSE: {query_info.get('purpose', 'N/A')}\n"
-            
-            if query_info.get('success', False) and isinstance(query_info.get('result'), pd.DataFrame):
-                df = query_info['result']
-                if not df.empty:
-                    all_query_results += f"RESULTS:\n{df.head(10).to_string()}\n"
-                else:
-                    all_query_results += "RESULTS: No rows returned\n"
-            else:
-                all_query_results += f"QUERY ERROR: {query_info.get('error', 'Unknown error')}\n"
-        
-        # Generate insights
-        insight_prompt = f"""
-        Based on these database query results, provide 3-5 key insights that answer this question:
-        
-        QUESTION: {natural_language_query}
-        
-        QUERY RESULTS:
-        {all_query_results}
-        
-        Format your response as a concise report with:
-        1. A brief summary (1-2 sentences)
-        2. Bullet points of key findings with specific data points
-        3. A short conclusion
-        """
-        
-        insight_response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a data analyst providing clear insights."},
-                {"role": "user", "content": insight_prompt}
-            ],
-            temperature=0.1
-        )
-        
-        # Final report
-        final_report = f"# Data Insight Report\n\n"
-        final_report += f"## Question\n\n{natural_language_query}\n\n"
-        final_report += f"{insight_response.choices[0].message.content}\n\n"
-        
-        # Add supporting data
-        if executed_queries:
-            final_report += f"## Supporting Data\n\n"
-            for i, query_info in enumerate(executed_queries):
-                if query_info.get('success', False) and isinstance(query_info.get('result'), pd.DataFrame):
-                    df = query_info['result']
-                    if not df.empty:
-                        final_report += f"### Query {i+1}\n\n"
-                        final_report += f"```sql\n{query_info['query']}\n```\n\n"
-                        final_report += "```json\n"
-                        final_report += df.head(15).to_json(orient='records', indent=2)
-                        final_report += "\n```\n\n"
-        
-        chunks.append(Chunk(path=f"database://{db_type}/insights", texts=[final_report]))
-        return chunks
-        
-    except Exception as e:
-        chunks.append(Chunk(path=f"database://{db_type}/error", 
-                          texts=[f"Error generating insights: {str(e)}"]
-                         ))
-        return chunks

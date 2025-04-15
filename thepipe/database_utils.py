@@ -15,7 +15,7 @@ from .core import Chunk
 
 # Import the JupySQL middleware
 from .jupysql_middleware import Database
-from .database_analysis import create_nl_query_prompt, detect_relationships, execute_fallback, format_analysis_for_llm, get_all_tables, get_multi_table_examples, get_schema_for_all_tables, get_sql_examples_for_intent, get_table_name,fix_sql_syntax,get_auto_analysis
+from .database_analysis import execute_fallback, format_analysis_for_llm, get_all_tables, get_auto_analysis, get_schema_for_all_tables, fix_sql_syntax
 # Constants
 DEFAULT_MAX_ROWS = 15
 DEFAULT_PREVIEW_ROWS = 5
@@ -28,9 +28,9 @@ class DatabaseManager:
     """
     
     def __init__(self, connection_info: Union[str, Dict], 
-                 db_type: Optional[str] = None,
-                 verbose: bool = False,
-                 options: Optional[Dict[str, Any]] = None):
+                db_type: Optional[str] = None,
+                verbose: bool = False,
+                options: Optional[Dict[str, Any]] = None):
         """
         Initialize database manager with connection info and options.
         
@@ -43,7 +43,7 @@ class DatabaseManager:
         self.connection_info = connection_info
         self.db_type = db_type or self._detect_database_type(connection_info)
         self.verbose = verbose
-        self.options = options or {}
+        self.options = options or {}  # Store options for use in other methods
         self.db = None
         self._connect()
         
@@ -497,7 +497,99 @@ class DatabaseManager:
         Returns:
             List of Chunk objects with query results
         """
-        schema_chunk = self.get_schema()
+        # Get tables and schema information
+        tables = get_all_tables(self.db, self.db_type, self.verbose)
+        view_name = tables[0] if tables else None
+        
+        # Get schema text
+        schema_text = ""
+        if view_name:
+            schema_text = get_schema_for_all_tables(self.db, tables, self.verbose)
+        
+        # Always run auto-analysis with detailed output
+        analysis_text = ""
+        if view_name:
+            try:
+                # Pass through any options for analysis
+                analysis_options = self.options.get("analysis", {}) if hasattr(self, "options") else {}
+                
+                auto_analysis = get_auto_analysis(
+                    self.db, 
+                    self.db_type, 
+                    view_name, 
+                    verbose=self.verbose,
+                    options=analysis_options
+                )
+                
+                # Format detailed analysis with full column statistics
+                analysis_text = "## Automatic Database Analysis\n\n"
+                
+                # Add basic dataset info
+                if 'total_rows' in auto_analysis:
+                    analysis_text += f"Total rows: {auto_analysis['total_rows']:,}\n"
+                    
+                if 'columns' in auto_analysis:
+                    analysis_text += f"Total columns: {len(auto_analysis['columns'])}\n\n"
+                    analysis_text += f"Columns: {', '.join(auto_analysis['columns'])}\n\n"
+                
+                # Add column type categorization
+                if 'column_types' in auto_analysis:
+                    cat_cols = auto_analysis['column_types'].get('categorical', [])
+                    num_cols = auto_analysis['column_types'].get('numeric', [])
+                    
+                    if cat_cols:
+                        analysis_text += f"Categorical columns: {', '.join(cat_cols)}\n\n"
+                        
+                    if num_cols:
+                        analysis_text += f"Numeric columns: {', '.join(num_cols)}\n\n"
+                
+                # Add detailed column statistics
+                if 'column_stats' in auto_analysis:
+                    analysis_text += "### Column Statistics\n\n"
+                    
+                    for col, stats in auto_analysis['column_stats'].items():
+                        analysis_text += f"#### {col}\n"
+                        
+                        if stats['type'] == 'categorical':
+                            analysis_text += f"Type: Categorical\n"
+                            if 'distinct_count' in stats:
+                                analysis_text += f"Distinct values: {stats['distinct_count']}\n"
+                            
+                            if 'top_values' in stats:
+                                analysis_text += "Top values:\n"
+                                for val in stats['top_values']:
+                                    analysis_text += f"- {val['value']}: {val['count']} ({val['percentage']:.2f}%)\n"
+                        
+                        elif stats['type'] == 'numeric':
+                            analysis_text += f"Type: Numeric\n"
+                            if 'stats' in stats:
+                                stat_data = stats['stats']
+                                analysis_text += f"Range: {stat_data.get('min', 'N/A')} to {stat_data.get('max', 'N/A')}\n"
+                                analysis_text += f"Mean: {stat_data.get('mean', 'N/A')}\n"
+                                analysis_text += f"Null count: {stat_data.get('null_count', 'N/A')}\n"
+                        
+                        analysis_text += "\n"
+                
+                # Add key columns info
+                if 'potential_keys' in auto_analysis and auto_analysis['potential_keys']:
+                    analysis_text += f"Potential key columns: {', '.join(auto_analysis['potential_keys'])}\n\n"
+                    
+                if 'date_columns' in auto_analysis and auto_analysis['date_columns']:
+                    analysis_text += f"Date columns: {', '.join(auto_analysis['date_columns'])}\n\n"
+                    
+            except Exception as e:
+                if self.verbose:
+                    print(f"[thepipe] Error running auto analysis: {str(e)}")
+        
+        # Create combined schema and analysis chunk
+        combined_text = schema_text
+        if analysis_text:
+            combined_text += f"\n\n{analysis_text}"
+        
+        schema_chunk = Chunk(
+            path=f"database://{self.db_type}/schema",
+            texts=[combined_text]
+        )
         chunks = [schema_chunk]
         
         try:
@@ -548,34 +640,379 @@ class DatabaseManager:
             
             return chunks
 
-    def process_nl_query(self, natural_language_query: str, llm_config: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    def execute_iterative_analysis(self, natural_language_query: str, 
+                                tables: List[str], schema_text: str,
+                                llm_config: Dict[str, Any],
+                                max_iterations: int = 3, 
+                                verbose: bool = False) -> List[Chunk]:
+        """
+        Execute an iterative, LLM-guided analysis of a database.
+        
+        This uses a multi-stage approach:
+        1. Strategy: LLM plans a series of queries to answer the question
+        2. Execute: Run queries one by one, collecting results
+        3. Refine: Send results back to LLM for analysis and next steps
+        4. Conclude: Generate final insights from all collected data
+        
+        Args:
+            natural_language_query: The natural language question
+            tables: List of available tables
+            schema_text: Database schema information
+            llm_config: LLM configuration
+            max_iterations: Maximum number of query iterations
+            verbose: Enable verbose logging
+            
+        Returns:
+            List of Chunk objects with query results and insights
+        """
+        # Setup
+        import os
+        from openai import OpenAI
+        
+        api_key = llm_config.get("api_key", os.environ.get("OPENAI_API_KEY"))
+        api_base = llm_config.get("api_base")
+        model = llm_config.get("model", "gpt-3.5-turbo")
+        
+        client_args = {"api_key": api_key}
+        if api_base:
+            client_args["base_url"] = api_base
+        
+        client = OpenAI(**client_args)
+        
+        chunks = []
+        schema_chunk = Chunk(path=f"database://{self.db_type}/schema", texts=[schema_text])
+        chunks.append(schema_chunk)
+        
+        executed_queries = []
+        remaining_iterations = max_iterations
+        
+        # STAGE 1: Generate strategy
+        if verbose:
+            print(f"[thepipe] Stage 1: Generating query strategy")
+        
+        strategy_prompt = f"""
+        You are a database analyst. Create a strategy to answer this question using SQL queries.
+        
+        QUESTION: {natural_language_query}
+        
+        DATABASE SCHEMA:
+        {schema_text}
+        
+        Propose a series of 1-3 SQL queries that will help answer this question.
+        For each query, explain what insights it will provide.
+        Keep your response brief and focused.
+        
+        Format:
+        STRATEGY: Brief 1-2 sentence overall approach
+        
+        QUERY 1:
+        ```sql
+        -- Your first SQL query
+        ```
+        PURPOSE: What you'll learn from this query
+        
+        [Additional queries as needed]
+        """
+        
+        strategy_response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a database expert planning an analysis strategy."},
+                {"role": "user", "content": strategy_prompt}
+            ],
+            temperature=0.2
+        )
+        
+        strategy_text = strategy_response.choices[0].message.content
+        
+        # Extract queries from strategy
+        query_pattern = r"QUERY \d+:\s*```(?:sql)?\s*([\s\S]*?)```\s*PURPOSE:\s*([\s\S]*?)(?=QUERY \d+:|$)"
+        planned_queries = []
+        
+        for match in re.finditer(query_pattern, strategy_text):
+            sql_query = match.group(1).strip()
+            purpose = match.group(2).strip()
+            planned_queries.append({"query": sql_query, "purpose": purpose})
+        
+        # Save strategy as a chunk
+        strategy_chunk = Chunk(
+            path=f"database://{self.db_type}/strategy",
+            texts=[f"## Query Strategy\n\n{strategy_text}"]
+        )
+        chunks.append(strategy_chunk)
+        
+        # STAGE 2-3: Iterative execution and refinement
+        current_results = []
+        
+        while planned_queries and remaining_iterations > 0:
+            # Get next query
+            query_info = planned_queries.pop(0)
+            sql_query = query_info["query"]
+            purpose = query_info["purpose"]
+            
+            if verbose:
+                print(f"[thepipe] Executing query: {sql_query}")
+                print(f"[thepipe] Purpose: {purpose}")
+            
+            # Fix and execute query
+            if is_sqlfluff_available():
+                dialect = get_sql_dialect(self.db_type)
+                sql_query = lint_and_fix_sql(sql_query, dialect)
+            
+            sql_query = fix_sql_syntax(sql_query)
+            
+            try:
+                result = self.db.query(sql_query)
+                query_info["result"] = result
+                query_info["success"] = True
+                executed_queries.append(query_info)
+                
+                # Convert result to text format for LLM
+                if isinstance(result, pd.DataFrame):
+                    if not result.empty:
+                        result_text = f"RESULTS ({len(result)} rows):\n{result.head(10).to_string()}"
+                    else:
+                        result_text = "RESULTS: No rows returned"
+                else:
+                    result_text = "RESULTS: Query executed successfully"
+                
+                current_results.append(result_text)
+                
+                # Refine strategy if we have more iterations
+                if planned_queries or remaining_iterations > 1:
+                    refine_prompt = f"""
+                    You are analyzing data to answer this question: {natural_language_query}
+                    
+                    So far, you've executed these queries:
+                    
+                    {strategy_text}
+                    
+                    LATEST RESULTS:
+                    {result_text}
+                    
+                    Based on these results:
+                    1. Do you need additional queries to answer the question?
+                    2. If yes, provide ONE refined SQL query.
+                    3. If no, just say "COMPLETE"
+                    
+                    Format if more queries needed:
+                    ANALYSIS: Brief analysis of current results
+                    
+                    NEXT QUERY:
+                    ```sql
+                    -- Your refined SQL query
+                    ```
+                    PURPOSE: What this query will help determine
+                    """
+                    
+                    refine_response = client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "You are a database expert refining an analysis."},
+                            {"role": "user", "content": refine_prompt}
+                        ],
+                        temperature=0.2
+                    )
+                    
+                    refine_text = refine_response.choices[0].message.content
+                    
+                    if "COMPLETE" not in refine_text.upper():
+                        # Extract next query
+                        next_query_match = re.search(r"NEXT QUERY:\s*```(?:sql)?\s*([\s\S]*?)```\s*PURPOSE:\s*([\s\S]*?)(?=NEXT QUERY:|$)", refine_text)
+                        if next_query_match:
+                            new_sql = next_query_match.group(1).strip()
+                            new_purpose = next_query_match.group(2).strip()
+                            planned_queries.append({"query": new_sql, "purpose": new_purpose})
+                        
+                        if verbose:
+                            print(f"[thepipe] Added refined query to plan")
+            
+            except Exception as e:
+                query_info["error"] = str(e)
+                query_info["success"] = False
+                executed_queries.append(query_info)
+                
+                if verbose:
+                    print(f"[thepipe] Error executing query: {str(e)}")
+            
+            remaining_iterations -= 1
+        
+        # STAGE 4: Generate final insights
+        if verbose:
+            print(f"[thepipe] Generating final insights")
+        
+        # Prepare query results summary
+        all_query_results = ""
+        for i, query_info in enumerate(executed_queries):
+            all_query_results += f"\nQUERY {i+1}: {query_info['query']}\n"
+            all_query_results += f"PURPOSE: {query_info.get('purpose', 'N/A')}\n"
+            
+            if query_info.get('success', False) and isinstance(query_info.get('result'), pd.DataFrame):
+                df = query_info['result']
+                if not df.empty:
+                    all_query_results += f"RESULTS:\n{df.head(15).to_string()}\n"
+                else:
+                    all_query_results += "RESULTS: No rows returned\n"
+            else:
+                all_query_results += f"ERROR: {query_info.get('error', 'Unknown error')}\n"
+        
+        # Final insights prompt
+        insight_prompt = f"""
+        Based on all query results, provide key insights that answer this question:
+        
+        QUESTION: {natural_language_query}
+        
+        QUERY RESULTS:
+        {all_query_results}
+        
+        Provide a concise report with:
+        1. A direct answer to the question (1-2 sentences)
+        2. 3-5 key insights with specific data points
+        3. A brief conclusion
+        """
+        
+        insight_response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a data analyst creating a clear insights report."},
+                {"role": "user", "content": insight_prompt}
+            ],
+            temperature=0.1
+        )
+        
+        # Create final report
+        final_report = f"# Data Insight Report\n\n"
+        final_report += f"## Question\n\n{natural_language_query}\n\n"
+        final_report += f"{insight_response.choices[0].message.content}\n\n"
+        
+        # Add supporting queries
+        final_report += f"## Supporting Data\n\n"
+        for i, query_info in enumerate(executed_queries):
+            if query_info.get('success', False) and isinstance(query_info.get('result'), pd.DataFrame):
+                df = query_info['result']
+                if not df.empty:
+                    final_report += f"### Query {i+1}\n\n"
+                    final_report += f"```sql\n{query_info['query']}\n```\n\n"
+                    final_report += "```json\n"
+                    final_report += df.head(15).to_json(orient='records', indent=2)
+                    final_report += "\n```\n\n"
+        
+        chunks.append(Chunk(path=f"database://{self.db_type}/insights", texts=[final_report]))
+        return chunks
+
+    def process_nl_query(self, natural_language_query: str, llm_config: Optional[Dict[str, Any]] = None, 
+                        debug_mode: bool = False, iterative: bool = True,
+                        max_iterations: int = 3) -> List[Chunk]:
         """
         Process natural language query using an LLM to convert to SQL.
         
         Args:
             natural_language_query: Natural language question to convert to SQL
             llm_config: Configuration for the LLM
+            debug_mode: If True, return the generated SQL without executing it
+            iterative: If True, use the iterative analysis approach
+            max_iterations: Maximum number of query iterations (for iterative mode)
             
         Returns:
             List of Chunk objects with query results
         """
-        # FIXED: Get all tables once and reuse throughout the function
+        # Get tables and schema information
         tables = get_all_tables(self.db, self.db_type, self.verbose)
-        
-        # Get the view_name from tables list instead of calling get_table_name
         view_name = tables[0] if tables else None
+        
         if not view_name:
             chunks = [Chunk(
                 path=f"database://{self.db_type}/error",
                 texts=["Could not determine database table name. Please provide a table name explicitly."]
             )]
             return chunks
-            
-        # Get schema information for all tables - reuse tables list
+        
+        # Get schema for all tables
         schema_text = get_schema_for_all_tables(self.db, tables, self.verbose)
+        
+        # Always run auto-analysis with detailed output
+        analysis_text = ""
+        if view_name:
+            try:
+                # Pass through any options for analysis
+                analysis_options = self.options.get("analysis", {}) if hasattr(self, "options") else {}
+                
+                auto_analysis = get_auto_analysis(
+                    self.db, 
+                    self.db_type, 
+                    view_name, 
+                    verbose=self.verbose,
+                    options=analysis_options
+                )
+                
+                # Format detailed analysis with full column statistics
+                analysis_text = "## Automatic Database Analysis\n\n"
+                
+                # Add basic dataset info
+                if 'total_rows' in auto_analysis:
+                    analysis_text += f"Total rows: {auto_analysis['total_rows']:,}\n"
+                    
+                if 'columns' in auto_analysis:
+                    analysis_text += f"Total columns: {len(auto_analysis['columns'])}\n\n"
+                    analysis_text += f"Columns: {', '.join(auto_analysis['columns'])}\n\n"
+                
+                # Add column type categorization
+                if 'column_types' in auto_analysis:
+                    cat_cols = auto_analysis['column_types'].get('categorical', [])
+                    num_cols = auto_analysis['column_types'].get('numeric', [])
+                    
+                    if cat_cols:
+                        analysis_text += f"Categorical columns: {', '.join(cat_cols)}\n\n"
+                        
+                    if num_cols:
+                        analysis_text += f"Numeric columns: {', '.join(num_cols)}\n\n"
+                
+                # Add detailed column statistics
+                if 'column_stats' in auto_analysis:
+                    analysis_text += "### Column Statistics\n\n"
+                    
+                    for col, stats in auto_analysis['column_stats'].items():
+                        analysis_text += f"#### {col}\n"
+                        
+                        if stats['type'] == 'categorical':
+                            analysis_text += f"Type: Categorical\n"
+                            if 'distinct_count' in stats:
+                                analysis_text += f"Distinct values: {stats['distinct_count']}\n"
+                            
+                            if 'top_values' in stats:
+                                analysis_text += "Top values:\n"
+                                for val in stats['top_values']:
+                                    analysis_text += f"- {val['value']}: {val['count']} ({val['percentage']:.2f}%)\n"
+                        
+                        elif stats['type'] == 'numeric':
+                            analysis_text += f"Type: Numeric\n"
+                            if 'stats' in stats:
+                                stat_data = stats['stats']
+                                analysis_text += f"Range: {stat_data.get('min', 'N/A')} to {stat_data.get('max', 'N/A')}\n"
+                                analysis_text += f"Mean: {stat_data.get('mean', 'N/A')}\n"
+                                analysis_text += f"Null count: {stat_data.get('null_count', 'N/A')}\n"
+                        
+                        analysis_text += "\n"
+                
+                # Add key columns info
+                if 'potential_keys' in auto_analysis and auto_analysis['potential_keys']:
+                    analysis_text += f"Potential key columns: {', '.join(auto_analysis['potential_keys'])}\n\n"
+                    
+                if 'date_columns' in auto_analysis and auto_analysis['date_columns']:
+                    analysis_text += f"Date columns: {', '.join(auto_analysis['date_columns'])}\n\n"
+                    
+            except Exception as e:
+                if self.verbose:
+                    print(f"[thepipe] Error running auto analysis: {str(e)}")
+        
+        # Create combined schema and analysis chunk
+        combined_text = schema_text
+        if analysis_text:
+            combined_text += f"\n\n{analysis_text}"
+        
         schema_chunk = Chunk(
             path=f"database://{self.db_type}/schema",
-            texts=[schema_text]
+            texts=[combined_text]
         )
         chunks = [schema_chunk]
         
@@ -591,17 +1028,22 @@ class DatabaseManager:
             ))
             return chunks
         
+        # Check if using iterative mode
+        if iterative:
+            # Pass the combined schema and analysis text to the iterative analysis
+            return self.execute_iterative_analysis(
+                natural_language_query=natural_language_query,
+                tables=tables,
+                schema_text=combined_text,  # Using combined text with analysis
+                llm_config=llm_config,
+                max_iterations=max_iterations,
+                verbose=self.verbose
+            )
+        
+        # If not using iterative mode, proceed with the existing approach
         try:
             import os
             from openai import OpenAI
-            
-            # FIXED: Pass the view_name directly to get_auto_analysis
-            analysis = get_auto_analysis(
-                db_instance=self.db,
-                db_type=self.db_type,
-                view_name=view_name,  # Use already retrieved view_name
-                verbose=self.verbose
-            )
             
             # Set up OpenAI client
             api_key = llm_config.get("api_key", os.environ.get("OPENAI_API_KEY"))
@@ -622,41 +1064,27 @@ class DatabaseManager:
                 
             client = OpenAI(**client_args)
             
-            # Determine query intent
-            query_intent = "general"
-            query_lower = natural_language_query.lower()
+            # Create prompt that includes both schema and analysis
+            prompt = f"""
+            Convert this natural language question into a SQL query.
+
+            QUESTION: {natural_language_query}
             
-            if any(word in query_lower for word in ["word", "text", "phrase", "mention"]):
-                query_intent = "text_analysis"
-            elif any(word in query_lower for word in ["average", "sum", "count", "max", "min"]):
-                query_intent = "numeric_analysis"
-            elif any(word in query_lower for word in ["trend", "time", "date", "year", "month"]):
-                query_intent = "time_analysis"
-            elif any(word in query_lower for word in ["group", "category", "type", "distribution"]):
-                query_intent = "categorization"
+            DATABASE INFORMATION:
+            {combined_text}
             
-            # Get analysis and examples
-            analysis_text = format_analysis_for_llm(analysis)
-            sql_examples = get_sql_examples_for_intent(query_intent, view_name)
-            
-            # Detect relationships and get multi-table examples if needed
-            relationships = detect_relationships(self.db, tables, self.verbose)
-            multi_table_examples = get_multi_table_examples(tables, relationships) if len(tables) > 1 else ""
-            
-            # Create enhanced prompt
-            prompt = create_nl_query_prompt(
-                natural_language_query=natural_language_query,
-                schema_text=schema_text,
-                analysis_text=analysis_text,
-                sql_examples=sql_examples,
-                multi_table_examples=multi_table_examples
-            )
+            IMPORTANT:
+            - Consider which tables are relevant to this question
+            - Use appropriate JOINs if multiple tables are needed
+            - Use the database analysis to guide your query construction
+            - Return ONLY the SQL query without explanations
+            """
             
             # Get SQL query from LLM
             response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are a database expert that converts questions to SQL."},
+                    {"role": "system", "content": "You are a database expert. Convert questions to SQL."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0
@@ -685,6 +1113,18 @@ class DatabaseManager:
             
             # Also apply our basic syntax fixes
             sql_query = fix_sql_syntax(sql_query)
+            
+            # Debug mode - return SQL without executing
+            if debug_mode:
+                result_text = f"## Natural Language Query\n\n{natural_language_query}\n\n"
+                result_text += f"## Generated SQL\n\n```sql\n{sql_query}\n```\n\n"
+                result_text += "*Debug mode: SQL not executed*"
+                
+                chunks.append(Chunk(
+                    path=f"database://{self.db_type}/debug",
+                    texts=[result_text]
+                ))
+                return chunks
                 
             # Check if we got a valid query
             if not sql_query or not sql_query.lower().startswith("select"):
@@ -739,7 +1179,7 @@ class DatabaseManager:
             ))
             
             return chunks
-        
+                
     def close(self):
         """Close the database connection and clean up resources."""
         if hasattr(self, '_temp_path') and os.path.exists(self._temp_path):
@@ -833,7 +1273,7 @@ def process_database(
         print(f"[thepipe] Options: {options}")
     
     try:
-        # Initialize database manager
+        # Initialize database manager with options
         if verbose:
             print(f"[thepipe] Initializing database manager")
             
@@ -841,7 +1281,7 @@ def process_database(
             connection_info=connection_info,
             db_type=db_type,
             verbose=verbose,
-            options=options
+            options=options  # Pass full options here
         )
         
         # Get schema information
@@ -922,7 +1362,7 @@ def process_database(
             path=f"database://{db_type if db_type else 'unknown'}/error",
             texts=[f"Error processing database: {str(e)}"]
         )]
-    
+        
 def is_sql(query: str) -> bool:
     """Determine if a query is SQL or natural language."""
     if not query or not isinstance(query, str):
