@@ -31,8 +31,6 @@ import dotenv
 import markdownify
 dotenv.load_dotenv()
 
-FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
-FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
 GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", None)
 FILESIZE_LIMIT_MB = os.getenv("FILESIZE_LIMIT_MB", 50)
 DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o-mini")
@@ -50,120 +48,129 @@ def initialize_video_processing():
             raise ImportError("yt-dlp library not found. Please install it with: pip install yt-dlp")
                 
 def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = False, verbose: bool = False, local: bool = False, chunking_method: Optional[Callable] = chunk_by_page, ai_model: Optional[str] = DEFAULT_AI_MODEL, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
-
-    if not local:
-        with open(filepath, "rb") as f:
-            response = requests.post(
-                url=f"{HOST_URL}/scrape",
-                headers={"Authorization": f"Bearer {THEPIPE_API_KEY}"},
-                files={"files": (os.path.basename(filepath), f)},
-                data={
-                    "text_only": str(text_only).lower(),
-                    "ai_extraction": str(ai_extraction).lower(),
-                    "chunking_method": chunking_method.__name__ if chunking_method else None,
-                    'options': json.dumps(options) if options else None,
-                },
-            )
-        response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
-            # each line is its own JSON object
-            if not line.strip():
-                continue  # skip blank lines
-            data = json.loads(line)
-            # If the server sent an error for this chunk, handle it
-            if "error" in data:
-                raise ValueError(f"Error scraping: {data['error']}")
-
-        chunks = []
-        for line in response.iter_lines():
-            if line:
+    try:
+        if not local:
+            with open(filepath, "rb") as f:
+                response = requests.post(
+                    url=f"{HOST_URL}/scrape",
+                    headers={"Authorization": f"Bearer {THEPIPE_API_KEY}"},
+                    files={"files": (os.path.basename(filepath), f)},
+                    data={
+                        "text_only": str(text_only).lower(),
+                        "ai_extraction": str(ai_extraction).lower(),
+                        "chunking_method": chunking_method.__name__ if chunking_method else None,
+                        'options': json.dumps(options) if options else None,
+                    },
+                )
+            response.raise_for_status()
+            for line in response.iter_lines(decode_unicode=True):
+                # each line is its own JSON object
+                if not line.strip():
+                    continue  # skip blank lines
                 data = json.loads(line)
-                if "result" in data:
-                    chunk = Chunk(
-                        path=data["result"]["source"],
-                        texts=[
-                            content["text"]
-                            for content in data["result"]["content"]
-                            if content["type"] == "text"
-                        ],
-                        images=[
-                            Image.open(
-                                BytesIO(
-                                    base64.b64decode(content["image_url"].split(",")[1])
-                                )
-                            )
-                            for content in data["result"]["content"]
-                            if content["type"] == "image_url"
-                        ],
-                    )
-                    chunks.append(chunk)
-        return chunks
+                # If the server sent an error for this chunk, handle it
+                if "error" in data:
+                    raise ValueError(f"Error scraping file '{os.path.basename(filepath)}': {data['error']}")
 
-    # Local processing
-    scraped_chunks = []
-    source_type = detect_source_type(filepath)
-    if source_type is None:
-        if verbose:
-            print(f"[thepipe] Unsupported source type: {filepath}")
-        return scraped_chunks
-        
-    if verbose:
-        print(f"[thepipe] Scraping {source_type}: {filepath}...")
-        
-    # Call the appropriate scraper based on file type
-    if source_type == 'application/pdf':
-        scraped_chunks = scrape_pdf(
-            file_path=filepath, 
-            ai_extraction=ai_extraction, 
-            text_only=text_only, 
-            verbose=verbose, 
-            ai_model=ai_model, 
-            options=options
-        )
-    elif source_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        scraped_chunks = scrape_docx(file_path=filepath, verbose=verbose, text_only=text_only)
-    elif source_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-        scraped_chunks = scrape_pptx(file_path=filepath, verbose=verbose, text_only=text_only)
-    elif source_type.startswith('image/'):
-        scraped_chunks = scrape_image(file_path=filepath, text_only=text_only)
-    elif source_type.startswith('application/vnd.ms-excel') or source_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-        scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_type)
-    elif source_type == 'application/x-ipynb+json':
-        scraped_chunks = scrape_ipynb(file_path=filepath, verbose=verbose, text_only=text_only)
-    elif source_type == 'application/zip' or source_type == 'application/x-zip-compressed':
-        scraped_chunks = scrape_zip(
-            file_path=filepath, 
-            verbose=verbose, 
-            ai_extraction=ai_extraction, 
-            text_only=text_only, 
-            local=local,
-            options=options
-        )
-    elif source_type.startswith('video/'):
-        scraped_chunks = scrape_video(file_path=filepath, verbose=verbose, text_only=text_only, options=options)
-    elif source_type.startswith('audio/'):
-        scraped_chunks = scrape_audio(file_path=filepath, verbose=verbose, options=options)
-    elif source_type.startswith('text/html'):
-        scraped_chunks = scrape_html(file_path=filepath, verbose=verbose, text_only=text_only)
-    elif source_type.startswith('text/'):
-        scraped_chunks = scrape_plaintext(file_path=filepath)
-    else:
-        try:
-            scraped_chunks = scrape_plaintext(file_path=filepath)
-        except Exception as e:
+            chunks = []
+            for line in response.iter_lines():
+                if line:
+                    data = json.loads(line)
+                    if "result" in data:
+                        chunk = Chunk(
+                            path=data["result"]["source"],
+                            texts=[
+                                content["text"]
+                                for content in data["result"]["content"]
+                                if content["type"] == "text"
+                            ],
+                            images=[
+                                Image.open(
+                                    BytesIO(
+                                        base64.b64decode(content["image_url"].split(",")[1])
+                                    )
+                                )
+                                for content in data["result"]["content"]
+                                if content["type"] == "image_url"
+                            ],
+                        )
+                        chunks.append(chunk)
+            return chunks
+
+        # Local processing
+        scraped_chunks = []
+        source_type = detect_source_type(filepath)
+        if source_type is None:
             if verbose:
-                print(f"[thepipe] Error extracting from {filepath}: {e}")
-                
-    if verbose:
-        if scraped_chunks:
-            print(f"[thepipe] Extracted from {filepath}")
-        else:
-            print(f"[thepipe] No content extracted from {filepath}")
+                print(f"[thepipe] Unsupported source type for file '{os.path.basename(filepath)}'")
+            return scraped_chunks
             
-    if chunking_method:
-        scraped_chunks = chunking_method(scraped_chunks)
-        
-    return scraped_chunks
+        if verbose:
+            print(f"[thepipe] Scraping {source_type}: {filepath}...")
+            
+        # Call the appropriate scraper based on file type
+        if source_type == 'application/pdf':
+            scraped_chunks = scrape_pdf(
+                file_path=filepath, 
+                ai_extraction=ai_extraction, 
+                text_only=text_only, 
+                verbose=verbose, 
+                ai_model=ai_model, 
+                options=options
+            )
+        elif source_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+            scraped_chunks = scrape_docx(file_path=filepath, verbose=verbose, text_only=text_only)
+        elif source_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+            scraped_chunks = scrape_pptx(file_path=filepath, verbose=verbose, text_only=text_only)
+        elif source_type.startswith('image/'):
+            scraped_chunks = scrape_image(file_path=filepath, text_only=text_only)
+        elif source_type.startswith('application/vnd.ms-excel') or source_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+            scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_type)
+        elif source_type == 'application/x-ipynb+json':
+            scraped_chunks = scrape_ipynb(file_path=filepath, verbose=verbose, text_only=text_only)
+        elif source_type == 'application/zip' or source_type == 'application/x-zip-compressed':
+            scraped_chunks = scrape_zip(
+                file_path=filepath, 
+                verbose=verbose, 
+                ai_extraction=ai_extraction, 
+                text_only=text_only, 
+                local=local,
+                options=options
+            )
+        elif source_type.startswith('video/'):
+            scraped_chunks = scrape_video(file_path=filepath, verbose=verbose, text_only=text_only, options=options)
+        elif source_type.startswith('audio/'):
+            scraped_chunks = scrape_audio(file_path=filepath, verbose=verbose, options=options)
+        elif source_type.startswith('text/html'):
+            scraped_chunks = scrape_html(file_path=filepath, verbose=verbose, text_only=text_only)
+        elif source_type.startswith('text/'):
+            scraped_chunks = scrape_plaintext(file_path=filepath)
+        else:
+            try:
+                scraped_chunks = scrape_plaintext(file_path=filepath)
+            except Exception as e:
+                if verbose:
+                    print(f"[thepipe] Error extracting from '{os.path.basename(filepath)}': {e}")
+                raise ValueError(f"Failed to process '{os.path.basename(filepath)}' as plaintext: {e}")
+                    
+        if verbose:
+            if scraped_chunks:
+                print(f"[thepipe] Extracted from {filepath}")
+            else:
+                print(f"[thepipe] No content extracted from {filepath}")
+                
+        if chunking_method:
+            scraped_chunks = chunking_method(scraped_chunks)
+            
+        return scraped_chunks
+    
+    except Exception as e:
+        # Wrap the original exception with file information and re-raise
+        error_msg = f"Error processing file '{filepath}': {str(e)}"
+        if verbose:
+            print(f"[thepipe] {error_msg}")
+        # We can use raise from to preserve the original traceback
+        raise type(e)(error_msg) from e
 
 def scrape_html(
     file_path: str, verbose: bool = False, text_only: bool = False
@@ -1060,7 +1067,7 @@ def scrape_ipynb(
             chunks.append(Chunk(path=file_path, texts=texts, images=images))
     return chunks
 
-def scrape_tweet(url: str, text_only: bool = False, verbose: bool = False) -> List[Chunk]:
+def scrape_tweet(url: str, text_only: bool = False, verbose: bool = False, options: Optional[Dict[str, Any]]= None) -> List[Chunk]:
     # magic function from https://github.com/vercel/react-tweet/blob/main/packages/react-tweet/src/api/fetch-tweet.ts
     # unofficial, could break at any time
     def get_token(id: str) -> str:

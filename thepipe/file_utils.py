@@ -6,20 +6,20 @@ import fnmatch
 from typing import List, Optional, Dict, Any, Union
 
 # Simple patterns without escape sequences to avoid warnings
-FOLDERS_TO_IGNORE = ['*node_modules/*', '.*venv/*', '.*git/*', '.*vscode/*', '.*pycache/*','.git/*']
-FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*bin', '.*pyc', '.*pyo', '.*exe', '.*dll', '.*ipynb_checkpoints']
-DEFAULT_IGNORE_PATTERNS = ['**/.git/**','**/.github/**','**/.git/objects/**','**/.git/hooks/**','**/.git/logs/**','**/.git/refs/**','**/.git/info/**','**/.gitattributes','**/.gitignore','**/.gitmodules','**/node_modules/**', '**/node_modules/.bin/**', '**/node_modules/**/.*','**/node_modules/.package-lock.json','**/package-lock.json', '**/yarn.lock','**/__pycache__/**', '**/*.pyc', '**/*.pyo','**/venv/**', '**/.venv/**', '**/env/**','**/build/**', '**/dist/**', '**/outputs/**','**/.vscode/**', '**/.idea/**', '**/.cache/**','**/.DS_Store','**/*.eslintrc*','**/.nycrc','**/.npmignore','**/.editorconfig','**/.travis.yml','**/.zuul.yml','**/.gitkeep','**/.*config','**/.*cache','**/.*rc']
+DEFAULT_IGNORE_PATTERNS = ['**/.git/**','**/.github/**','**/.git/objects/**','**/.git/hooks/**','**/.git/logs/**','**/.git/refs/**','**/.git/info/**','**/.gitattributes','**/.gitignore','**/.gitmodules','**/node_modules/**', '**/node_modules/.bin/**', '**/node_modules/**/.*','**/node_modules/.package-lock.json','package-lock.json', '**/yarn.lock','**/__pycache__/**', '**/*.pyc', '**/*.pyo','**/venv/**', '**/.venv/**', '**/env/**','**/build/**', '**/dist/**', '**/outputs/**','**/.vscode/**', '**/.idea/**', '**/.cache/**','**/.DS_Store','**/*.eslintrc*','**/.nycrc','**/.npmignore','**/.editorconfig','**/.travis.yml','**/.zuul.yml','**/.gitkeep','**/.*config','**/.*cache','**/.*rc','**/package-lock.json', '**/.gitignore', '**/*.*bin', '**/*.*pyc', '**/*.*pyo', '**/*.*exe', '**/*.*dll', '**/*.*ipynb_checkpoints','**/*.ico']
 SKIP_DIRS = ['.git','node_modules','__pycache__','.venv','venv','env','build','dist','outputs','.vscode','.idea','.cache']
 FILESIZE_LIMIT_MB = os.getenv("FILESIZE_LIMIT_MB", 50)
 
 def detect_source_type(source: str) -> str:
     # otherwise, try to detect the file type by its extension
-    _, extension = os.path.splitext(source)
+    _, extension = os.path.splitext(source.lower())
     if extension:
         if extension == '.ipynb':
             # special case for notebooks, mimetypes is not familiar
             return 'application/x-ipynb+json'
         elif extension == '.ts':
+            return 'text/'
+        elif extension == '.svg': #TODO: Solve SVG image analysis 
             return 'text/'
         guessed_mimetype = mimetypes.guess_type(source)[0]
         if guessed_mimetype:
