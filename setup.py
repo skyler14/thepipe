@@ -1,7 +1,9 @@
 from setuptools import setup, find_packages
-
+import os
 
 def read_requirements(file):
+    if not os.path.exists(file):
+        return []
     with open(file, encoding="utf-8") as f:
         return [
             line.strip()
@@ -9,18 +11,18 @@ def read_requirements(file):
             if line.strip() and not line.startswith("#") and not line.startswith("git+")
         ]
 
-
 def read_git_requirements(file):
+    if not os.path.exists(file):
+        return []
     with open(file, encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip().startswith("git+")]
 
-
 setup(
     name="thepipe_api",
-    version="1.4.0",
+    version="1.5.9",
     author="Emmett McFarlane",
     author_email="emmett@thepi.pe",
-    description="Document extraction, powered by multimodal LLMs.",
+    description="Get clean data from tricky documents, powered by VLMs.",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/emcf/thepipe",

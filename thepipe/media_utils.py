@@ -170,7 +170,7 @@ def clean_subtitles(subtitle_file: str, video_url: str, debug: bool = False) -> 
             for sentence in sentences:
                 if sentence.strip():
                     formatted_text = f"[{entry['start']} --> {entry['end']}]  {sentence.strip()}"
-                    chunks.append(Chunk(path=video_url, texts=[formatted_text]))
+                    chunks.append(Chunk(path=video_url, text=formatted_text))
         else:
             # For shorter entries, check if they contain multiple complete thoughts
             parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
@@ -178,10 +178,10 @@ def clean_subtitles(subtitle_file: str, video_url: str, debug: bool = False) -> 
                 for part in parts:
                     if part.strip():
                         formatted_text = f"[{entry['start']} --> {entry['end']}]  {part.strip()}"
-                        chunks.append(Chunk(path=video_url, texts=[formatted_text]))
+                        chunks.append(Chunk(path=video_url, text=formatted_text))
             else:
                 formatted_text = f"[{entry['start']} --> {entry['end']}]  {text}"
-                chunks.append(Chunk(path=video_url, texts=[formatted_text]))
+                chunks.append(Chunk(path=video_url, text=formatted_text))
 
     if debug:
         with open("original_transcript.txt", "w", encoding="utf-8") as f:
@@ -189,7 +189,7 @@ def clean_subtitles(subtitle_file: str, video_url: str, debug: bool = False) -> 
                 f.write(f"[{caption.start} --> {caption.end}] {caption.text}\n")
         with open("cleaned_transcript.txt", "w", encoding="utf-8") as f:
             for chunk in chunks:
-                f.write(f"{chunk.texts[0]}\n")
+                f.write(f"{chunk.text}\n")
 
     return chunks
 

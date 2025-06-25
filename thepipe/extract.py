@@ -1,8 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
-from typing import List, Dict, Union, Optional, Tuple, Callable
-from .core import HOST_URL, THEPIPE_API_KEY, Chunk, calculate_tokens
+from typing import Iterable, List, Dict, Union, Optional, Tuple, Callable, cast
+from .core import (
+    Chunk,
+    calculate_tokens,
+    DEFAULT_AI_MODEL,
+    HOST_URL,
+    THEPIPE_API_KEY,
+)
 from .scraper import scrape_url, scrape_file
 from .chunker import (
     chunk_by_page,
@@ -10,14 +16,15 @@ from .chunker import (
     chunk_by_section,
     chunk_semantic,
     chunk_by_keywords,
+    chunk_by_length,
+    chunk_agentic,
 )
 import requests
 import os
 from openai import OpenAI
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 
 DEFAULT_EXTRACTION_PROMPT = "Extract all the information from the given document according to the following schema: {schema}. Immediately return valid JSON formatted data. If there is missing data, you may use null, but always fill in every column as best you can. Always immediately return valid JSON. You must extract ALL the information available in the entire document."
-DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o-mini")
-
 
 def extract_json_from_response(llm_response: str) -> Union[Dict, List[Dict], None]:
     def clean_response_text(llm_response: str) -> str:
@@ -56,7 +63,6 @@ def extract_json_from_response(llm_response: str) -> Union[Dict, List[Dict], Non
     print(f"[thepipe] Failed to extract valid JSON from LLM response: {llm_response}")
     return None
 
-
 def extract_from_chunk(
     chunk: Chunk,
     chunk_index: int,
@@ -66,24 +72,27 @@ def extract_from_chunk(
     multiple_extractions: bool,
     extraction_prompt: str,
     host_images: bool,
+    openai_client: OpenAI,
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
 ) -> Tuple[Dict, int]:
     response_dict = {"chunk_index": chunk_index, "source": source}
     tokens_used = 0
     try:
-        # Configure OpenAI client with provided credentials
-        client_args = {
-            "api_key": api_key or os.environ.get("OPENAI_API_KEY", os.environ.get("LLM_SERVER_API_KEY")),
-        }
-        
-        # Set API base if provided
-        if api_base:
-            client_args["base_url"] = api_base
-        elif os.environ.get("LLM_SERVER_BASE_URL"):
-            client_args["base_url"] = os.environ.get("LLM_SERVER_BASE_URL")
+        # Use provided client or create one if needed
+        if openai_client is None:
+            # Configure OpenAI client with provided credentials
+            client_args = {
+                "api_key": api_key or os.environ.get("OPENAI_API_KEY", os.environ.get("LLM_SERVER_API_KEY")),
+            }
             
-        openrouter_client = OpenAI(**client_args)
+            # Set API base if provided
+            if api_base:
+                client_args["base_url"] = api_base
+            elif os.environ.get("LLM_SERVER_BASE_URL"):
+                client_args["base_url"] = os.environ.get("LLM_SERVER_BASE_URL")
+                
+            openai_client = OpenAI(**client_args)
 
         corrected_extraction_prompt = extraction_prompt.replace("{schema}", schema)
         if multiple_extractions:
@@ -101,9 +110,9 @@ def extract_from_chunk(
             },
         ]
 
-        response = openrouter_client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model=ai_model,
-            messages=messages,
+            messages=cast(Iterable[ChatCompletionMessageParam], messages),
             response_format={"type": "json_object"},
             temperature=0,
         )
@@ -113,7 +122,7 @@ def extract_from_chunk(
                 f"Failed to receive a message content from LLM Response: {response}"
             )
         input_tokens = calculate_tokens([chunk])
-        output_tokens = calculate_tokens([Chunk(texts=[llm_response])])
+        output_tokens = calculate_tokens([Chunk(text=llm_response)])
         tokens_used += input_tokens + output_tokens
         
         # Process the response
@@ -164,8 +173,13 @@ def extract(
     multiple_extractions: Optional[bool] = False,
     extraction_prompt: Optional[str] = DEFAULT_EXTRACTION_PROMPT,
     host_images: Optional[bool] = False,
-    options: Optional[Dict[str, Any]] = None
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
 ) -> Tuple[List[Dict], int]:
+    print(
+        f"[thepipe] Extract functions will be deprecated in future versions. See the README for more information"
+    )
+    
     if isinstance(schema, dict):
         schema = json.dumps(schema)
 
@@ -192,7 +206,8 @@ def extract(
     if model_name:
         ai_model = model_name
 
-    with ThreadPoolExecutor() as executor:
+    n_threads = (os.cpu_count() or 1) * 2
+    with ThreadPoolExecutor(max_workers=n_threads) as executor:
         future_to_chunk = {
             executor.submit(
                 extract_from_chunk,
@@ -200,10 +215,11 @@ def extract(
                 chunk_index=i,
                 schema=schema,
                 ai_model=ai_model,
-                source=chunk.path,
+                source=chunk.path or "",
                 multiple_extractions=multiple_extractions,
                 extraction_prompt=extraction_prompt,
                 host_images=host_images,
+                openai_client=openai_client,
                 api_key=api_key,
                 api_base=api_base
             ): i
@@ -228,7 +244,6 @@ def extract(
     results.sort(key=lambda x: x["chunk_index"])
     return results, total_tokens_used
 
-
 def extract_from_url(
     url: str,
     schema: Union[str, Dict],
@@ -241,8 +256,13 @@ def extract_from_url(
     verbose: bool = False,
     chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
     local: bool = False,
-    options: Optional[Dict[str, Any]] = None
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
 ) -> List[Dict]:
+    print(
+        f"[thepipe] Extract functions will be deprecated in future versions. See the README for more information"
+    )
+    
     if local:
         chunks = scrape_url(
             url,
@@ -251,7 +271,8 @@ def extract_from_url(
             verbose=verbose,
             local=local,
             chunking_method=chunking_method,
-            options=options
+            options=options,
+            openai_client=openai_client,
         )
         
         # Pass through options dictionary that might contain LLM config
@@ -262,7 +283,8 @@ def extract_from_url(
             multiple_extractions=multiple_extractions,
             extraction_prompt=extraction_prompt,
             host_images=host_images,
-            options=options
+            options=options,
+            openai_client=openai_client,
         )[0]
     else:
         headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}
@@ -329,8 +351,13 @@ def extract_from_file(
     verbose: bool = False,
     chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
     local: bool = False,
-    options: Optional[Dict[str, Any]] = None
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
 ) -> List[Dict]:
+    print(
+        f"[thepipe] Extract functions will be deprecated in future versions. See the README for more information"
+    )
+    
     if local:
         chunks = scrape_file(
             file_path,
@@ -339,7 +366,8 @@ def extract_from_file(
             verbose=verbose,
             local=local,
             chunking_method=chunking_method,
-            options=options
+            options=options,
+            openai_client=openai_client,
         )
         
         # Pass through options dictionary that might contain LLM config
@@ -350,7 +378,8 @@ def extract_from_file(
             multiple_extractions=multiple_extractions,
             extraction_prompt=extraction_prompt,
             host_images=host_images,
-            options=options
+            options=options,
+            openai_client=openai_client,
         )[0]
     else:
         headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}

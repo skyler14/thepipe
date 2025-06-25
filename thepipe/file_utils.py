@@ -64,6 +64,7 @@ def is_database_source(source: str) -> bool:
         return True
         
     return False
+
 def should_skip_dir(dir_path: str) -> bool:
     """
     Check if a directory should be skipped entirely.

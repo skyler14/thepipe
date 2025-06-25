@@ -14,7 +14,6 @@ from thepipe.core import HOST_IMAGES, Chunk, make_image_url
 
 from PIL import Image
 
-
 USER_AGENT_STRING: str = os.getenv("USER_AGENT_STRING", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
 
 DRIVE_DOMAINS = ['drive.google.com','docs.google.com']
@@ -29,7 +28,7 @@ Always reply immediately with only markdown. Do not output anything else.""")
 
 DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o-mini")
 
-def extract_page_content(url: str, text_only: bool = False, verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> Chunk:
+def extract_page_content(url: str, text_only: bool = False, verbose: bool = False, options: Optional[Dict[str, Any]] = None, include_output_images: bool = True) -> Chunk:
     from urllib.parse import urlparse
     from bs4 import BeautifulSoup
     from playwright.sync_api import sync_playwright
@@ -71,7 +70,7 @@ def extract_page_content(url: str, text_only: bool = False, verbose: bool = Fals
 
         texts.append(markdown_content)
         
-        if not text_only:
+        if include_output_images and not text_only:
             # Extract images from the page using heuristics
             for img in page.query_selector_all('img'):
                 img_path = img.get_attribute('src')
@@ -91,7 +90,7 @@ def extract_page_content(url: str, text_only: bool = False, verbose: bool = Fals
                         image = Image.open(requests.get(img_path, stream=True).raw)
                         images.append(image)
                     except:
-                        if '' not in img_path and 'http://' not in img_path:
+                        if 'https://' not in img_path and 'http://' not in img_path:
                             try:
                                 while img_path.startswith('/'):
                                     img_path = img_path[1:]
@@ -112,7 +111,8 @@ def extract_page_content(url: str, text_only: bool = False, verbose: bool = Fals
                 
         browser.close()
     
-    return Chunk(path=url, texts=texts, images=images)
+    text = "\n".join(texts).strip() if texts else ""
+    return Chunk(path=url, text=text, images=images)
 
 def ai_extract_webpage_content(url: str, text_only: Optional[bool] = False, verbose: Optional[bool] = False, ai_model: Optional[str] = DEFAULT_AI_MODEL) -> Chunk:
     from playwright.sync_api import sync_playwright
@@ -182,16 +182,15 @@ def ai_extract_webpage_content(url: str, text_only: Optional[bool] = False, verb
             temperature=0
         )
         llm_response = response.choices[0].message.content
-        chunk = Chunk(path=url, texts=[llm_response], images=[stacked_image])
+        chunk = Chunk(path=url, text=llm_response, images=[stacked_image] if not text_only else [])
     else:
         raise ValueError("Model received 0 images from webpage")
 
     return chunk
 
-
 def normalize_url(url: str) -> str:
-    if not url.startswith(('http://', '')):
-        url = '' + url
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
     return url
 
 def matches_domain(url: str, domains: Union[List[str], Set[str]], verbose: bool = False) -> bool:

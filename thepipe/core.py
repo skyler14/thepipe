@@ -9,47 +9,107 @@ from typing import Dict, List, Optional, Union
 import requests
 from PIL import Image
 from llama_index.core.schema import Document, ImageDocument
-import weakref
 
+# LLM provider info, defaults to openai
+DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o")
+DEFAULT_EMBEDDING_MODEL = os.getenv(
+    "DEFAULT_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
+
+# for persistent images via filehosting
 HOST_IMAGES = os.getenv("HOST_IMAGES", "false").lower() == "true"
 HOST_URL = os.getenv("THEPIPE_API_URL", "https://thepipe-api.up.railway.app")
 THEPIPE_API_KEY = os.getenv("THEPIPE_API_KEY", None)
-
 
 class Chunk:
     def __init__(
         self,
         path: Optional[str] = None,
-        texts: Optional[List[str]] = [],
-        images: Optional[List[Image.Image]] = [],
-        audios: Optional[List] = [],
-        videos: Optional[List] = [],
+        text: Optional[str] = None,
+        texts: Optional[List[str]] = None,  # Backward compatibility
+        images: Optional[List[Image.Image]] = None,
+        audios: Optional[List] = None,
+        videos: Optional[List] = None,
     ):
         self.path = path
-        self.texts = texts
-        self.images = []
-        for img in (images or []):
-            if isinstance(img, weakref.ReferenceType):
-                self.images.append(img)
-            else:
-                self.images.append(weakref.ref(img))
-        self.audios = audios
-        self.videos = videos
+        
+        # Handle both text and texts for backward compatibility
+        if text is not None and texts is not None:
+            raise ValueError("Cannot specify both 'text' and 'texts'. Use 'text' for new code.")
+        elif texts is not None:
+            # Convert list to single string for backward compatibility
+            self.text = "\n".join(texts) if texts else None
+        else:
+            self.text = text
+            
+        self.images = images or []
+        self.audios = audios or []
+        self.videos = videos or []
 
-    def get_valid_images(self):
-        return [img() for img in self.images if img() is not None]
+    # Backward compatibility property
+    @property
+    def texts(self) -> List[str]:
+        """Backward compatibility property. Returns text split by newlines."""
+        if self.text:
+            return [self.text]
+        return []
+
+    def __repr__(self) -> str:
+        parts = []
+        if self.path is not None:
+            parts.append(f"path={self.path!r}")
+        if self.text:
+            # Show a concise preview of the text
+            snippet = self.text.replace("\n", " ")
+            if len(snippet) > 50:
+                snippet = snippet[:47] + "..."
+            parts.append(f"text_snippet={snippet!r}")
+        if self.images:
+            parts.append(f"images_count={len(self.images)}")
+        if self.audios:
+            parts.append(f"audios_count={len(self.audios)}")
+        if self.videos:
+            parts.append(f"videos_count={len(self.videos)}")
+        content = ", ".join(parts) or "empty"
+        return f"Chunk({content})"
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
     def to_llamaindex(self) -> Union[List[Document], List[ImageDocument]]:
-        document_text = "\n".join(self.texts) if self.texts else ""
+        document_text = self.text if self.text else ""
+        metadata = {"filepath": self.path} if self.path else {}
+
+        # If we have PIL Image objects in self.images, convert them to base64 strings
         if self.images:
-            return [
-                ImageDocument(text=document_text, image=image) for image in self.images
-            ]
-        else:
-            return [Document(text=document_text)]
+            image_docs: List[ImageDocument] = []
+            for img in self.images:
+                # Encode the image to JPEG (or use its original format if available)
+                buffer = BytesIO()
+                fmt = img.format or "JPEG"
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                img.save(buffer, format=fmt)
+                img_bytes = buffer.getvalue()
+
+                # Base64‑encode and build MIME type
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+                image_docs.append(
+                    ImageDocument(
+                        text=document_text,
+                        image=img_b64,
+                        extra_info=metadata,
+                    )
+                )
+            return image_docs
+
+        # Fallback to plain text Document
+        return [Document(text=document_text, extra_info=metadata)]
 
     def to_message(
         self,
+        text_only: bool = False,
         host_images: bool = False,
         max_resolution: Optional[int] = None,
         include_paths: Optional[bool] = False,
@@ -61,49 +121,48 @@ class Chunk:
                 make_image_url(image, host_images, max_resolution)
                 for image in self.images
             ]
-            if self.images
+            if self.images and not text_only
             else []
         )
-        if self.texts:
-            img_index = 0
-            for text in self.texts:
-                if host_images:
+        img_index = 0
+        text = self.text if self.text else ""
+        if host_images:
 
-                    def replace_image(match):
-                        nonlocal img_index
-                        if img_index < len(image_urls):
-                            url = image_urls[img_index]
-                            img_index += 1
-                            return f"![image]({url})"
-                        return match.group(
-                            0
-                        )  # If we run out of images, leave the original text
+            def replace_image(match):
+                nonlocal img_index
+                if img_index < len(image_urls):
+                    url = image_urls[img_index]
+                    img_index += 1
+                    return f"![image]({url})"
+                return match.group(
+                    0
+                )  # If we run out of images, leave the original text
 
-                    # Replace markdown image references with hosted URLs
-                    text = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", replace_image, text)
-                message_text += text + "\n\n"
-            # clean up, add to message
-            message_text = re.sub(r"\n{3,}", "\n\n", message_text).strip()
-            # Wrap the text in a path html block if it exists
-            if include_paths and self.path:
-                message_text = (
-                    f'<Document path="{self.path}">\n{message_text}\n</Document>'
-                )
-            message["content"].append({"type": "text", "text": message_text})
+            # Replace markdown image references with hosted URLs
+            text = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", replace_image, text)
+        message_text += text + "\n\n"
+        # clean up, add to message
+        message_text = re.sub(r"\n{3,}", "\n\n", message_text).strip()
+        # Wrap the text in a path html block if it exists
+        if include_paths and self.path:
+            message_text = f'<Document path="{self.path}">\n{message_text}\n</Document>'
+        message["content"].append({"type": "text", "text": message_text})
+
         # Add remaining images that weren't referenced in the text
         for image_url in image_urls:
             message["content"].append({"type": "image_url", "image_url": image_url})
 
         return message
 
-    def to_json(self, host_images: bool = False) -> Dict:
+    def to_json(self, host_images: bool = False, text_only: bool = False) -> Dict:
         data = {
             "path": self.path,
-            "texts": [text.strip() for text in self.texts] if self.texts else [],
+            "text": self.text.strip() if self.text else "",
             "images": (
                 [
                     make_image_url(image=image, host_images=host_images)
                     for image in self.images
+                    if not text_only
                 ]
                 if self.images
                 else []
@@ -127,21 +186,16 @@ class Chunk:
                     image_data = base64.b64decode(remove_prefix)
                     image = Image.open(BytesIO(image_data))
                     images.append(image)
-        texts = []
-        if "texts" in data:
-            texts = [text.strip() for text in data["texts"]]
+        text = data["text"].strip() if "text" in data else None
         return Chunk(
             path=data["path"],
-            texts=texts,
+            text=text,
             images=images,
-            # audios=data['audios'],
-            # videos=data['videos'],
         )
-    
-    def __repr__(self):
-        return f"Chunk(path={self.path}, texts={len(self.texts)} items, images={len(self.images)} items)"
 
-def make_image_url(image: Image.Image, host_images: bool = False, max_resolution: Optional[int] = None) -> str:
+def make_image_url(
+    image: Image.Image, host_images: bool = False, max_resolution: Optional[int] = None
+) -> str:
     if max_resolution:
         width, height = image.size
         if width > max_resolution or height > max_resolution:
@@ -166,7 +220,6 @@ def make_image_url(image: Image.Image, host_images: bool = False, max_resolution
         img_str = base64.b64encode(buffered.getvalue()).decode()
         return f"data:image/jpeg;base64,{img_str}"
 
-
 def calculate_image_tokens(image: Image.Image, detail: str = "auto") -> int:
     width, height = image.size
     if detail == "low":
@@ -185,30 +238,31 @@ def calculate_image_tokens(image: Image.Image, detail: str = "auto") -> int:
         else:
             return calculate_image_tokens(image, detail="high")
 
-
-def calculate_tokens(chunks: List[Chunk]) -> int:
+def calculate_tokens(chunks: List[Chunk], text_only: bool = False) -> int:
     n_tokens = 0
     for chunk in chunks:
-        for text in chunk.texts:
-            n_tokens += len(text) // 4  # Rough estimate: 1 token ≈ 4 characters
-        for image in chunk.get_valid_images():
-            try:
-                n_tokens += calculate_image_tokens(image)
-            except Exception as e:
-                print(f"[thepipe] Error calculating tokens for an image: {str(e)}")
-                # Add a default token count for failed images
-                n_tokens += 85  # Minimum token count for an image
+        if chunk.text:
+            n_tokens += len(chunk.text) / 4
+        if chunk.images and not text_only:
+            for image in chunk.images:
+                try:
+                    n_tokens += calculate_image_tokens(image)
+                except Exception as e:
+                    print(f"[thepipe] Error calculating tokens for an image: {str(e)}")
+                    # Add a default token count for failed images
+                    n_tokens += 85  # Minimum token count for an image
     return int(n_tokens)
-
 
 def chunks_to_messages(
     chunks: List[Chunk],
+    text_only: bool = False,
     host_images: bool = False,
     max_resolution: Optional[int] = None,
     include_paths: Optional[bool] = False,
 ) -> List[Dict]:
     return [
         chunk.to_message(
+            text_only=text_only,
             host_images=host_images,
             max_resolution=max_resolution,
             include_paths=include_paths,
@@ -216,12 +270,14 @@ def chunks_to_messages(
         for chunk in chunks
     ]
 
-
 def save_outputs(
-    chunks: List[Chunk], verbose: bool = False, text_only: bool = False
+    chunks: List[Chunk],
+    output_folder: str = "outputs",
+    verbose: bool = False,
+    text_only: bool = False,
 ) -> None:
-    if not os.path.exists("outputs"):
-        os.makedirs("outputs")
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
     text = ""
     current_path = None
     page_number = 1
@@ -231,8 +287,8 @@ def save_outputs(
         return path.lower().endswith('.pdf')
 
     # First write: output with minimal headers
-    for i,chunk in enumerate(chunks):
-        if chunk is None or (not chunk.texts and not chunk.images):
+    for i, chunk in enumerate(chunks):
+        if chunk is None or (not chunk.text and not chunk.images):
             continue
 
         # Only write path when it changes
@@ -248,34 +304,34 @@ def save_outputs(
             text += f"\n{page_number}\n\n"
             page_number += 1
 
-        if chunk.texts:
-            for chunk_text in chunk.texts:
-                text += f"```\n{chunk_text}\n```\n"
+        if chunk.text:
+            text += f"```\n{chunk.text}\n```\n"
+            
         if chunk.images and not text_only:
-            for j, image in enumerate(chunk.get_valid_images()):
+            for j, image in enumerate(chunk.images):
                 try:
-                    image.convert("RGB").save(f"outputs/{i}_{j}.jpg")
+                    image.convert("RGB").save(f"{output_folder}/{i}_{j}.jpg")
                 except Exception as e:
                     if verbose:
                         print(f"[thepipe] Error saving image at index {j} in chunk {i}: {str(e)}")
 
     # Clean up excessive newlines and write
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
-    with open("outputs/prompt.txt", "w", encoding="utf-8") as file:
+    with open(f"{output_folder}/prompt.txt", "w", encoding="utf-8") as file:
         file.write(text)
 
     if verbose:
         try:
             # Attempt to calculate tokens using the original method
             token_count = calculate_tokens(chunks)
-            print(f"[thepipe] Approximately {token_count} tokens saved to outputs folder")
+            print(f"[thepipe] Approximately {token_count} tokens saved to {output_folder}")
         except Exception as e:
             # If the original method fails, fall back to a simpler estimation
-            total_chars = sum(len(chunk_text) for chunk in chunks for chunk_text in chunk.texts)
+            total_chars = sum(len(chunk.text or "") for chunk in chunks)
             estimated_tokens = total_chars // 4  # Rough estimate: 1 token ≈ 4 characters
             print(f"[thepipe] Error calculating exact tokens: {str(e)}")
-            print(f"[thepipe] Estimated {estimated_tokens} tokens saved to outputs folder (based on character count)")
-        print(f"[thepipe] Outputs saved to 'outputs' folder")
+            print(f"[thepipe] Estimated {estimated_tokens} tokens saved to {output_folder} (based on character count)")
+        print(f"[thepipe] Outputs saved to '{output_folder}' folder")
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -303,6 +359,26 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--db', nargs='*',
         help='Database query. Format: --db ["query"] [db_type] [mode]. '
              'If empty, shows preview. Mode can be "schema" or "preview".')
+
+    # OpenAI-related flags
+    parser.add_argument(
+        "--openai-api-key",
+        dest="openai_api_key",
+        default=os.getenv("OPENAI_API_KEY"),
+        help="OpenAI API key.  If omitted, env variable OPENAI_API_KEY is used.",
+    )
+    parser.add_argument(
+        "--openai-base-url",
+        dest="openai_base_url",
+        default="https://api.openai.com/v1",
+        help="Base URL for the OpenAI API (default: https://api.openai.com/v1).",
+    )
+    parser.add_argument(
+        "--openai-model",
+        dest="openai_model",
+        default=DEFAULT_AI_MODEL,
+        help=f"Chat/VLM model to use (default: {DEFAULT_AI_MODEL}).",
+    )
 
     args = parser.parse_args()
     

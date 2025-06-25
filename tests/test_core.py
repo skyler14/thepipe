@@ -28,7 +28,7 @@ class test_core(unittest.TestCase):
         self.assertEqual(len(llama_index), 1)
     
     def test_chunks_to_messages(self):
-        chunks = scraper.scrape_file(filepath=self.files_directory+"/example.md", local=True)
+        chunks = scraper.scrape_file(filepath=self.files_directory+"/example.md")
         messages = core.chunks_to_messages(chunks)
         self.assertEqual(type(messages), list)
         for message in messages:
@@ -48,7 +48,7 @@ class test_core(unittest.TestCase):
             text = file.read()
         self.assertIn('Hello, World!', text)
         # verify with images
-        chunks = scraper.scrape_file(filepath=self.files_directory+"/example.jpg", local=True)
+        chunks = scraper.scrape_file(filepath=self.files_directory+"/example.jpg")
         core.save_outputs(chunks)
         self.assertTrue(any('.jpg' in f for f in os.listdir(self.outputs_directory)))
 
