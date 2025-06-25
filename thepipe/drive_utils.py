@@ -184,8 +184,7 @@ class DriveFolderCrawler:
                     from .scraper import scrape_file
                     file_chunks = scrape_file(
                         filepath=temp_path,
-                        verbose=self.verbose,
-                        local=True
+                        verbose=self.verbose
                     )
                     
                     # Update paths to include original drive path
@@ -595,7 +594,6 @@ def process_drive_content(
     drive_url: str,
     drive_id: str,
     text_only: bool = False,
-    ai_extraction: bool = False,
     verbose: bool = False,
     options: Optional[Dict[str, Any]] = None
 ) -> List[Chunk]:
@@ -675,9 +673,7 @@ def process_drive_content(
         file_chunks = scrape_file(
             filepath=temp_file_path,
             text_only=text_only,
-            ai_extraction=ai_extraction,
             verbose=verbose,
-            local=True,
             options=options
         )
         

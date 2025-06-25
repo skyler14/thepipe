@@ -11,6 +11,16 @@ import numpy as np
 from pydantic import BaseModel
 from openai import OpenAI
 
+
+class Section(BaseModel):
+    title: str
+    start_line: int
+    end_line: int
+
+
+class SectionList(BaseModel):
+    sections: List[Section]
+
 class Section(BaseModel):
     title: str
     start_line: int
@@ -34,8 +44,7 @@ def chunk_by_document(chunks: List[Chunk]) -> List[Chunk]:
         doc_texts = []
         doc_images = []
         for chunk in doc_chunks:
-            if chunk.text:
-                doc_texts.append(chunk.text)
+            doc_texts.extend(chunk.text)
             doc_images.extend(chunk.images)
         text = "\n".join(doc_texts) if doc_texts else None
         new_chunks.append(Chunk(path=doc_chunks[0].path, text=text, images=doc_images))
@@ -44,6 +53,14 @@ def chunk_by_document(chunks: List[Chunk]) -> List[Chunk]:
 def chunk_by_page(chunks: List[Chunk]) -> List[Chunk]:
     # by-page chunking is default behavior
     return chunks
+
+def chunk_by_section(
+    chunks: List[Chunk], section_separator: str = "## "
+) -> List[Chunk]:
+    section_chunks: List[Chunk] = []
+    cur_text: Optional[str] = None
+    cur_images: List = []
+    cur_path: Optional[str] = None
 
 def chunk_by_section(
     chunks: List[Chunk], section_separator: str = "## "
@@ -234,9 +251,10 @@ def chunk_by_length(chunks: List[Chunk], max_tokens: int = 10000) -> List[Chunk]
             ),
         ]
         # recursive call
-        new_chunks.extend(chunk_by_length(split_chunks, max_tokens))
+        new_chunks = chunk_by_length(split_chunks, max_tokens)
 
     return new_chunks
+
 
 # LLM-based agentic semantic chunking (experimental, openai only)
 def chunk_agentic(
@@ -260,8 +278,13 @@ def chunk_agentic(
         lines: List[str] = []
         line_to_chunk: List[Chunk] = []
         for chunk in doc_chunks:
-            if chunk.text:
-                for line in chunk.text.split("\n"):
+            texts = (
+                chunk.text
+                if isinstance(chunk.text, list)
+                else ([chunk.text] if chunk.text else [])
+            )
+            for text in texts:
+                for line in text.split("\n"):
                     lines.append(line)
                     line_to_chunk.append(chunk)
         if not lines:

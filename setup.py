@@ -40,8 +40,5 @@ setup(
             "thepipe=thepipe.__init__:main",
         ],
     },
-    extras_require={
-        "local": read_requirements("local.txt"),
-    },
-    dependency_links=read_git_requirements("local.txt"),
+    dependency_links=read_git_requirements("requirements.txt"),
 )

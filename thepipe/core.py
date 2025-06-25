@@ -18,8 +18,7 @@ DEFAULT_EMBEDDING_MODEL = os.getenv(
 
 # for persistent images via filehosting
 HOST_IMAGES = os.getenv("HOST_IMAGES", "false").lower() == "true"
-HOST_URL = os.getenv("THEPIPE_API_URL", "https://thepipe-api.up.railway.app")
-THEPIPE_API_KEY = os.getenv("THEPIPE_API_KEY", None)
+HOST_URL = os.getenv("HOST_URL", "https://thepipe-api.up.railway.app")
 
 class Chunk:
     def __init__(
@@ -279,117 +278,21 @@ def save_outputs(
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     text = ""
-    current_path = None
-    page_number = 1
-
-    def is_paginated_format(path: str) -> bool:
-        """Check if the file format typically has pages."""
-        return path.lower().endswith('.pdf')
-
-    # First write: output with minimal headers
+    # Save the text and images to the outputs directory
     for i, chunk in enumerate(chunks):
         if chunk is None or (not chunk.text and not chunk.images):
             continue
-
-        # Only write path when it changes
-        if chunk.path != current_path:
-            current_path = chunk.path
-            if current_path is not None:
-                if text:  # Add spacing between documents
-                    text += "\n"
-                text += f"{current_path}\n\n"
-            page_number = 1
-        elif current_path and is_paginated_format(current_path):
-            # Just add page number for PDFs
-            text += f"\n{page_number}\n\n"
-            page_number += 1
-
+        if chunk.path is not None:
+            text += f"{chunk.path}:\n"
         if chunk.text:
             text += f"```\n{chunk.text}\n```\n"
-            
-        if chunk.images and not text_only:
+        if not text_only and chunk.images:
             for j, image in enumerate(chunk.images):
-                try:
-                    image.convert("RGB").save(f"{output_folder}/{i}_{j}.jpg")
-                except Exception as e:
-                    if verbose:
-                        print(f"[thepipe] Error saving image at index {j} in chunk {i}: {str(e)}")
-
-    # Clean up excessive newlines and write
-    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+                image.convert("RGB").save(f"{output_folder}/{i}_{j}.jpg")
+    # Save the text
     with open(f"{output_folder}/prompt.txt", "w", encoding="utf-8") as file:
         file.write(text)
-
     if verbose:
-        try:
-            # Attempt to calculate tokens using the original method
-            token_count = calculate_tokens(chunks)
-            print(f"[thepipe] Approximately {token_count} tokens saved to {output_folder}")
-        except Exception as e:
-            # If the original method fails, fall back to a simpler estimation
-            total_chars = sum(len(chunk.text or "") for chunk in chunks)
-            estimated_tokens = total_chars // 4  # Rough estimate: 1 token ≈ 4 characters
-            print(f"[thepipe] Error calculating exact tokens: {str(e)}")
-            print(f"[thepipe] Estimated {estimated_tokens} tokens saved to {output_folder} (based on character count)")
-        print(f"[thepipe] Outputs saved to '{output_folder}' folder")
+        print(f"[thepipe] {calculate_tokens(chunks)} tokens saved to {output_folder}")
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Process files or display cookies."
-    )
-    parser.add_argument(
-        "source", type=str, help="The source file, directory, URL or database to process"
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument('--include_regex', type=str, nargs='?', const='.*', default=None, 
-                       help='Regex pattern to match in a directory. Use quotes for patterns with special characters.')
-    group.add_argument('--include_patterns', type=str, nargs='+', default=None,
-                       help='Glob patterns to match files in a directory (e.g., "*.tsx" "*.ts"). Use quotes for patterns with special characters.')
-    parser.add_argument('--ai_extraction', action='store_true', help='Use ai_extraction to extract text from images.')
-    parser.add_argument('--text_only', nargs='?', const='default', default=None, 
-                        choices=['default', 'transcribe', 'ai', 'uploaded'],
-                        help='Extract only text from the source. Video Options: default (try all methods), transcribe (force local transcription), ai (prefer AI-generated), uploaded (prefer uploaded)')
-    parser.add_argument('--verbose', action='store_true', help='Print status messages.')
-    parser.add_argument('--local', action='store_true', help='Use local processing instead of API.')
-    parser.add_argument('--options', type=str, help='JSON string of type-specific options')
-    parser.add_argument('--browser_type', type=str, choices=['chrome', 'firefox', 'edge', 'brave', 'safari'],
-                       help='Specific browser to extract cookies from')
-    parser.add_argument('--show_cookies', nargs='?', const='format', choices=['format', 'credentials'],
-                       help='Display cookies instead of processing content. Use "credentials" for full cookie data.')
-    parser.add_argument('--db', nargs='*',
-        help='Database query. Format: --db ["query"] [db_type] [mode]. '
-             'If empty, shows preview. Mode can be "schema" or "preview".')
 
-    # OpenAI-related flags
-    parser.add_argument(
-        "--openai-api-key",
-        dest="openai_api_key",
-        default=os.getenv("OPENAI_API_KEY"),
-        help="OpenAI API key.  If omitted, env variable OPENAI_API_KEY is used.",
-    )
-    parser.add_argument(
-        "--openai-base-url",
-        dest="openai_base_url",
-        default="https://api.openai.com/v1",
-        help="Base URL for the OpenAI API (default: https://api.openai.com/v1).",
-    )
-    parser.add_argument(
-        "--openai-model",
-        dest="openai_model",
-        default=DEFAULT_AI_MODEL,
-        help=f"Chat/VLM model to use (default: {DEFAULT_AI_MODEL}).",
-    )
-
-    args = parser.parse_args()
-    
-    # Process options
-    if args.options and isinstance(args.options, str):
-        try:
-            args.options = json.loads(args.options)
-        except json.JSONDecodeError:
-            print("Error: Invalid JSON in options")
-            exit(1)
-    elif not hasattr(args, 'options') or args.options is None:
-        args.options = {}
-        
-    return args
