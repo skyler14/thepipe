@@ -2,6 +2,8 @@ from functools import lru_cache
 import os
 import re
 import logging
+import tempfile
+import io
 from typing import Dict, List, Optional, Any, Union, Tuple
 import http.cookiejar
 from PIL import Image
@@ -27,6 +29,7 @@ VIDEO_PLATFORMS = {
 
 # Global variables for lazy loading
 webvtt = None
+ffmpeg = None
 
 def initialize_subtitle_libraries():
     """Initialize the subtitle processing libraries."""
@@ -36,6 +39,16 @@ def initialize_subtitle_libraries():
             import webvtt
         except ImportError:
             raise ImportError("webvtt-py library not found. Please install it with: pip install webvtt-py")
+
+def initialize_ffmpeg():
+    """Initialize FFmpeg library."""
+    global ffmpeg
+    if ffmpeg is None:
+        try:
+            import ffmpeg
+        except ImportError:
+            raise ImportError("ffmpeg-python library not found. Please install it with: pip install ffmpeg-python")
+    return ffmpeg
 
 @lru_cache(maxsize=1)
 def get_subtitle_parser():
@@ -237,3 +250,74 @@ def is_subtitle_meaningful(subtitle_text: str) -> bool:
     
     # Check if there's meaningful content (more than just a few short words)
     return len(content_lines) > 3 and any(len(line.split()) > 3 for line in content_lines)
+
+# FFmpeg-based video processing functions
+def get_video_duration_ffmpeg(file_path: str) -> float:
+    """Get video duration using ffprobe."""
+    ffmpeg = initialize_ffmpeg()
+    try:
+        probe = ffmpeg.probe(file_path)
+        video_info = next(s for s in probe['streams'] if s['codec_type'] == 'video')
+        return float(video_info['duration'])
+    except Exception as e:
+        raise ValueError(f"Could not determine video duration: {str(e)}")
+
+def extract_frame_ffmpeg(file_path: str, timestamp: float, verbose: bool = False) -> Optional[Image.Image]:
+    """Extract a single frame from video at specified timestamp using ffmpeg."""
+    ffmpeg = initialize_ffmpeg()
+    try:
+        # Extract frame to stdout as PNG
+        out, err = (
+            ffmpeg
+            .input(file_path, ss=timestamp)
+            .output('pipe:', vframes=1, format='image2', vcodec='png')
+            .run(capture_stdout=True, capture_stderr=True, quiet=not verbose)
+        )
+        
+        # Load image from bytes
+        image = Image.open(io.BytesIO(out))
+        return image
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error extracting frame at {timestamp}s: {str(e)}")
+            if 'err' in locals() and err:
+                print(f"[thepipe] FFmpeg error: {err.decode()}")
+        return None
+
+def extract_audio_segment_ffmpeg(file_path: str, start_time: float, duration: float, 
+                                output_path: str, verbose: bool = False) -> bool:
+    """Extract audio segment using ffmpeg."""
+    ffmpeg = initialize_ffmpeg()
+    try:
+        (
+            ffmpeg
+            .input(file_path, ss=start_time, t=duration)
+            .audio
+            .output(output_path, acodec='pcm_s16le', ac=1, ar=16000)
+            .overwrite_output()
+            .run(quiet=not verbose)
+        )
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error extracting audio segment: {str(e)}")
+        return False
+
+def has_video_stream(file_path: str) -> bool:
+    """Check if file has a video stream."""
+    ffmpeg = initialize_ffmpeg()
+    try:
+        probe = ffmpeg.probe(file_path)
+        return any(s['codec_type'] == 'video' for s in probe['streams'])
+    except Exception:
+        return False
+
+def has_audio_stream(file_path: str) -> bool:
+    """Check if file has an audio stream."""
+    ffmpeg = initialize_ffmpeg()
+    try:
+        probe = ffmpeg.probe(file_path)
+        return any(s['codec_type'] == 'audio' for s in probe['streams'])
+    except Exception:
+        return False

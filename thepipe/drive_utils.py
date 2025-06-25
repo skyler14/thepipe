@@ -83,7 +83,6 @@ class DriveFolderCrawler:
 
         return None
 
-
     def get_folder_contents(self, folder_id: str, depth: int = 0) -> List[DriveFile]:
         """Get contents of a folder using Drive API v3."""
         if depth > self.max_depth or folder_id in self.visited:
@@ -185,8 +184,7 @@ class DriveFolderCrawler:
                     from .scraper import scrape_file
                     file_chunks = scrape_file(
                         filepath=temp_path,
-                        verbose=self.verbose,
-                        local=True
+                        verbose=self.verbose
                     )
                     
                     # Update paths to include original drive path
@@ -253,32 +251,6 @@ class DriveFolderCrawler:
 def is_folder_url(url: str) -> bool:
     """Check if URL is a Drive folder."""
     return bool(re.search(r'drive\.google\.com/(?:drive/)?folders/|drive\.google\.com/drive/u/\d+/folders/', url))
-
-def extract_drive_id(url: str) -> Optional[str]:
-    """Extract folder or file ID from Drive URL."""
-    parsed_url = urlparse(url)
-    
-    # Direct file links
-    file_match = re.search(r'/file/d/([a-zA-Z0-9_-]+)', parsed_url.path)
-    if file_match:
-        return file_match.group(1)
-    
-    # Folder links
-    folder_match = re.search(r'folders/([a-zA-Z0-9_-]+)', parsed_url.path)
-    if folder_match:
-        return folder_match.group(1)
-    
-    # Google Doc types
-    doc_match = re.search(r'/(?:document|presentation|spreadsheets)/d/([a-zA-Z0-9_-]+)', parsed_url.path)
-    if doc_match:
-        return doc_match.group(1)
-    
-    # Query parameter IDs
-    query_params = parse_qs(parsed_url.query)
-    if 'id' in query_params:
-        return query_params['id'][0]
-    
-    return None
 
 def extract_drive_id(url: str) -> Optional[str]:
     """Extract folder or file ID from Drive URL."""
@@ -622,7 +594,6 @@ def process_drive_content(
     drive_url: str,
     drive_id: str,
     text_only: bool = False,
-    ai_extraction: bool = False,
     verbose: bool = False,
     options: Optional[Dict[str, Any]] = None
 ) -> List[Chunk]:
@@ -666,10 +637,10 @@ def process_drive_content(
             if "Authentication required" in str(e):
                 return [Chunk(
                     path=drive_url,
-                    texts=["This Google Drive file requires authentication.\n"
+                    text="This Google Drive file requires authentication.\n"
                           "Please provide service account credentials via options:\n"
                           '--options \'{"service_account_file": "path/to/credentials.json"}\'\n'
-                          "Or provide the service account JSON directly in service_account_info"]
+                          "Or provide the service account JSON directly in service_account_info"
                 )]
             raise
 
@@ -687,7 +658,7 @@ def process_drive_content(
                 
             return [Chunk(
                 path=drive_url,
-                texts=[f"Failed to process Google Drive file: {error_msg}"]
+                text=f"Failed to process Google Drive file: {error_msg}"
             )]
 
     # Process the content
@@ -702,9 +673,7 @@ def process_drive_content(
         file_chunks = scrape_file(
             filepath=temp_file_path,
             text_only=text_only,
-            ai_extraction=ai_extraction,
             verbose=verbose,
-            local=True,
             options=options
         )
         

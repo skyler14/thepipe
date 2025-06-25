@@ -4,9 +4,12 @@ import unittest
 import sys
 import os
 import json
-sys.path.append('..')
+from openai import OpenAI
+
+sys.path.append("..")
 from thepipe.extract import extract, extract_json_from_response
 from thepipe.core import Chunk
+
 
 class TestExtractor(unittest.TestCase):
     def setUp(self):
@@ -25,32 +28,31 @@ Total: $14.57 USD
             "total_usd": "float",
         }
 
-        self.chunks = [Chunk(path="receipt.md", texts=[self.example_receipt])]
+        self.chunks = [Chunk(path="receipt.md", text=self.example_receipt)]
 
     def test_extract_json_from_response(self):
         # List of test cases with expected results
         test_cases = [
             # Case 1: JSON enclosed in triple backticks
             {
-                "input": "```json\n{\"key1\": \"value1\", \"key2\": 2}\n```",
-                "expected": {"key1": "value1", "key2": 2}
+                "input": '```json\n{"key1": "value1", "key2": 2}\n```',
+                "expected": {"key1": "value1", "key2": 2},
             },
             # Case 2: JSON directly in the response
             {
-                "input": "{\"key1\": \"value1\", \"key2\": 2}",
-                "expected": {"key1": "value1", "key2": 2}
+                "input": '{"key1": "value1", "key2": 2}',
+                "expected": {"key1": "value1", "key2": 2},
             },
             # Case 3: Response contains multiple JSON objects
             {
-                "input": "Random text {\"key1\": \"value1\"} and another {\"key2\": 2}",
-                "expected": [{"key1": "value1"}, {"key2": 2}]
+                "input": 'Random text {"key1": "value1"} and another {"key2": 2}',
+                "expected": [{"key1": "value1"}, {"key2": 2}],
             },
             # Case 4: Response contains incomplete JSON
             {
-                "input": "Random text {\"key1\": \"value1\"} and another {\"key2\": 2",
-                "expected": {"key1": "value1"}
-            }
-
+                "input": 'Random text {"key1": "value1"} and another {"key2": 2',
+                "expected": {"key1": "value1"},
+            },
         ]
 
         for i, case in enumerate(test_cases):
@@ -59,9 +61,16 @@ Total: $14.57 USD
                 self.assertEqual(result, case["expected"])
 
     def test_extract(self):
+        # provide an explicit client so we cover the new parameter
+        client = OpenAI()
+        try:
+            print(open)
+        except:
+            pass
         results, total_tokens_used = extract(
-            chunks=self.chunks, # receipt
+            chunks=self.chunks,  # receipt
             schema=self.schema,
+            openai_client=client,
         )
 
         # Check if we got a result
@@ -84,5 +93,6 @@ Total: $14.57 USD
         # Check if tokens were used
         self.assertGreater(total_tokens_used, 0)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

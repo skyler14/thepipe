@@ -7,7 +7,15 @@ from typing import Dict, List, Optional, Any, Union, Tuple
 from urllib.parse import urlparse
 import rookiepy
 from .core import Chunk
-from .enums import BrowserType
+
+# Browser type enum for compatibility
+class BrowserType:
+    CHROME = "chrome"
+    FIREFOX = "firefox"
+    EDGE = "edge"
+    BRAVE = "brave"
+    SAFARI = "safari"
+    CHROMIUM = "chromium"
 
 def get_default_browser() -> Optional[Tuple[str, str]]:
     """Get the default browser type and path using webbrowser module."""
@@ -34,15 +42,15 @@ def get_default_browser() -> Optional[Tuple[str, str]]:
                 browser_path = args[0] if args else ''
             
             browser_mapping = {
-                'firefox': BrowserType.FIREFOX.value,
-                'mozilla': BrowserType.FIREFOX.value,
-                'chrome': BrowserType.CHROME.value,
-                'google-chrome': BrowserType.CHROME.value,
-                'chromium': BrowserType.CHROMIUM.value,
-                'safari': BrowserType.SAFARI.value,
-                'edge': BrowserType.EDGE.value,
-                'msedge': BrowserType.EDGE.value,
-                'brave': BrowserType.BRAVE.value
+                'firefox': BrowserType.FIREFOX,
+                'mozilla': BrowserType.FIREFOX,
+                'chrome': BrowserType.CHROME,
+                'google-chrome': BrowserType.CHROME,
+                'chromium': BrowserType.CHROMIUM,
+                'safari': BrowserType.SAFARI,
+                'edge': BrowserType.EDGE,
+                'msedge': BrowserType.EDGE,
+                'brave': BrowserType.BRAVE
             }
             
             for key in browser_mapping:
@@ -64,13 +72,13 @@ def get_system_default_browser() -> Optional[Tuple[str, str]]:
                 prog_id = winreg.QueryValueEx(key, 'ProgId')[0]
                 
                 if 'Firefox' in prog_id:
-                    return BrowserType.FIREFOX.value, r'C:\Program Files\Mozilla Firefox\firefox.exe'
+                    return BrowserType.FIREFOX, r'C:\Program Files\Mozilla Firefox\firefox.exe'
                 elif 'Chrome' in prog_id:
-                    return BrowserType.CHROME.value, r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+                    return BrowserType.CHROME, r'C:\Program Files\Google\Chrome\Application\chrome.exe'
                 elif 'Edge' in prog_id:
-                    return BrowserType.EDGE.value, r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+                    return BrowserType.EDGE, r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
                 elif 'Brave' in prog_id:
-                    return BrowserType.BRAVE.value, r'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
+                    return BrowserType.BRAVE, r'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
         except:
             pass
     elif sys.platform == 'darwin':
@@ -81,13 +89,13 @@ def get_system_default_browser() -> Optional[Tuple[str, str]]:
             output = result.stdout.lower()
             
             if 'firefox' in output:
-                return BrowserType.FIREFOX.value, '/Applications/Firefox.app/Contents/MacOS/firefox'
+                return BrowserType.FIREFOX, '/Applications/Firefox.app/Contents/MacOS/firefox'
             elif 'chrome' in output:
-                return BrowserType.CHROME.value, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+                return BrowserType.CHROME, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
             elif 'safari' in output:
-                return BrowserType.SAFARI.value, '/Applications/Safari.app/Contents/MacOS/Safari'
+                return BrowserType.SAFARI, '/Applications/Safari.app/Contents/MacOS/Safari'
             elif 'brave' in output:
-                return BrowserType.BRAVE.value, '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
+                return BrowserType.BRAVE, '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
         except:
             pass
     return None
@@ -150,12 +158,12 @@ def process_cookie_options(url: str, chunks: List[Chunk],
                 # Add as chunk
                 chunks.append(Chunk(
                     path=f"{url}#cookie-test",
-                    texts=[cookie_data]
+                    text=cookie_data
                 ))
         elif show_mode == "credentials":
             chunks.append(Chunk(
                 path=f"{url}#cookies",
-                texts=[json.dumps(cookies, indent=2)]
+                text=json.dumps(cookies, indent=2)
             ))
         elif show_mode == "":
             # Add schema as a chunk
@@ -177,7 +185,7 @@ type CookieJar {
 }"""
             chunks.append(Chunk(
                 path=f"{url}#cookie-schema",
-                texts=[schema]
+                text=schema
             ))
 
     except Exception as e:
@@ -186,7 +194,7 @@ type CookieJar {
             return error_msg
         chunks.append(Chunk(
             path=f"{url}#cookies-error",
-            texts=[error_msg]
+            text=error_msg
         ))
 
     return chunks

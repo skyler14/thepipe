@@ -1,8 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
-from typing import List, Dict, Union, Optional, Tuple, Callable
-from .core import HOST_URL, THEPIPE_API_KEY, Chunk, calculate_tokens
+from typing import Any, Iterable, List, Dict, Union, Optional, Tuple, Callable, cast
+from .core import (
+    Chunk,
+    calculate_tokens,
+    DEFAULT_AI_MODEL,
+)
 from .scraper import scrape_url, scrape_file
 from .chunker import (
     chunk_by_page,
@@ -10,14 +14,15 @@ from .chunker import (
     chunk_by_section,
     chunk_semantic,
     chunk_by_keywords,
+    chunk_by_length,
+    chunk_agentic,
 )
 import requests
 import os
 from openai import OpenAI
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 
 DEFAULT_EXTRACTION_PROMPT = "Extract all the information from the given document according to the following schema: {schema}. Immediately return valid JSON formatted data. If there is missing data, you may use null, but always fill in every column as best you can. Always immediately return valid JSON. You must extract ALL the information available in the entire document."
-DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o-mini")
-
 
 def extract_json_from_response(llm_response: str) -> Union[Dict, List[Dict], None]:
     def clean_response_text(llm_response: str) -> str:
@@ -56,7 +61,6 @@ def extract_json_from_response(llm_response: str) -> Union[Dict, List[Dict], Non
     print(f"[thepipe] Failed to extract valid JSON from LLM response: {llm_response}")
     return None
 
-
 def extract_from_chunk(
     chunk: Chunk,
     chunk_index: int,
@@ -66,14 +70,27 @@ def extract_from_chunk(
     multiple_extractions: bool,
     extraction_prompt: str,
     host_images: bool,
+    openai_client: OpenAI,
+    api_key: Optional[str] = None,
+    api_base: Optional[str] = None,
 ) -> Tuple[Dict, int]:
     response_dict = {"chunk_index": chunk_index, "source": source}
     tokens_used = 0
     try:
-        openrouter_client = OpenAI(
-            base_url=os.environ["LLM_SERVER_BASE_URL"],
-            api_key=os.environ["LLM_SERVER_API_KEY"],
-        )
+        # Use provided client or create one if needed
+        if openai_client is None:
+            # Configure OpenAI client with provided credentials
+            client_args = {
+                "api_key": api_key or os.environ.get("OPENAI_API_KEY", os.environ.get("LLM_SERVER_API_KEY")),
+            }
+            
+            # Set API base if provided
+            if api_base:
+                client_args["base_url"] = api_base
+            elif os.environ.get("LLM_SERVER_BASE_URL"):
+                client_args["base_url"] = os.environ.get("LLM_SERVER_BASE_URL")
+                
+            openai_client = OpenAI(**client_args)
 
         corrected_extraction_prompt = extraction_prompt.replace("{schema}", schema)
         if multiple_extractions:
@@ -91,11 +108,10 @@ def extract_from_chunk(
             },
         ]
 
-        response = openrouter_client.chat.completions.create(
+        response = openai_client.chat.completions.create(
             model=ai_model,
-            messages=messages,
+            messages=cast(Iterable[ChatCompletionMessageParam], messages),
             response_format={"type": "json_object"},
-            temperature=0,
         )
         llm_response = response.choices[0].message.content
         if not llm_response:
@@ -103,38 +119,39 @@ def extract_from_chunk(
                 f"Failed to receive a message content from LLM Response: {response}"
             )
         input_tokens = calculate_tokens([chunk])
-        output_tokens = calculate_tokens([Chunk(texts=[llm_response])])
+        output_tokens = calculate_tokens([Chunk(text=llm_response)])
         tokens_used += input_tokens + output_tokens
-        try:
-            llm_response_dict = extract_json_from_response(llm_response)
-            if llm_response_dict:
-                if multiple_extractions:
-                    if (
-                        isinstance(llm_response_dict, dict)
-                        and "extraction" in llm_response_dict
-                    ):
-                        response_dict["extraction"] = llm_response_dict["extraction"]
-                    elif isinstance(llm_response_dict, list):
-                        response_dict["extraction"] = llm_response_dict
-                    else:
-                        response_dict["extraction"] = [llm_response_dict]
+        
+        # Process the response
+        llm_response_dict = extract_json_from_response(llm_response)
+        if llm_response_dict:
+            if multiple_extractions:
+                if (
+                    isinstance(llm_response_dict, dict)
+                    and "extraction" in llm_response_dict
+                ):
+                    response_dict["extraction"] = llm_response_dict["extraction"]
+                elif isinstance(llm_response_dict, list):
+                    response_dict["extraction"] = llm_response_dict
                 else:
-                    if isinstance(llm_response_dict, dict):
-                        response_dict.update(llm_response_dict)
-                    elif isinstance(llm_response_dict, list):
-                        response_dict["error"] = (
-                            f"Expected a single JSON object but received a list: {llm_response_dict}. Try enabling multiple extractions."
-                        )
-                    else:
-                        response_dict["error"] = (
-                            f"Invalid JSON structure in LLM response: {llm_response_dict}"
-                        )
+                    response_dict["extraction"] = [llm_response_dict]
             else:
-                response_dict["error"] = (
-                    f"Failed to extract valid JSON from LLM response: {llm_response}"
-                )
-        except Exception as e:
-            response_dict["error"] = f"Error processing LLM response: {e}"
+                if isinstance(llm_response_dict, dict):
+                    response_dict.update(llm_response_dict)
+                elif isinstance(llm_response_dict, list):
+                    response_dict["error"] = (
+                        f"Expected a single JSON object but received a list: {llm_response_dict}. Try enabling multiple extractions."
+                    )
+                else:
+                    response_dict["error"] = (
+                        f"Invalid JSON structure in LLM response: {llm_response_dict}"
+                    )
+        else:
+            response_dict["error"] = (
+                f"Failed to extract valid JSON from LLM response: {llm_response}"
+            )
+            
+        # If not using multiple extractions, ensure all schema keys are present
         if not multiple_extractions:
             schema_keys = (
                 json.loads(schema).keys() if isinstance(schema, str) else schema.keys()
@@ -146,43 +163,45 @@ def extract_from_chunk(
         response_dict = {"chunk_index": chunk_index, "source": source, "error": str(e)}
     return response_dict, tokens_used
 
-
 def extract(
     chunks: List[Chunk],
     schema: Union[str, Dict],
-    ai_model: Optional[str] = "openai/gpt-4o-mini",
-    multiple_extractions: Optional[bool] = False,
-    extraction_prompt: Optional[str] = DEFAULT_EXTRACTION_PROMPT,
-    host_images: Optional[bool] = False,
+    model: Optional[str] = DEFAULT_AI_MODEL,
+    multiple_extractions: bool = False,
+    extraction_prompt: str = DEFAULT_EXTRACTION_PROMPT,
+    host_images: bool = False,
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
 ) -> Tuple[List[Dict], int]:
+    print(
+        f"[thepipe] Extract functions will be deprecated in future versions. See the README for more information"
+    )
+    
     if isinstance(schema, dict):
         schema = json.dumps(schema)
+
+    if openai_client is None:
+        raise ValueError(
+            "OpenAI client is required for structured extraction. Please provide a valid OpenAI client."
+        )
 
     results = []
     total_tokens_used = 0
 
-    # Assign default values if needed
-    if ai_model is None:
-        ai_model = DEFAULT_AI_MODEL
-    if extraction_prompt is None:
-        extraction_prompt = DEFAULT_EXTRACTION_PROMPT
-    if host_images is None:
-        host_images = False
-    if multiple_extractions is None:
-        multiple_extractions = False
-
-    with ThreadPoolExecutor() as executor:
+    n_threads = (os.cpu_count() or 1) * 2
+    with ThreadPoolExecutor(max_workers=n_threads) as executor:
         future_to_chunk = {
             executor.submit(
                 extract_from_chunk,
                 chunk=chunk,
                 chunk_index=i,
                 schema=schema,
-                ai_model=ai_model,
-                source=chunk.path,
+                ai_model=model,
+                source=chunk.path if chunk.path else "",
                 multiple_extractions=multiple_extractions,
                 extraction_prompt=extraction_prompt,
                 host_images=host_images,
+                openai_client=openai_client,
             ): i
             for i, chunk in enumerate(chunks)
         }
@@ -205,167 +224,64 @@ def extract(
     results.sort(key=lambda x: x["chunk_index"])
     return results, total_tokens_used
 
-
 def extract_from_url(
     url: str,
     schema: Union[str, Dict],
-    ai_model: str = "google/gemma-2-9b-it",
+    model: str = DEFAULT_AI_MODEL,
     multiple_extractions: bool = False,
     extraction_prompt: str = DEFAULT_EXTRACTION_PROMPT,
     host_images: bool = False,
-    text_only: bool = False,
-    ai_extraction: bool = False,
     verbose: bool = False,
-    chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
-    local: bool = False,
-) -> List[Dict]:
-    if local:
-        chunks = scrape_url(
-            url,
-            text_only=text_only,
-            ai_extraction=ai_extraction,
-            verbose=verbose,
-            local=local,
-            chunking_method=chunking_method,
-        )
-        return extract(
-            chunks=chunks,
-            schema=schema,
-            ai_model=ai_model,
-            multiple_extractions=multiple_extractions,
-            extraction_prompt=extraction_prompt,
-            host_images=host_images,
-        )[0]
-    else:
-        headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}
-        data = {
-            "urls": [url],
-            "schema": json.dumps(schema),
-            "ai_model": ai_model,
-            "multiple_extractions": str(multiple_extractions).lower(),
-            "extraction_prompt": extraction_prompt,
-            "host_images": str(host_images).lower(),
-            "text_only": str(text_only).lower(),
-            "ai_extraction": str(ai_extraction).lower(),
-            "chunking_method": chunking_method.__name__,
-        }
-        response = requests.post(
-            f"{HOST_URL}/extract", headers=headers, data=data, stream=True
-        )
-        if response.status_code != 200:
-            raise Exception(
-                f"API request failed with status code {response.status_code}: {response.text}"
-            )
-
-        results = []
-        for line in response.iter_lines(decode_unicode=True):
-            if line:
-                data = json.loads(line)
-                if "extraction_complete" in data:
-                    break
-                result = data["result"]
-                if "error" in result:
-                    results.append(result)
-                else:
-                    extracted_data = {
-                        "chunk_index": result["chunk_index"],
-                        "source": result["source"],
-                    }
-                    if multiple_extractions:
-                        extracted_data["extraction"] = result.get("extraction", [])
-                    else:
-                        extracted_data.update(result)
-                        schema_keys = (
-                            json.loads(schema).keys()
-                            if isinstance(schema, str)
-                            else schema.keys()
-                        )
-                        for key in schema_keys:
-                            if key not in extracted_data:
-                                extracted_data[key] = None
-                    results.append(extracted_data)
-
-        return results
-
+    chunking_method: Callable[[List[Chunk]], List[Chunk]] = chunk_by_page,
+    openai_client: Optional[OpenAI] = None,
+) -> Tuple[List[Dict], int]:
+    print(
+        f"[thepipe] Extract functions will be deprecated in future versions. See the README for more information"
+    )
+    chunks = scrape_url(
+        url,
+        verbose=verbose,
+        chunking_method=chunking_method,
+        openai_client=openai_client,
+    )
+    extracted_chunks, tokens_used = extract(
+        chunks=chunks,
+        schema=schema,
+        model=model,
+        multiple_extractions=multiple_extractions,
+        extraction_prompt=extraction_prompt,
+        host_images=host_images,
+        openai_client=openai_client,
+    )
+    return extracted_chunks, tokens_used
 
 def extract_from_file(
     file_path: str,
     schema: Union[str, Dict],
-    ai_model: str = "google/gemma-2-9b-it",
+    model: str = DEFAULT_AI_MODEL,
     multiple_extractions: bool = False,
     extraction_prompt: str = DEFAULT_EXTRACTION_PROMPT,
     host_images: bool = False,
-    text_only: bool = False,
-    ai_extraction: bool = False,
     verbose: bool = False,
-    chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
-    local: bool = False,
-) -> List[Dict]:
-    if local:
-        chunks = scrape_file(
-            file_path,
-            ai_extraction=ai_extraction,
-            text_only=text_only,
-            verbose=verbose,
-            local=local,
-            chunking_method=chunking_method,
-        )
-        return extract(
-            chunks=chunks,
-            schema=schema,
-            ai_model=ai_model,
-            multiple_extractions=multiple_extractions,
-            extraction_prompt=extraction_prompt,
-            host_images=host_images,
-        )[0]
-    else:
-        headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}
-        data = {
-            "schema": json.dumps(schema),
-            "ai_model": ai_model,
-            "multiple_extractions": str(multiple_extractions).lower(),
-            "extraction_prompt": extraction_prompt,
-            "host_images": str(host_images).lower(),
-            "text_only": str(text_only).lower(),
-            "ai_extraction": str(ai_extraction).lower(),
-            "chunking_method": chunking_method.__name__,
-        }
-        files = {"files": (os.path.basename(file_path), open(file_path, "rb"))}
-
-        response = requests.post(
-            f"{HOST_URL}/extract", headers=headers, data=data, files=files, stream=True
-        )
-        if response.status_code != 200:
-            raise Exception(
-                f"API request failed with status code {response.status_code}: {response.text}"
-            )
-
-        results = []
-        for line in response.iter_lines(decode_unicode=True):
-            if line:
-                data = json.loads(line)
-                if "extraction_complete" in data:
-                    break
-                result = data["result"]
-                if "error" in result:
-                    results.append(result)
-                else:
-                    extracted_data = {
-                        "chunk_index": result["chunk_index"],
-                        "source": result["source"],
-                    }
-                    if multiple_extractions:
-                        extracted_data["extraction"] = result.get("extraction", [])
-                    else:
-                        extracted_data.update(result)
-                        schema_keys = (
-                            json.loads(schema).keys()
-                            if isinstance(schema, str)
-                            else schema.keys()
-                        )
-                        for key in schema_keys:
-                            if key not in extracted_data:
-                                extracted_data[key] = None
-                    results.append(extracted_data)
-
-        return results
+    chunking_method: Callable[[List[Chunk]], List[Chunk]] = chunk_by_page,
+    openai_client: Optional[OpenAI] = None,
+) -> Tuple[List[Dict], int]:
+    print(
+        f"[thepipe] Extract functions will be deprecated in future versions. See the README for more information"
+    )
+    chunks = scrape_file(
+        file_path,
+        verbose=verbose,
+        chunking_method=chunking_method,
+        openai_client=openai_client,
+    )
+    extracted_chunks, tokens_used = extract(
+        chunks=chunks,
+        schema=schema,
+        model=model,
+        multiple_extractions=multiple_extractions,
+        extraction_prompt=extraction_prompt,
+        host_images=host_images,
+        openai_client=openai_client,
+    )
+    return extracted_chunks, tokens_used

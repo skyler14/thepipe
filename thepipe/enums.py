@@ -69,4 +69,12 @@ class YouTubeEnum(Enum):
             metadata_text += f"{key.capitalize()}: {value}\n"
         return metadata_text
 
+class BrowserType(Enum):
+    CHROME = 'chrome'
+    FIREFOX = 'firefox'
+    EDGE = 'edge'
+    BRAVE = 'brave'
+    SAFARI = 'safari'
+    CHROMIUM = 'chromium'
+
 DEFAULT_METADATA_FIELDS = list(YouTubeEnum)

@@ -1,12 +1,11 @@
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union, cast
 import base64
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-from io import BytesIO
-import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
+from io import BytesIO, StringIO
 import math
 import re
-from typing import List, Dict, Any, Callable, Optional, Tuple, Generator, Union
-import glob
+import fnmatch
 import os
 import tempfile
 from urllib.parse import urlparse
@@ -15,7 +14,7 @@ from PIL import Image
 import requests
 import json
 from .drive_utils import extract_drive_id, process_drive_content
-from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, find_video_file
+from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, get_filtered_files
 from .media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
 from .web_utils import (
     SCRAPING_PROMPT,
@@ -23,19 +22,74 @@ from .web_utils import (
     extract_page_content, matches_domain, normalize_url
 )
 from .enums import YouTubeEnum
-from .core import Chunk, HOST_URL, THEPIPE_API_KEY, HOST_IMAGES, make_image_url
-from .chunker import chunk_by_page
-
+from .core import (
+    HOST_IMAGES,
+    Chunk,
+    make_image_url,
+    DEFAULT_AI_MODEL,
+    HOST_URL,
+)
+from .chunker import (
+    chunk_by_page,
+    chunk_by_document,
+    chunk_by_section,
+    chunk_semantic,
+    chunk_by_keywords,
+    chunk_by_length,
+    chunk_agentic,
+)
 import tempfile
+import mimetypes
 import dotenv
+from magika import Magika
 import markdownify
+import fitz
+from openai import OpenAI
+from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
+
 dotenv.load_dotenv()
 
-FOLDERS_TO_IGNORE = ['*node_modules.*', '.*venv.*', '.*\.git.*', '.*\.vscode.*', '.*pycache.*']
-FILES_TO_IGNORE = ['package-lock.json', '.gitignore', '.*\.bin', '.*\.pyc', '.*\.pyo', '.*\.exe', '.*\.dll', '.*\.ipynb_checkpoints']
-GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", None)
-FILESIZE_LIMIT_MB = os.getenv("FILESIZE_LIMIT_MB", 50)
-DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o-mini")
+FOLDERS_TO_IGNORE = {
+    "*node_modules*",
+    "*.git*",
+    "*venv*",
+    "*.vscode*",
+    "*pycache*",
+    "*.ipynb_checkpoints",
+}
+FILES_TO_IGNORE = {
+    ".gitignore",
+    "*.bin",
+    # Python compiled files
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    # Shared libraries and binaries
+    "*.so",
+    "*.dll",
+    "*.exe",
+    # Archives and packages
+    "*.tar",
+    "*.tar.gz",
+    "*.egg-info",
+    "package-lock.json",
+    "package.json",
+    # Lock, log, and metadata files
+    "*.lock",
+    "*.log",
+    "Pipfile.lock",
+    "requirements.lock",
+    "*.exe",
+    "*.dll",
+    ".DS_Store",
+    "Thumbs.db",
+}
+GITHUB_TOKEN: Optional[str] = os.getenv("GITHUB_TOKEN", None)
+USER_AGENT_STRING: str = os.getenv(
+    "USER_AGENT_STRING",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+)
+FILESIZE_LIMIT_MB = int(os.getenv("FILESIZE_LIMIT_MB", 50))
 
 # Global variables for lazy loading
 yt_dlp = None
@@ -48,162 +102,188 @@ def initialize_video_processing():
             import yt_dlp
         except ImportError:
             raise ImportError("yt-dlp library not found. Please install it with: pip install yt-dlp")
-                
-def scrape_file(filepath: str, ai_extraction: bool = False, text_only: bool = False, verbose: bool = False, local: bool = False, chunking_method: Optional[Callable] = chunk_by_page, ai_model: Optional[str] = DEFAULT_AI_MODEL, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
 
-    if not local:
-        with open(filepath, "rb") as f:
-            response = requests.post(
-                url=f"{HOST_URL}/scrape",
-                headers={"Authorization": f"Bearer {THEPIPE_API_KEY}"},
-                files={"files": (os.path.basename(filepath), f)},
-                data={
-                    "text_only": str(text_only).lower(),
-                    "ai_extraction": str(ai_extraction).lower(),
-                    "chunking_method": 
-                        chunking_method.__name__,
-                    'options': json.dumps(options) if options else None if chunking_method else None
-                    ,
-                },
-            )
-        response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
-            # each line is its own JSON object
-            if not line.strip():
-                continue  # skip blank lines
-            data = json.loads(line)
-            # If the server sent an error for this chunk, handle it
-            if "error" in data:
-                raise ValueError(f"Error scraping: {data['error']}")
+def detect_source_mimetype(source: str) -> str:
+    """Detect the MIME type of a source file."""
+    # try to detect the file type by its extension
+    _, extension = os.path.splitext(source)
+    if extension:
+        if extension == ".ipynb":
+            # special case for notebooks, mimetypes is not familiar
+            return "application/x-ipynb+json"
+        guessed_mimetype, _ = mimetypes.guess_type(source)
+        if guessed_mimetype:
+            return guessed_mimetype
+    # if that fails, try AI detection with Magika
+    magika = Magika()
+    with open(source, "rb") as file:
+        result = magika.identify_bytes(file.read())
+    mimetype = result.output.mime_type
+    return mimetype
 
-        chunks = []
-        for line in response.iter_lines():
-            if line:
-                data = json.loads(line)
-                if "result" in data:
-                    chunk = Chunk(
-                        path=data["result"]["source"],
-                        texts=[
-                            content["text"]
-                            for content in data["result"]["content"]
-                            if content["type"] == "text"
-                        ],
-                        images=[
-                            Image.open(
-                                BytesIO(
-                                    base64.b64decode(content["image_url"].split(",")[1])
-                                )
-                            )
-                            for content in data["result"]["content"]
-                            if content["type"] == "image_url"
-                        ],
-                    )
-                    chunks.append(chunk)
-        return chunks
-
+def scrape_file(
+    filepath: str,
+    verbose: bool = False,
+    chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
+    openai_client: Optional[OpenAI] = None,
+    model: str = DEFAULT_AI_MODEL,
+    text_only: bool = False,
+    include_input_images: bool = True,
+    include_output_images: bool = True,
+    options: Optional[Dict[str, Any]] = None,
+) -> List[Chunk]:
     # returns chunks of scraped content from any source (file, URL, etc.)
     scraped_chunks = []
-    source_type = detect_source_type(filepath)
-    if source_type is None:
+    source_mimetype = detect_source_mimetype(filepath)
+    if source_mimetype is None:
         if verbose:
             print(f"[thepipe] Unsupported source type: {filepath}")
         return scraped_chunks
+        
     if verbose:
-        print(f"[thepipe] Scraping {source_type}: {filepath}...")
-    if source_type == 'application/pdf':
-        scraped_chunks = scrape_pdf(file_path=filepath, ai_extraction=ai_extraction, text_only=text_only, verbose=verbose, ai_model=ai_model, options=options)
-    elif source_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        scraped_chunks = scrape_docx(file_path=filepath, verbose=verbose, text_only=text_only,)
-    elif source_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-        scraped_chunks = scrape_pptx(file_path=filepath, verbose=verbose, text_only=text_only,)
-    elif source_type.startswith('image/'):
-        scraped_chunks = scrape_image(file_path=filepath, text_only=text_only,)
-    elif source_type.startswith('application/vnd.ms-excel') or source_type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-        scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_type,)
-    elif source_type == 'application/x-ipynb+json':
-        scraped_chunks = scrape_ipynb(file_path=filepath, verbose=verbose, text_only=text_only,)
-    elif source_type == 'application/zip' or source_type == 'application/x-zip-compressed':
-        scraped_chunks = scrape_zip(file_path=filepath, verbose=verbose, ai_extraction=ai_extraction, text_only=text_only, local=local,)
-    elif source_type.startswith('video/'):
-        scraped_chunks = scrape_video(file_path=filepath, verbose=verbose, text_only=text_only, options=options)
-    elif source_type.startswith('audio/'):
+        print(f"[thepipe] Scraping {source_mimetype}: {filepath}...")
+    if source_mimetype == "application/pdf":
+        scraped_chunks = scrape_pdf(
+            file_path=filepath,
+            verbose=verbose,
+            model=model,
+            options=options,
+            openai_client=openai_client,
+            include_input_images=include_input_images,
+            include_output_images=include_output_images
+        )
+    elif source_mimetype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        scraped_chunks = scrape_docx(
+            file_path=filepath, 
+            verbose=verbose, 
+            include_output_images=include_output_images,
+            options=options
+        )
+    elif source_mimetype == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        scraped_chunks = scrape_pptx(
+            file_path=filepath, 
+            verbose=verbose, 
+            include_output_images=include_output_images,
+            options=options
+        )
+    elif source_mimetype.startswith("image/"):
+        scraped_chunks = scrape_image(file_path=filepath, options=options)
+    elif (
+        source_mimetype.startswith("application/vnd.ms-excel")
+        or source_mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ):
+        scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_mimetype,options=options)
+    elif source_mimetype == "application/x-ipynb+json":
+        scraped_chunks = scrape_ipynb(
+            file_path=filepath, 
+            verbose=verbose, 
+            include_output_images=include_output_images
+        )
+    elif source_mimetype == "application/zip" or source_mimetype == "application/x-zip-compressed":
+        scraped_chunks = scrape_zip(
+            file_path=filepath,
+            verbose=verbose,
+            text_only=text_only,
+            options=options,
+            openai_client=openai_client,
+            include_input_images=include_input_images,
+            include_output_images=include_output_images,
+        )
+    elif source_mimetype.startswith("video/"):
+        scraped_chunks = scrape_video(
+            file_path=filepath, 
+            verbose=verbose, 
+            include_output_images=include_output_images,
+            options=options
+        )
+    elif source_mimetype.startswith("audio/"):
         scraped_chunks = scrape_audio(file_path=filepath, verbose=verbose, options=options)
-    elif source_type.startswith('text/html'):
-        scraped_chunks = scrape_html(file_path=filepath, verbose=verbose, text_only=text_only)
-    elif source_type.startswith('text/'):
-        scraped_chunks = scrape_plaintext(file_path=filepath)
+    elif source_mimetype.startswith("text/html"):
+        scraped_chunks = scrape_html(
+            file_path=filepath, 
+            verbose=verbose, 
+            include_output_images=include_output_images,
+            options=options
+        )
+    elif source_mimetype.startswith("text/"):
+        scraped_chunks = scrape_plaintext(file_path=filepath, options=options)
     else:
         try:
-            scraped_chunks = scrape_plaintext(file_path=filepath)
+            scraped_chunks = scrape_plaintext(file_path=filepath, options=options)
         except Exception as e:
             if verbose:
                 print(f"[thepipe] Error extracting from {filepath}: {e}")
+                
     if verbose:
         if scraped_chunks:
             print(f"[thepipe] Extracted from {filepath}")
         else:
             print(f"[thepipe] No content extracted from {filepath}")
+            
     if chunking_method:
         scraped_chunks = chunking_method(scraped_chunks)
+        
     return scraped_chunks
 
-
 def scrape_html(
-    file_path: str, verbose: bool = False, text_only: bool = False
+    file_path: str,
+    verbose: bool = False,
+    include_output_images: bool = True,
+    options: Optional[Dict[str, Any]] = None
 ) -> List[Chunk]:
     with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         html_content = file.read()
     markdown_content = markdownify.markdownify(html_content, heading_style="ATX")
-    if text_only:
-        return [Chunk(path=file_path, texts=[markdown_content])]
-    images = get_images_from_markdown(html_content)
-    return [Chunk(path=file_path, texts=[markdown_content], images=images)]
+    images = get_images_from_markdown(html_content) if include_output_images else []
+    return [Chunk(path=file_path, text=markdown_content, images=images)]
 
-
-def scrape_plaintext(file_path: str) -> List[Chunk]:
+def scrape_plaintext(file_path: str, options: Optional[Dict[str, Any]] = None ) -> List[Chunk]:
     with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         text = file.read()
-    return [Chunk(path=file_path, texts=[text])]
+    return [Chunk(path=file_path, text=text)]
 
-def scrape_directory(dir_path: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+def scrape_directory(
+    dir_path: str,
+    include_regex: Optional[str] = None,
+    include_patterns: Optional[List[str]] = None,
+    verbose: bool = False,
+    text_only: bool = False,
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
+    model: str = DEFAULT_AI_MODEL,
+    include_input_images: bool = True,
+    include_output_images: bool = True,
+) -> List[Chunk]:
     extraction = []
     
-    if include_patterns is not None:
-        # Use glob patterns
-        all_files = []
-        for pattern in include_patterns:
-            pattern_path = os.path.join(dir_path, '**', pattern)
-            all_files.extend(glob.glob(pattern_path, recursive=True))
-    elif include_regex is not None:
-        # Use regex
-        all_files = []
-        for root, _, files in os.walk(dir_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                if re.search(include_regex, file_path, re.IGNORECASE):
-                    all_files.append(file_path)
-    else:
-        # Neither pattern nor regex specified, include all files
-        all_files = []
-        for root, _, files in os.walk(dir_path):
-            for file in files:
-                all_files.append(os.path.join(root, file))
+    # Process options
+    options = options or {}
     
-    # Ensure we're only dealing with files
-    all_files = [f for f in all_files if os.path.isfile(f)]
+    # Get blacklist files list (if any)
+    blacklist_files = options.get('blacklist_files', [])
+    
+    # Get filtered file list
+    all_files = get_filtered_files(
+        dir_path=dir_path,
+        include_regex=include_regex,
+        include_patterns=include_patterns,
+        blacklist_files=blacklist_files,
+        verbose=verbose
+    )
     
     if verbose:
-        print(f"[thepipe] Found {len(all_files)} files to process in {dir_path}")
+        print(f"[thepipe] Processing {len(all_files)} files in {dir_path}")
     
     with ThreadPoolExecutor() as executor:
         results = executor.map(
             lambda file_path: scrape_file(
                 filepath=file_path,
-                ai_extraction=ai_extraction,
-                text_only=text_only,
+                model=model,
                 verbose=verbose,
-                local=local,
                 options=options,
+                openai_client=openai_client,
+                include_input_images=include_input_images,
+                include_output_images=include_output_images,
             ),
             all_files,
         )
@@ -212,143 +292,174 @@ def scrape_directory(dir_path: str, include_regex: Optional[str] = None, include
     
     return extraction
 
-def scrape_zip(file_path: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None, verbose: bool = False, ai_extraction: bool = False, text_only: bool = False, local: bool = False) -> List[Chunk]:
+def scrape_zip(
+    file_path: str,
+    include_regex: Optional[str] = None,
+    include_patterns: Optional[List[str]] = None,
+    verbose: bool = False,
+    text_only: bool = False,
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
+    include_input_images: bool = True,
+    include_output_images: bool = True,
+) -> List[Chunk]:
     chunks = []
     with tempfile.TemporaryDirectory() as temp_dir:
         with zipfile.ZipFile(file_path, "r") as zip_ref:
             zip_ref.extractall(temp_dir)
-        chunks =scrape_directory(dir_path=temp_dir, include_regex=include_regex, include_patterns=include_patterns, verbose=verbose, ai_extraction=ai_extraction, text_only=text_only, local=local)
+        chunks = scrape_directory(
+            dir_path=temp_dir,
+            include_regex=include_regex,
+            include_patterns=include_patterns,
+            verbose=verbose,
+            text_only=text_only,
+            options=options,
+            openai_client=openai_client,
+            include_input_images=include_input_images,
+            include_output_images=include_output_images,
+        )
     return chunks
 
-def scrape_pdf(file_path: str, ai_extraction: Optional[bool] = False, text_only: Optional[bool] = False, ai_model: Optional[str] = DEFAULT_AI_MODEL, verbose: Optional[bool] = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:    
-    chunks = []
+def scrape_pdf(
+    file_path: str,
+    model: str = DEFAULT_AI_MODEL,
+    verbose: Optional[bool] = False,
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
+    include_input_images: bool = True,
+    include_output_images: bool = True,
+    image_scale: float = 1.0,
+) -> List[Chunk]:
+    chunks: List[Chunk] = []
     MAX_PAGES = 128
 
-    if ai_extraction:
+    # Branch 1 – VLM path (AI extraction or OpenAI client supplied)
+    if openai_client is not None:
         from collections import OrderedDict
         import concurrent.futures
-        import fitz
-        from openai import OpenAI
 
-        with open(file_path, "rb") as f:
-            pdf_bytes = f.read()
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            num_pages = len(doc)
+        if openai_client is None:
+            # Create client from options or environment
+            llm_config = options.get("llm_extractor", {}) if options else {}
+            api_key = llm_config.get("api_key", os.environ.get("LLM_SERVER_API_KEY", os.environ.get("OPENAI_API_KEY")))
+            api_base = llm_config.get("api_base", os.environ.get("LLM_SERVER_BASE_URL"))
+            model = llm_config.get("model", ai_model or DEFAULT_AI_MODEL)
+            
+            # Configure OpenAI client
+            client_args = {"api_key": api_key}
+            if api_base:
+                client_args["base_url"] = api_base
+                
+            openai_client = OpenAI(**client_args)
 
-            if num_pages > MAX_PAGES:
-                err = f"Error: PDF has {num_pages} pages (max is {MAX_PAGES} for AI extraction)."
-                raise Exception(err)
+        with open(file_path, "rb") as fp:
+            pdf_bytes = fp.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        num_pages = len(doc)
 
-            openrouter_client = OpenAI(
-                base_url=os.environ.get("LLM_SERVER_BASE_URL"),
-                api_key=os.environ["LLM_SERVER_API_KEY"],
+        if num_pages > MAX_PAGES:
+            err = f"Error: PDF has {num_pages} pages (max is {MAX_PAGES} for AI extraction)."
+            raise Exception(err)
+
+        if verbose:
+            print(
+                f"[thepipe] Scraping PDF: {file_path} "
+                f"({num_pages} pages) with model {model}"
             )
 
-            def process_page(page_num):
-                page = doc[page_num]
-                text = page.get_text()
-                pix = page.get_pixmap()
+        # Inner worker – processes one page
+        def _process_page(page_num: int) -> Tuple[int, str, Optional[Image.Image]]:
+            page = doc[page_num]
+            text = page.get_text()  # type: ignore[attr-defined]
+
+            # Build message for the LLM
+            msg_content: List[Dict[str, Union[Dict[str, str], str]]] = [
+                {
+                    "type": "text",
+                    "text": f"```\n{text}\n```\n{SCRAPING_PROMPT}",
+                }
+            ]
+
+            image: Optional[Image.Image] = None
+            if include_input_images or include_output_images:
+                mat = fitz.Matrix(image_scale, image_scale)
+                pix = page.get_pixmap(matrix=mat, alpha=False)  # type: ignore[attr-defined]  # noqa: E501
                 image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": make_image_url(
-                                    image, host_images=HOST_IMAGES
-                                ),
-                            },
-                            {
-                                "type": "text",
-                                "text": f"```{text}```\n{SCRAPING_PROMPT}",
-                            },
-                        ],
-                    },
-                ]
-                response = openrouter_client.chat.completions.create(
-                    model=ai_model if ai_model else DEFAULT_AI_MODEL,
-                    messages=messages,
-                    temperature=0,
-                )
-                try:
-                    llm_response = response.choices[0].message.content
-                    if not llm_response:
-                        raise Exception(
-                            f"Failed to receive a message content from LLM Response: {response}"
-                        )
-
-                    # remove markdown codeboxes if they are present
-                    llm_response = llm_response.strip()
-                    if llm_response.startswith("```markdown"):
-                        llm_response = llm_response[len("```markdown") :]
-                    elif llm_response.startswith("```"):
-                        llm_response = llm_response[len("```") :]
-                    if llm_response.endswith("```"):
-                        llm_response = llm_response[: -len("```")]
-
-                    return page_num, llm_response, image
-                except Exception as e:
-                    raise ValueError(f"{e} (unable to read LLM response: {response})")
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [
-                    executor.submit(process_page, page_num)
-                    for page_num in range(num_pages)
-                ]
-                page_results = OrderedDict()
-                for future in concurrent.futures.as_completed(futures):
-                    page_num, llm_response, image = future.result()
-                    page_results[page_num] = (llm_response, image)
-
-            chunks = []
-            for page_num in sorted(page_results.keys()):
-                llm_response, image = page_results[page_num]
-                chunks.append(
-                    Chunk(
-                        path=file_path,
-                        texts=[llm_response],
-                        images=[] if text_only else [image],
+                if include_input_images:
+                    encoded = make_image_url(image, host_images=HOST_IMAGES)
+                    msg_content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encoded, "detail": "high"},
+                        }
                     )
-                )
 
-            return chunks
-    else:
-        # if not using AI extraction, for each page, extract markdown and (optionally) full page images
-        import fitz
-
-        doc = fitz.open(file_path)
-        try:
-            import pymupdf4llm
-
-            md_reader = pymupdf4llm.helpers.pymupdf_rag.to_markdown(
-                doc, page_chunks=True
+            messages = cast(
+                Iterable[ChatCompletionMessageParam],
+                [{"role": "user", "content": msg_content}],
             )
-            for i, page in enumerate(doc):
-                text = md_reader[i]["text"]
-                # remove excessive newlines
-                text = re.sub(r"\n{3,}", "\n\n", text)
-                text = text.strip()
-                if text_only:
-                    chunks.append(Chunk(path=file_path, texts=[text]))
-                else:
-                    pix = page.get_pixmap()
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    chunks.append(Chunk(path=file_path, texts=[text], images=[img]))
-            doc.close()
-        except:
-            # try with default pumupdf if pymupdf4llm fails
-            for i in range(len(doc)):
-                page = doc[i]
-                text = page.get_text()
-                if text_only:
-                    chunks.append(Chunk(path=file_path, texts=[text]))
-                else:
-                    pix = page.get_pixmap()
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    chunks.append(Chunk(path=file_path, texts=[text], images=[img]))
-            doc.close()
+
+            response = openai_client.chat.completions.create(
+                model=model, messages=messages
+            )
+
+            llm_response = response.choices[0].message.content
+            if not llm_response:
+                raise RuntimeError("Empty LLM response.")
+
+            llm_response = llm_response.strip()
+            if llm_response.startswith("```markdown"):
+                llm_response = llm_response[len("```markdown") :]
+            elif llm_response.startswith("```"):
+                llm_response = llm_response[len("```") :]
+            if llm_response.endswith("```"):
+                llm_response = llm_response[: -len("```")]
+
+            return (
+                page_num,
+                llm_response,
+                image if include_output_images else None,
+            )
+
+        # Parallel extraction
+        max_workers = (os.cpu_count() or 1) * 2
+        if verbose:
+            print(f"[thepipe] Using {max_workers} threads for PDF extraction")
+
+        page_results: OrderedDict[int, Tuple[str, Optional[Image.Image]]] = (
+            OrderedDict()
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_process_page, p) for p in range(num_pages)]
+            for fut in as_completed(futures):
+                pg, txt, img = fut.result()
+                page_results[pg] = (txt, img)
+
+        for pg in sorted(page_results):
+            txt, img = page_results[pg]
+            chunks.append(Chunk(path=file_path, text=txt, images=[img] if img else []))
+
+        return chunks
+
+    # Branch 2 – no OpenAI client – text-only offline mode
+    from pymupdf4llm.helpers.pymupdf_rag import to_markdown  # local import
+
+    doc = fitz.open(file_path)
+    md_pages = cast(List[Dict[str, Any]], to_markdown(file_path, page_chunks=True))
+
+    for i in range(doc.page_count):
+        text = re.sub(r"\n{3,}", "\n\n", md_pages[i]["text"]).strip()
+
+        images: List[Image.Image] = []
+        if include_output_images:
+            mat = fitz.Matrix(image_scale, image_scale)
+            pix = doc[i].get_pixmap(matrix=mat, alpha=False)  # type: ignore[attr-defined]  # noqa: E501
+            images.append(Image.frombytes("RGB", [pix.width, pix.height], pix.samples))
+
+        chunks.append(Chunk(path=file_path, text=text, images=images))
+
+    doc.close()
     return chunks
 
 
@@ -366,19 +477,11 @@ def get_images_from_markdown(text: str) -> List[Image.Image]:
     return images
 
 
-def scrape_image(file_path: str, text_only: bool = False) -> List[Chunk]:
-    import pytesseract
-
+def scrape_image(file_path: str, options: Optional[Dict[str, Any]] = None ) -> List[Chunk]:
     img = Image.open(file_path)
     img.load()  # needed to close the file
-    chunks = []
-    if text_only:
-        text = pytesseract.image_to_string(img)
-        chunks.append(Chunk(path=file_path, texts=[text]))
-    else:
-        chunks.append(Chunk(path=file_path, images=[img]))
-    return chunks
-
+    chunk = Chunk(path=file_path, images=[img])
+    return [chunk]
 
 def scrape_spreadsheet(file_path: str, source_type: str) -> List[Chunk]:
     import pandas as pd
@@ -398,15 +501,22 @@ def scrape_spreadsheet(file_path: str, source_type: str) -> List[Chunk]:
         # format each row as json along with the row index
         item["row index"] = i
         item_json = json.dumps(item, indent=4)
-        chunks.append(Chunk(path=file_path, texts=[item_json]))
+        chunks.append(Chunk(path=file_path, text=item_json))
     return chunks
 
-def scrape_url(url: str, include_regex: Optional[str] = None, 
-               include_patterns: Optional[List[str]] = None, 
-               text_only: bool = False, ai_extraction: bool = False, 
-               verbose: bool = False, local: bool = False, 
-               chunking_method: Optional[Callable] = chunk_by_page, 
-               options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+def scrape_url(
+    url: str, 
+    include_regex: Optional[str] = None,
+    include_patterns: Optional[List[str]] = None, 
+    text_only: bool = False, 
+    verbose: bool = False, 
+    chunking_method: Optional[Callable] = chunk_by_page, 
+    options: Optional[Dict[str, Any]] = None,
+    openai_client: Optional[OpenAI] = None,
+    model: str = DEFAULT_AI_MODEL,
+    include_input_images: bool = True,
+    include_output_images: bool = True,
+) -> List[Chunk]:
     """Scrape content from a URL."""
     cookie_options = options.get('cookies', {}) if options else {}
     
@@ -419,84 +529,72 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
             return []
         return cookie_info
 
-    # Normal scraping process
-    if not local:
-        endpoint = f"{HOST_URL}/scrape"
-        headers = {"Authorization": f"Bearer {THEPIPE_API_KEY}"}
-        data = {
-            "text_only": str(text_only).lower(),
-            "ai_extraction": str(ai_extraction).lower(),
-            "chunking_method": chunking_method.__name__,
-            "options": json.dumps(options) if options else None,
-            "urls": url
-        }
-        
-        response = requests.post(endpoint, headers=headers, data=data, stream=True)
-        response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
-            # each line is its own JSON object
-            if not line.strip():
-                continue  # skip blank lines
-            data = json.loads(line)
-            # If the server sent an error for this chunk, handle it
-            if "error" in data:
-                raise ValueError(f"Error scraping: {data['error']}")
-
-        chunks = []
-        for line in response.iter_lines():
-            if line:
-                chunk_data = json.loads(line)
-                chunks.append(chunk_data['result'])
-    else:
-        chunks = []
-        try:
-            if matches_domain(url, DRIVE_DOMAINS):
-                if verbose:
-                    print("[thepipe] Detected Google Drive/Docs URL, using drive scraper")
-                chunks = scrape_drive(url, text_only=text_only,
-                                    ai_extraction=ai_extraction,
-                                    verbose=verbose, options=options)
-            elif matches_domain(url,VIDEO_PLATFORMS):
-                chunks = scrape_youtube(url, text_only=text_only,
-                                      verbose=verbose, options=options)
-            elif matches_domain(url, TWITTER_DOMAINS):
-                chunks = scrape_tweet(url=url, text_only=text_only,
-                                    verbose=verbose, options=options)
-            elif matches_domain(url, GIT_DOMAINS):
-                chunks = scrape_github(github_url=url, include_regex=include_regex,
-                                     include_patterns=include_patterns,
-                                     text_only=text_only, ai_extraction=ai_extraction,
-                                     verbose=verbose, options=options)
-            else:
-                # Handle other content types
-                parsed_url = urlparse(normalize_url(url))
-                file_extension = os.path.splitext(parsed_url.path)[1].lower()
-                if file_extension in ['pdf', 'docx', 'txt', 'csv', 'xlsx']:
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        file_path = os.path.join(temp_dir, os.path.basename(parsed_url.path))
-                        response = requests.get(normalize_url(url))
-                        if (FILESIZE_LIMIT_MB and 
-                            int(response.headers.get('Content-Length', 0)) > FILESIZE_LIMIT_MB * 1024 * 1024):
-                            raise ValueError(f"File size exceeds {FILESIZE_LIMIT_MB} MB limit.")
-                        with open(file_path, 'wb') as file:
-                            file.write(response.content)
-                        chunks = scrape_file(filepath=file_path, ai_extraction=ai_extraction,
-                                           text_only=text_only, verbose=verbose,
-                                           local=local, chunking_method=chunking_method,
-                                           options=options)
-                else:
-                    chunk = extract_page_content(url=url, text_only=text_only,
-                                               verbose=verbose, options=options)
-                    chunks = chunking_method([chunk])
-                    if not any(chunk.texts for chunk in chunks) and not any(chunk.images for chunk in chunks):
-                        raise ValueError("No content extracted from URL.")
-                        
-        except ImportError as e:
-            raise ImportError(f"Required dependencies not found: {str(e)}")
-        except Exception as e:
+    # Process URL locally
+    chunks = []
+    try:
+        if matches_domain(url, DRIVE_DOMAINS):
             if verbose:
-                print(f"[thepipe] Error processing URL: {str(e)}")
-            raise
+                print("[thepipe] Detected Google Drive/Docs URL, using drive scraper")
+            chunks = scrape_drive(url, text_only=text_only,
+                                verbose=verbose, options=options)
+        elif matches_domain(url, VIDEO_PLATFORMS):
+            chunks = scrape_youtube(url, text_only=text_only,
+                                  verbose=verbose, options=options)
+        elif matches_domain(url, TWITTER_DOMAINS):
+            chunks = scrape_tweet(url=url, text_only=text_only,
+                                verbose=verbose, options=options)
+        elif matches_domain(url, GIT_DOMAINS):
+            chunks = scrape_github(github_url=url, include_regex=include_regex,
+                                 include_patterns=include_patterns,
+                                 text_only=text_only, verbose=verbose, options=options)
+        else:
+            # Handle other content types
+            parsed_url = urlparse(normalize_url(url))
+            file_extension = os.path.splitext(parsed_url.path)[1].lower()
+            if file_extension in ['.pdf', '.docx', '.txt', '.csv', '.xlsx']:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    file_path = os.path.join(temp_dir, os.path.basename(parsed_url.path))
+                    response = requests.get(normalize_url(url))
+                    if (FILESIZE_LIMIT_MB and 
+                        int(response.headers.get('Content-Length', 0)) > FILESIZE_LIMIT_MB * 1024 * 1024):
+                        raise ValueError(f"File size exceeds {FILESIZE_LIMIT_MB} MB limit.")
+                    with open(file_path, 'wb') as file:
+                        file.write(response.content)
+                    chunks = scrape_file(
+                        filepath=file_path, 
+                        text_only=text_only, 
+                        verbose=verbose,
+                        chunking_method=chunking_method,
+                        options=options,
+                        openai_client=openai_client,
+                        include_input_images=include_input_images,
+                        include_output_images=include_output_images,
+                    )
+            else:
+                if openai_client and include_input_images:
+                    chunk = parse_webpage_with_vlm(
+                        url=url,
+                        verbose=verbose,
+                        model=model,
+                        openai_client=openai_client,
+                        include_output_images=include_output_images,
+                    )
+                else:
+                    chunk = extract_page_content(
+                        url=url, 
+                        verbose=verbose, 
+                        include_output_images=include_output_images,
+                    )
+                chunks = chunking_method([chunk])
+                if not any(chunk.text for chunk in chunks) and not any(chunk.images for chunk in chunks):
+                    raise ValueError("No content extracted from URL.")
+                    
+    except ImportError as e:
+        raise ImportError(f"Required dependencies not found: {str(e)}")
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error processing URL: {str(e)}")
+        raise
 
     # Process any cookie options if present
     if cookie_options:
@@ -504,8 +602,10 @@ def scrape_url(url: str, include_regex: Optional[str] = None,
         return process_cookie_options(url, chunks, cookie_options)
     return chunks
 
+# Additional scraper functions from Version 1 with minimal changes
+
 def scrape_drive(drive_url: str, text_only: bool = False, 
-                ai_extraction: bool = False, verbose: bool = False, 
+                verbose: bool = False, 
                 options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Process Google Drive URLs (both files and folders)."""
     if verbose:
@@ -519,58 +619,325 @@ def scrape_drive(drive_url: str, text_only: bool = False,
         drive_url=drive_url,
         drive_id=drive_id,
         text_only=text_only,
-        ai_extraction=ai_extraction,
         verbose=verbose,
         options=options
     )
-    
-def scrape_video(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
-    import whisper
-    from moviepy.editor import VideoFileClip
 
+def parse_webpage_with_vlm(
+    url: str,
+    model: str = DEFAULT_AI_MODEL,
+    verbose: Optional[bool] = False,
+    openai_client: Optional[OpenAI] = None,
+    include_output_images: bool = True,
+) -> Chunk:
+    if openai_client is None:
+        raise ValueError("parse_webpage_with_vlm requires an openai_client argument.")
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(user_agent=USER_AGENT_STRING)
+        page = context.new_page()
+        page.goto(url, wait_until="domcontentloaded")
+        if not page.viewport_size:
+            page.set_viewport_size({"width": 800, "height": 600})
+        if not page.viewport_size:
+            raise ValueError(
+                "Failed to set viewport size after finding no viewport size"
+            )
+        viewport_height = page.viewport_size.get("height", 800)
+        total_height = page.evaluate("document.body.scrollHeight")
+        current_scroll_position = 0
+        scrolldowns, max_scrolldowns = 0, 3
+        images: List[Image.Image] = []
+
+        while current_scroll_position < total_height and scrolldowns < max_scrolldowns:
+            page.wait_for_timeout(200)  # wait for content to load
+            screenshot = page.screenshot(full_page=False)
+            img = Image.open(BytesIO(screenshot))
+            images.append(img)
+
+            current_scroll_position += viewport_height
+            page.evaluate(f"window.scrollTo(0, {current_scroll_position})")
+            scrolldowns += 1
+            total_height = page.evaluate("document.body.scrollHeight")
+            if verbose:
+                print(
+                    f"[thepipe] Scrolled to {current_scroll_position} of {total_height}. Waiting for content to load..."
+                )
+
+        browser.close()
+
+    if images:
+        # Vertically stack the images
+        total_height = sum(img.height for img in images)
+        max_width = max(img.width for img in images)
+        stacked_image = Image.new("RGB", (max_width, total_height))
+        y_offset = 0
+        for img in images:
+            stacked_image.paste(img, (0, y_offset))
+            y_offset += img.height
+
+        # Process the stacked image with VLM
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": make_image_url(
+                                stacked_image, host_images=HOST_IMAGES
+                            ),
+                            "detail": "high",
+                        },
+                    },
+                    {"type": "text", "text": SCRAPING_PROMPT},
+                ],
+            },
+        ]
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=cast(Iterable[ChatCompletionMessageParam], messages),
+        )
+        llm_response = response.choices[0].message.content
+        if not llm_response:
+            raise Exception(
+                f"Failed to receive a message content from LLM Response: {response}"
+            )
+        if verbose:
+            print(f"[thepipe] LLM response: {llm_response}")
+        chunk = Chunk(
+            path=url,
+            text=llm_response,
+            images=[stacked_image] if include_output_images else [],
+        )
+    else:
+        raise ValueError("Model received 0 images from webpage")
+
+    return chunk
+
+
+def extract_page_content(
+    url: str, verbose: bool = False, include_output_images: bool = True
+) -> Chunk:
+    from bs4 import BeautifulSoup
+    from playwright.sync_api import sync_playwright
+    import base64
+    import requests
+
+    texts: List[str] = []
+    images: List[Image.Image] = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(user_agent="USER_AGENT_STRING")
+        page = context.new_page()
+        page.goto(url, wait_until="domcontentloaded")
+
+        # Scroll to the bottom of the page to load dynamic content
+        if not page.viewport_size:
+            page.set_viewport_size({"width": 800, "height": 600})
+        if not page.viewport_size:
+            raise ValueError(
+                "Failed to set viewport size after finding no viewport size"
+            )
+        viewport_height = page.viewport_size["height"]
+        total_height = page.evaluate("document.body.scrollHeight")
+        current_scroll_position = 0
+        scrolldowns, max_scrolldowns = 0, 20  # Finite to prevent infinite scroll
+
+        while current_scroll_position < total_height and scrolldowns < max_scrolldowns:
+            page.wait_for_timeout(200)  # Wait for dynamic content to load
+            current_scroll_position += viewport_height
+            page.evaluate(f"window.scrollTo(0, {current_scroll_position})")
+            scrolldowns += 1
+            total_height = page.evaluate("document.body.scrollHeight")
+
+        # Extract HTML content
+        html_content = page.content()
+
+        # Convert HTML to Markdown
+        soup = BeautifulSoup(html_content, "html.parser")
+        markdown_content = markdownify.markdownify(str(soup), heading_style="ATX")
+
+        # Remove excessive newlines in the markdown
+        markdown_content = re.sub(r"\n{3,}", "\n\n", markdown_content)
+        markdown_content = markdown_content.strip()
+
+        texts.append(markdown_content)
+
+        # Extract images from the page using heuristics
+        if include_output_images:
+            for img in page.query_selector_all("img"):
+                img_path = img.get_attribute("src")
+                if not img_path:
+                    continue
+                if img_path.startswith("data:image"):
+                    # Save base64 image to PIL Image
+                    decoded_data = base64.b64decode(img_path.split(",")[1])
+                    try:
+                        image = Image.open(BytesIO(decoded_data))
+                        images.append(image)
+                    except Exception as e:
+                        if verbose:
+                            print(
+                                f"[thepipe] Ignoring error loading image {img_path}: {e}"
+                            )
+                        continue  # Ignore incompatible image extractions
+                else:
+                    try:
+                        image = Image.open(requests.get(img_path, stream=True).raw)
+                        images.append(image)
+                    except Exception as e:
+                        if verbose:
+                            print(
+                                f"[thepipe] Ignoring error loading image {img_path}: {e}"
+                                "Attempting to load path with schema."
+                            )
+
+                        if "https://" not in img_path and "http://" not in img_path:
+                            try:
+                                while img_path.startswith("/"):
+                                    img_path = img_path[1:]
+                                path_with_schema = (
+                                    urlparse(url).scheme + "://" + img_path
+                                )
+                                image = Image.open(
+                                    requests.get(path_with_schema, stream=True).raw
+                                )
+                                images.append(image)
+                            except Exception as e:
+                                if verbose:
+                                    print(
+                                        f"[thepipe] Ignoring error loading image {img_path} with schema: {e}"
+                                        "Attempting to load with schema and netloc."
+                                    )
+                                try:
+                                    path_with_schema_and_netloc = (
+                                        urlparse(url).scheme
+                                        + "://"
+                                        + urlparse(url).netloc
+                                        + "/"
+                                        + img_path
+                                    )
+                                    image = Image.open(
+                                        requests.get(
+                                            path_with_schema_and_netloc, stream=True
+                                        ).raw
+                                    )
+                                    images.append(image)
+                                except Exception as e:
+                                    if verbose:
+                                        print(
+                                            f"[thepipe] Ignoring error loading image {img_path} with schema and netloc: {e}"
+                                            "Continuing."
+                                        )
+                                    continue  # Ignore incompatible image extractions
+                        else:
+                            if verbose:
+                                print(
+                                    f"[thepipe] Ignoring error loading image {img_path}"
+                                )
+                            continue  # Ignore incompatible image extractions
+
+        browser.close()
+
+    text = "\n".join(texts).strip()
+    return Chunk(path=url, text=text, images=images)
+
+def scrape_video(file_path: str, verbose: bool = False, include_output_images: bool = True, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """Scrape video content using FFmpeg for better performance and compatibility."""
+    import whisper
+    import math
+    from .media_utils import (
+        MAX_WHISPER_DURATION, get_video_duration_ffmpeg, 
+        extract_frame_ffmpeg, extract_audio_segment_ffmpeg, format_timestamp
+    )
+    
     model = whisper.load_model("base")
-    video = VideoFileClip(file_path)
-    num_chunks = math.ceil(video.duration / MAX_WHISPER_DURATION)
     chunks = []
-    # split the video into chunks of fixed duration
-    # here, we transcribe each chunk and extract its frame
+    
     try:
+        # Get video duration using FFmpeg
+        duration = get_video_duration_ffmpeg(file_path)
+        
+        if verbose:
+            print(f"[thepipe] Video duration: {duration:.1f} seconds")
+        
+        # Calculate number of chunks
+        num_chunks = math.ceil(duration / MAX_WHISPER_DURATION)
+        
         for i in range(num_chunks):
             start_time = i * MAX_WHISPER_DURATION
-            end_time = start_time + MAX_WHISPER_DURATION
-            if end_time > video.duration:
-                end_time = video.duration
-            # get the frame in the middle of the chunk
-            frame_time = (start_time + end_time) / 2
-            frame = video.get_frame(frame_time)
-            image = Image.fromarray(frame)
-            # save the audio to a temporary file
-            with tempfile.NamedTemporaryFile(
-                suffix=".wav", delete=False
-            ) as temp_audio_file:
-                audio_path = temp_audio_file.name
-            audio = video.subclip(start_time, end_time).audio
+            end_time = min(start_time + MAX_WHISPER_DURATION, duration)
+            chunk_duration = end_time - start_time
+            
+            if verbose:
+                print(f"[thepipe] Processing chunk {i+1}/{num_chunks} ({start_time:.1f}s - {end_time:.1f}s)")
+            
+            # Extract frame from middle of chunk (if not text_only)
+            image = None
+            if not text_only:
+                frame_time = (start_time + end_time) / 2
+                image = extract_frame_ffmpeg(file_path, frame_time, verbose)
+            
+            # Extract and transcribe audio segment
             transcription = None
-            # transcribe it
-            if audio is not None:
-                audio.write_audiofile(audio_path, codec="pcm_s16le")
-                result = model.transcribe(audio=audio_path, verbose=verbose)
-                # Format transcription with timestamps
-                formatted_transcription = []
-                for segment in result["segments"]:
-                    start = format_timestamp(segment["start"], i, MAX_WHISPER_DURATION)
-                    end = format_timestamp(segment["end"], i, MAX_WHISPER_DURATION)
-                    formatted_transcription.append(
-                        f"[{start} --> {end}]  {segment['text']}"
-                    )
-                transcription = "\n".join(formatted_transcription)
-                os.remove(audio_path)
+            audio_path = None
+            try:
+                # Create temporary audio file
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+                    audio_path = temp_audio.name
+                
+                # Extract audio segment using FFmpeg
+                if extract_audio_segment_ffmpeg(file_path, start_time, chunk_duration, audio_path, verbose):
+                    # Transcribe with Whisper
+                    result = model.transcribe(audio=audio_path, verbose=verbose)
+                    
+                    # Format transcription with global timestamps
+                    formatted_transcription = []
+                    for segment in result["segments"]:
+                        # Adjust timestamps to global video time
+                        global_start = start_time + segment["start"]
+                        global_end = start_time + segment["end"]
+                        start_ts = format_timestamp(global_start, 0, 0)
+                        end_ts = format_timestamp(global_end, 0, 0)
+                        formatted_transcription.append(
+                            f"[{start_ts} --> {end_ts}]  {segment['text']}"
+                        )
+                    transcription = "\n".join(formatted_transcription)
+                else:
+                    if verbose:
+                        print(f"[thepipe] Failed to extract audio for chunk {i+1}")
+                        
+            except Exception as e:
+                if verbose:
+                    print(f"[thepipe] Error processing audio for chunk {i+1}: {str(e)}")
+            finally:
+                # Clean up temporary audio file
+                if audio_path and os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                    except Exception as e:
+                        if verbose:
+                            print(f"[thepipe] Warning: Could not remove temp file {audio_path}: {e}")
+            
+            # Create chunk with available content
             texts = [transcription] if transcription else []
-            images = [image] if not text_only else []
+            images = [image] if image and not text_only else []
+            
             if texts or images:
                 chunks.append(Chunk(path=file_path, texts=texts, images=images))
-    finally:
-        video.close()
+            elif verbose:
+                print(f"[thepipe] No content extracted for chunk {i+1}")
+    
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error processing video {file_path}: {str(e)}")
+        # Return error chunk
+        chunks.append(Chunk(path=file_path, texts=[f"Error processing video: {str(e)}"]))
+    
     return chunks
 
 def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbose: bool = False, 
@@ -703,7 +1070,7 @@ def process_video(ydl, video_info: Dict[str, Any], temp_dir: str,
                             break
                 
                 # If no subtitles found and we're in default mode, fall back to transcription
-                if not subtitle_files and text_only is 'default':
+                if not subtitle_files and text_only == 'default':  # Fixed comparison
                     if verbose:
                         print("[thepipe] No subtitles found, falling back to transcription...")
                     # Update options for audio-only download
@@ -745,9 +1112,10 @@ def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[s
     if verbose:
         print(f"[thepipe] Transcribing audio file: {file_path}")
     result = model.transcribe(audio=file_path, verbose=verbose)
-    # Format transcription with timestamps
-    transcript = []
-    for segment in result["segments"]:
+    segments = cast(List[Dict[str, Any]], result.get("segments", []))
+
+    transcript: List[str] = []
+    for segment in segments:
         start = format_timestamp(segment["start"], 0, 0)
         end = format_timestamp(segment["end"], 0, 0)
         if segment["text"].strip():
@@ -756,12 +1124,11 @@ def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[s
     transcription_text = '\n'.join(transcript)
     if verbose:
         print(f"[thepipe] Transcription completed for {file_path}")
-    return [Chunk(path=file_path, texts=[transcription_text])]
-
+    return [Chunk(path=file_path, text=transcription_text)]
 
 def scrape_github(
-    github_url: str,include_regex: Optional[str] = None,include_patterns: Optional[List[str]] = None,
-    text_only: bool = False,ai_extraction: bool = False,branch: str = "main",verbose: bool = False,
+    github_url: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None,
+    text_only: bool = False, branch: str = "main", verbose: bool = False,
     options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Scrape content from a GitHub repository with optional authentication."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -783,26 +1150,45 @@ def scrape_github(
                 auth_url = github_url.replace("https://", f"https://{token}@")
                 clone_result = os.system(f"git clone {auth_url} {temp_dir} --quiet")
                 if clone_result != 0:
-                    return [Chunk(path=github_url, texts=[f"Failed to clone repository even with authentication: {github_url}"])]
+                    return [Chunk(path=github_url, text=f"Failed to clone repository even with authentication: {github_url}")]
             else:
-                return [Chunk(path=github_url, texts=[f"Repository requires authentication. Set GITHUB_TOKEN environment variable or provide token in options"])]
+                return [Chunk(path=github_url, text=f"Repository requires authentication. Set GITHUB_TOKEN environment variable or provide token in options")]
 
         try:
+            blacklist_files = options.get('blacklist_files', []) if options else []
+            if options and options.get('gitignore', False):
+                git_ignore_files = ['.gitignore', '.git/info/exclude']
+                for git_file in git_ignore_files:
+                    if os.path.exists(os.path.join(temp_dir, git_file)) and git_file not in blacklist_files:
+                        blacklist_files.append(git_file)
+                        if verbose:
+                            print(f"[thepipe] Adding {git_file} to blacklist files")
+            
+            modified_options = (options or {}).copy()
+            modified_options['blacklist_files'] = blacklist_files
+            
+            if verbose and blacklist_files:
+                print(f"[thepipe] Using blacklist files: {blacklist_files}")
+                
             return scrape_directory(
                 dir_path=temp_dir,
                 include_regex=include_regex,
                 include_patterns=include_patterns,
                 verbose=verbose,
-                ai_extraction=ai_extraction,
                 text_only=text_only,
-                local=True
+                options=modified_options
             )
         except Exception as e:
             if verbose:
                 print(f"[thepipe] Error processing repository contents: {str(e)}")
-            return [Chunk(path=github_url, texts=[f"Error processing repository contents: {str(e)}"])]
-    
-def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) -> List[Chunk]:
+            return [Chunk(path=github_url, text=f"Error processing repository contents: {str(e)}")]
+
+def scrape_docx(
+    file_path: str,
+    verbose: bool = False,
+    include_output_images: bool = True,
+    options: Optional[Dict[str, Any]] = None
+) -> List[Chunk]:
     from docx import Document
     from docx.oxml.table import CT_Tbl
     from docx.oxml.text.paragraph import CT_P
@@ -810,7 +1196,6 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
     from docx.text.paragraph import Paragraph
     import csv
     import io
-    import weakref
 
     # helper function to iterate through blocks in the document
     def iter_block_items(parent):
@@ -822,14 +1207,17 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
             raise ValueError("Unsupported parent type")
         # iterate through each child element in the parent element
         for child in parent_elm.iterchildren():
-            if child.__class__.__name__ == "CT_P":
+            child_elem_class_name = child.__class__.__name__
+            if verbose:
+                print(f"[thepipe] Found element in docx: {child_elem_class_name}")
+            if child_elem_class_name == "CT_P":
                 yield Paragraph(child, parent)
-            elif child.__class__.__name__ == "CT_Tbl":
+            elif child_elem_class_name == "CT_Tbl":
                 yield Table(child, parent)
 
     # helper function to read tables in the document
     def read_docx_tables(tab):
-        vf = io.StringIO()
+        vf = StringIO()
         writer = csv.writer(vf)
         for row in tab.rows:
             writer.writerow(cell.text for cell in row.cells)
@@ -838,6 +1226,8 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
 
     # read the document
     document = Document(file_path)
+    chunks = []
+    image_counter = 0
 
     # Define namespaces
     nsmap = {
@@ -845,8 +1235,6 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
         "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
         "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     }
-    chunks = []
-    image_counter = 0
 
     try:
         # scrape each block in the document to create chunks
@@ -855,61 +1243,52 @@ def scrape_docx(file_path: str, verbose: bool = False, text_only: bool = False) 
             block_images = []
             if isinstance(block, Paragraph):
                 block_texts.append(block.text)
-                if not text_only:
-                    # "runs" are the smallest units in a paragraph
-                    for run in block.runs:
-                        if "pic:pic" in run.element.xml:
-                            # extract images from the paragraph
-                            for pic in run.element.findall(".//pic:pic", nsmap):
-                                cNvPr = pic.find(".//pic:cNvPr", nsmap)
-                                name_attr = (
-                                    cNvPr.get("name")
-                                    if cNvPr is not None
-                                    else f"image_{image_counter}"
+                # "runs" are the smallest units in a paragraph
+                for run in block.runs:
+                    if "pic:pic" in run.element.xml and include_output_images:
+                        # extract images from the paragraph
+                        for pic in run.element.findall(".//pic:pic", nsmap):
+                            cNvPr = pic.find(".//pic:cNvPr", nsmap)
+                            name_attr = (
+                                cNvPr.get("name")
+                                if cNvPr is not None
+                                else f"image_{image_counter}"
+                            )
+                            blip = pic.find(".//a:blip", nsmap)
+                            if blip is not None:
+                                embed_attr = blip.get(
+                                    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
                                 )
-
-                                blip = pic.find(".//a:blip", nsmap)
-                                if blip is not None:
-                                    embed_attr = blip.get(
-                                        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
-                                    )
-                                    if embed_attr:
-                                        image_part = document.part.related_parts[
-                                            embed_attr
-                                        ]
-                                        image_data = io.BytesIO(image_part._blob)
-                                        image = Image.open(image_data)
-                                        image.load()
-                                        block_images.append(image)  # Append the image directly, not a weak reference
-                                        image_counter += 1
+                                if embed_attr:
+                                    image_part = document.part.related_parts[embed_attr]
+                                    image_data = BytesIO(image_part._blob)
+                                    image = Image.open(image_data)
+                                    image.load()
+                                    block_images.append(image)
+                                    image_counter += 1
             elif isinstance(block, Table):
                 table_text = read_docx_tables(block)
                 block_texts.append(table_text)
             if block_texts or block_images:
-                chunks.append(
-                    Chunk(path=file_path, texts=block_texts, images=block_images)
-                )
-
-    finally:
-        # Close any open image files
-        for chunk in chunks:
-            for img_ref in chunk.images:
-                img = img_ref() if isinstance(img_ref, weakref.ReferenceType) else img_ref
-                if img is not None:
-                    try:
-                        img.close()
-                    except Exception as e:
-                        if verbose:
-                            print(f"[thepipe] Error closing image: {str(e)}")
-
+                block_text = "\n".join(block_texts).strip()
+                if block_text or block_images:
+                    chunks.append(
+                        Chunk(path=file_path, text=block_text, images=block_images)
+                    )
+    except Exception as e:
+        raise ValueError(f"Error processing DOCX file {file_path}: {e}")
     return chunks
 
-
 def scrape_pptx(
-    file_path: str, verbose: bool = False, text_only: bool = False
+    file_path: str,
+    verbose: bool = False,
+    include_output_images: bool = True,
+    options: Optional[Dict[str, Any]] = None
 ) -> List[Chunk]:
     from pptx import Presentation
     from pptx.enum.shapes import MSO_SHAPE_TYPE
+    from pptx.shapes.picture import Picture
+    from pptx.shapes.autoshape import Shape as AutoShape
 
     prs = Presentation(file_path)
     chunks = []
@@ -920,25 +1299,31 @@ def scrape_pptx(
         # iterate through each shape in the slide
         for shape in slide.shapes:
             if shape.has_text_frame:
-                for paragraph in shape.text_frame.paragraphs:
+                auto_shape = cast(AutoShape, shape)
+                for paragraph in auto_shape.text_frame.paragraphs:
                     text = paragraph.text
                     if len(slide_texts) == 0:
                         text = "# " + text  # header for first text of a slide
                     slide_texts.append(text)
             # extract images from shapes
-            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE and not text_only:
-                image_data = shape.image.blob
+            if include_output_images and shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                pic = cast(Picture, shape)
+                image_data = pic.image.blob
                 image = Image.open(BytesIO(image_data))
                 slide_images.append(image)
         # add slide to chunks if it has text or images
         if slide_texts or slide_images:
-            chunks.append(Chunk(path=file_path, texts=slide_texts, images=slide_images))
+            text = "\n".join(slide_texts).strip()
+            if not include_output_images:
+                slide_images = []
+            chunks.append(Chunk(path=file_path, text=text, images=slide_images))
     # return all chunks
     return chunks
 
-
 def scrape_ipynb(
-    file_path: str, verbose: bool = False, text_only: bool = False
+    file_path: str,
+    verbose: bool = False,
+    include_output_images: bool = True,
 ) -> List[Chunk]:
     with open(file_path, "r", encoding="utf-8") as file:
         notebook = json.load(file)
@@ -946,14 +1331,17 @@ def scrape_ipynb(
     # parse cells in the notebook
     for cell in notebook["cells"]:
         texts = []
-        images = []
+        images: List[Image.Image] = []
+        cell_type = cell["cell_type"]
         # parse cell content based on type
-        if cell["cell_type"] == "markdown":
+        if verbose:
+            print(f"[thepipe] Scraping cell {cell_type} from {file_path}")
+        if cell_type == "markdown":
             text = "".join(cell["source"])
-            if not text_only:
+            if include_output_images:
                 images = get_images_from_markdown(text)
             texts.append(text)
-        elif cell["cell_type"] == "code":
+        elif cell_type == "code":
             source = "".join(cell["source"])
             texts.append(source)
             output_texts = []
@@ -961,9 +1349,9 @@ def scrape_ipynb(
             if "outputs" in cell:
                 for output in cell["outputs"]:
                     if (
-                        "data" in output
+                        include_output_images
+                        and "data" in output
                         and "image/png" in output["data"]
-                        and not text_only
                     ):
                         image_data = output["data"]["image/png"]
                         image = Image.open(BytesIO(base64.b64decode(image_data)))
@@ -973,16 +1361,20 @@ def scrape_ipynb(
                         output_texts.append(output_text)
             if output_texts:
                 texts.extend(output_texts)
-        elif cell["cell_type"] == "raw":
+        elif cell_type == "raw":
             text = "".join(cell["source"])
             texts.append(text)
         if texts or images:
-            chunks.append(Chunk(path=file_path, texts=texts, images=images))
+            text = "\n".join(texts).strip()
+            chunks.append(Chunk(path=file_path, text=text, images=images))
     return chunks
 
-def scrape_tweet(url: str, text_only: bool = False, verbose: bool = False) -> List[Chunk]:
-    # magic function from https://github.com/vercel/react-tweet/blob/main/packages/react-tweet/src/api/fetch-tweet.ts
-    # unofficial, could break at any time
+def scrape_tweet(url: str, include_output_images: bool = True, verbose: bool = False, text_only: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """
+    Magic function from https://github.com/vercel/react-tweet/blob/main/packages/react-tweet/src/api/fetch-tweet.ts
+    unofficial, could break at any time
+    """
+
     def get_token(id: str) -> str:
         result = (float(id) / 1e15) * math.pi
         base_36_result = ""
@@ -1004,28 +1396,50 @@ def scrape_tweet(url: str, text_only: bool = False, verbose: bool = False) -> Li
     tweet_data = response.json()
     # Extract tweet text
     tweet_text = tweet_data.get("text", "")
+    # Extract images from tweet
+    images: List[Image.Image] = []
+    if include_output_images and "mediaDetails" in tweet_data:
+        for media in tweet_data["mediaDetails"]:
+            image_url = media.get("media_url_https")
+            if image_url:
+                image_response = requests.get(image_url)
+                img = Image.open(BytesIO(image_response.content))
+                images.append(img)
+    # Create chunks for text and images
+    chunk = Chunk(path=url, text=tweet_text, images=images)
+    return [chunk]
+
+def scrape_database(
+    filepath: str,
+    query: Optional[str] = None,
+    db_type: Optional[str] = None,
+    verbose: bool = False,
+    options: Optional[Dict[str, Any]] = None
+) -> List[Chunk]:
+    """
+    Scrape content from a database connection or file.
+    """
+    # Database operations are always local
+    if verbose:
+        print("[thepipe] Processing database locally")
     
-    chunks = []
-    main_chunk = Chunk(path=url, texts=[tweet_text])
-    chunks.append(main_chunk)
-
-    if not text_only:
-        # Extract images from tweet
-        images = []
-        if "mediaDetails" in tweet_data:
-            for media in tweet_data["mediaDetails"]:
-                if media.get("type") == "photo":
-                    image_url = media.get("media_url_https")
-                    if image_url:
-                        image_response = requests.get(image_url)
-                        img = Image.open(BytesIO(image_response.content))
-                        images.append(img)
-                elif media.get("type") == "video":
-                    video_url = media.get("video_info", {}).get("variants", [{}])[0].get("url")
-                    if video_url:
-                        video_chunks = scrape_youtube(video_url, text_only=text_only, verbose=verbose)
-                        chunks.extend(video_chunks)
-
-        main_chunk.images = images
-
-    return chunks
+    # Import database utilities
+    from .database_utils import process_database
+    
+    # Determine mode from options
+    mode = None
+    if options:
+        if options.get("schema_only"):
+            mode = "schema"
+        elif options.get("preview"):
+            mode = "preview"
+    
+    # Process the database
+    return process_database(
+        connection_info=filepath,
+        query=query,
+        db_type=db_type,
+        mode=mode,
+        verbose=verbose,
+        options=options
+    )
