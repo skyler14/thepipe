@@ -194,6 +194,7 @@ def scrape_file(
             file_path=filepath, 
             verbose=verbose, 
             include_output_images=include_output_images,
+            text_only=text_only,
             options=options
         )
     elif source_mimetype.startswith("audio/"):
@@ -846,7 +847,7 @@ def extract_page_content(
     text = "\n".join(texts).strip()
     return Chunk(path=url, text=text, images=images)
 
-def scrape_video(file_path: str, verbose: bool = False, include_output_images: bool = True, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+def scrape_video(file_path: str, verbose: bool = False, include_output_images: bool = True, text_only: Optional[Union[bool, str]] = None, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Scrape video content using FFmpeg for better performance and compatibility."""
     import whisper
     import math
