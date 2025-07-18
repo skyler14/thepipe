@@ -212,14 +212,16 @@ def find_subtitle_files(directory: str, video_title: str) -> List[str]:
             subtitle_files.append(os.path.join(directory, file))
     return subtitle_files
 
-def find_audio_file(directory: str, video_title: str) -> Optional[str]:
-    for file in os.listdir(directory):
-        if file.startswith(video_title) and file.endswith(('.mp3', '.m4a', '.wav')):
-            return os.path.join(directory, file)
-    return None
-
 def find_video_file(directory: str, video_title: str) -> Optional[str]:
     for file in os.listdir(directory):
         if file.startswith(video_title) and file.endswith(('.mp4', '.webm', '.mkv')):
             return os.path.join(directory, file)
     return None
+
+def sanitize_filename(filename):
+    """Convert filename to file-safe version for intermediate processing"""
+    # Remove or replace problematic characters
+    safe = re.sub(r'[^\w\s-]', '', filename)  # Keep only alphanumeric, spaces, hyphens
+    safe = re.sub(r'[-\s]+', '-', safe)       # Replace multiple spaces/hyphens with single hyphen
+    safe = safe.strip('-')                     # Remove leading/trailing hyphens
+    return safe[:100]  # Limit length to prevent path issues

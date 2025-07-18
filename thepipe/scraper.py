@@ -14,8 +14,17 @@ from PIL import Image
 import requests
 import json
 from .drive_utils import extract_drive_id, process_drive_content
-from .file_utils import detect_source_type, find_audio_file, find_subtitle_files, get_filtered_files
-from .media_utils import MAX_WHISPER_DURATION, VIDEO_PLATFORMS, clean_subtitles, format_timestamp, get_images_from_markdown
+from .file_utils import (
+    detect_source_type, find_subtitle_files, get_filtered_files, 
+    sanitize_filename
+)
+from .media_utils import (
+    MAX_WHISPER_DURATION, VIDEO_PLATFORMS, find_audio_file, 
+    clean_subtitles, format_timestamp, get_images_from_markdown,
+    get_video_duration_ffmpeg, extract_frame_ffmpeg, extract_audio_segment_ffmpeg,
+    # Import the helper functions from media_utils
+    process_video, fallback_to_transcription
+)
 from .web_utils import (
     SCRAPING_PROMPT,
     DRIVE_DOMAINS, GIT_DOMAINS, TWITTER_DOMAINS,
@@ -172,7 +181,7 @@ def scrape_file(
         source_mimetype.startswith("application/vnd.ms-excel")
         or source_mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ):
-        scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_mimetype,options=options)
+        scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_mimetype, options=options)
     elif source_mimetype == "application/x-ipynb+json":
         scraped_chunks = scrape_ipynb(
             file_path=filepath, 
@@ -344,7 +353,7 @@ def scrape_pdf(
             llm_config = options.get("llm_extractor", {}) if options else {}
             api_key = llm_config.get("api_key", os.environ.get("LLM_SERVER_API_KEY", os.environ.get("OPENAI_API_KEY")))
             api_base = llm_config.get("api_base", os.environ.get("LLM_SERVER_BASE_URL"))
-            model = llm_config.get("model", ai_model or DEFAULT_AI_MODEL)
+            model = llm_config.get("model", model or DEFAULT_AI_MODEL)
             
             # Configure OpenAI client
             client_args = {"api_key": api_key}
@@ -463,28 +472,13 @@ def scrape_pdf(
     doc.close()
     return chunks
 
-
-def get_images_from_markdown(text: str) -> List[Image.Image]:
-    image_urls = re.findall(r"!\[.*?\]\((.*?)\)", text)
-    images = []
-    for url in image_urls:
-        extension = os.path.splitext(urlparse(url).path)[1]
-        if extension in {".jpg", ".jpeg", ".png"}:
-            img = Image.open(requests.get(url, stream=True).raw)
-        else:
-            # ignore incompatible image extractions
-            continue
-        images.append(img)
-    return images
-
-
 def scrape_image(file_path: str, options: Optional[Dict[str, Any]] = None ) -> List[Chunk]:
     img = Image.open(file_path)
     img.load()  # needed to close the file
     chunk = Chunk(path=file_path, images=[img])
     return [chunk]
 
-def scrape_spreadsheet(file_path: str, source_type: str) -> List[Chunk]:
+def scrape_spreadsheet(file_path: str, source_type: str, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     import pandas as pd
 
     if source_type == "application/vnd.ms-excel":
@@ -603,8 +597,6 @@ def scrape_url(
         return process_cookie_options(url, chunks, cookie_options)
     return chunks
 
-# Additional scraper functions from Version 1 with minimal changes
-
 def scrape_drive(drive_url: str, text_only: bool = False, 
                 verbose: bool = False, 
                 options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
@@ -717,7 +709,6 @@ def parse_webpage_with_vlm(
         raise ValueError("Model received 0 images from webpage")
 
     return chunk
-
 
 def extract_page_content(
     url: str, verbose: bool = False, include_output_images: bool = True
@@ -847,14 +838,13 @@ def extract_page_content(
     text = "\n".join(texts).strip()
     return Chunk(path=url, text=text, images=images)
 
-def scrape_video(file_path: str, verbose: bool = False, include_output_images: bool = True, text_only: Optional[Union[bool, str]] = None, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+def scrape_video(file_path: str, verbose: bool = False, include_output_images: bool = True, 
+                text_only: Optional[Union[bool, str]] = None, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
     """Scrape video content using FFmpeg for better performance and compatibility."""
-    import whisper
-    import math
-    from .media_utils import (
-        MAX_WHISPER_DURATION, get_video_duration_ffmpeg, 
-        extract_frame_ffmpeg, extract_audio_segment_ffmpeg, format_timestamp
-    )
+    try:
+        import whisper
+    except ImportError:
+        raise ImportError("whisper library not found. Please install it with: pip install openai-whisper")
     
     model = whisper.load_model("base")
     chunks = []
@@ -929,7 +919,7 @@ def scrape_video(file_path: str, verbose: bool = False, include_output_images: b
             images = [image] if image and not text_only else []
             
             if texts or images:
-                chunks.append(Chunk(path=file_path, texts=texts, images=images))
+                chunks.append(Chunk(path=file_path, text=texts[0] if texts else "", images=images))
             elif verbose:
                 print(f"[thepipe] No content extracted for chunk {i+1}")
     
@@ -937,14 +927,14 @@ def scrape_video(file_path: str, verbose: bool = False, include_output_images: b
         if verbose:
             print(f"[thepipe] Error processing video {file_path}: {str(e)}")
         # Return error chunk
-        chunks.append(Chunk(path=file_path, texts=[f"Error processing video: {str(e)}"]))
+        chunks.append(Chunk(path=file_path, text=f"Error processing video: {str(e)}"))
     
     return chunks
 
 def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbose: bool = False, 
                    metadata_fields: Optional[List[YouTubeEnum]] = None, 
                    options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
-    """Scrape content from a YouTube URL."""
+    """Scrape content from a YouTube URL with robust error handling and fallback to transcription."""
     initialize_video_processing()
     if verbose:
         print("[thepipe] Initializing YouTube content extraction...")
@@ -958,17 +948,8 @@ def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbo
         'skip_download': True,  # Always skip video download initially
     }
 
-    if text_only == 'transcribe':
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'skip_download': False,  # Need to download for transcription
-        })
-    else:
+    # Configure subtitle extraction
+    if text_only != 'transcribe':
         ydl_opts.update({
             'writesubtitles': True,
             'writeautomaticsub': True,
@@ -984,7 +965,14 @@ def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbo
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # CRITICAL FIX: Validate extract_info response before processing
                 info = ydl.extract_info(url, download=False)
+                
+                if not isinstance(info, dict):
+                    if verbose:
+                        print(f"[thepipe] Invalid info type from extract_info: {type(info)}")
+                    # Try to get basic video info and fall back to transcription
+                    return fallback_to_transcription(url, temp_dir, verbose)
                 
                 if 'entries' in info:  # It's a playlist
                     videos = info['entries']
@@ -992,140 +980,64 @@ def scrape_youtube(url: str, text_only: Optional[Union[bool, str]] = None, verbo
                     videos = [info]
 
                 for video in videos:
+                    if video is None:
+                        if verbose:
+                            print("[thepipe] Skipping None video entry")
+                        continue
+                        
+                    # ADDITIONAL FIX: Validate each video entry
+                    if not isinstance(video, dict):
+                        if verbose:
+                            print(f"[thepipe] Invalid video entry type: {type(video)}")
+                        continue
+                        
                     video_chunks = process_video(ydl, video, temp_dir, text_only, verbose, metadata_fields)
                     chunks.extend(video_chunks)
 
         except Exception as e:
             if verbose:
                 print(f"[thepipe] Error processing content: {str(e)}")
-            chunks.append(Chunk(path=url, texts=[f"Error: Unable to process content. {str(e)}"]))
+            # Try fallback to transcription
+            fallback_chunks = fallback_to_transcription(url, temp_dir, verbose)
+            if fallback_chunks:
+                chunks.extend(fallback_chunks)
+            else:
+                chunks.append(Chunk(path=url, text=f"Error: Unable to process content. {str(e)}"))
 
     return chunks
 
-def process_video(ydl, video_info: Dict[str, Any], temp_dir: str, 
-                 text_only: Optional[Union[bool, str]], verbose: bool, 
-                 metadata_fields: Optional[List[YouTubeEnum]] = None) -> List[Chunk]:
-    """Process a single video and extract content based on specified options."""
-    video_chunks = []
-    video_url = video_info.get('webpage_url') or video_info.get('url')
-    if not video_url:
-        if verbose:
-            print(f"[thepipe] Skipping video with no URL")
-        return video_chunks
+def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """Transcribe audio file using Whisper with robust error handling."""
+    try:
+        import whisper
+    except ImportError:
+        raise ImportError("whisper library not found. Please install it with: pip install openai-whisper")
 
     try:
-        # Extract metadata
-        metadata = YouTubeEnum.extract_metadata(video_info, metadata_fields)
-        metadata_chunk = Chunk(path=video_url, texts=[YouTubeEnum.format_metadata(metadata)])
-        video_chunks.append(metadata_chunk)
+        model = whisper.load_model("base")
+        if verbose:
+            print(f"[thepipe] Transcribing audio file: {file_path}")
+        
+        result = model.transcribe(audio=file_path, verbose=verbose)
+        segments = result.get("segments", [])
 
-        if text_only == 'transcribe':
-            # Direct transcription mode
-            if verbose:
-                print("[thepipe] Downloading audio for transcription...")
-            ydl.params.update({
-                'format': 'bestaudio/best',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'skip_download': False
-            })
-            ydl.process_ie_result(video_info, download=True)
-            audio_file = find_audio_file(temp_dir, video_info['title'])
-            if audio_file:
-                transcription_chunks = scrape_audio(audio_file, verbose=verbose)
-                video_chunks.extend(transcription_chunks)
-            else:
-                if verbose:
-                    print(f"[thepipe] Failed to download audio for transcription: {video_url}")
-                video_chunks.append(Chunk(path=video_url, texts=["No transcription available"]))
-                
-        elif text_only in ['default', 'ai', 'uploaded']:
-            if verbose:
-                print("[thepipe] Attempting to extract subtitles...")
-            # First try to get subtitles
-            ydl.params.update({
-                'writesubtitles': True,
-                'writeautomaticsub': True,
-                'skip_download': True
-            })
-            
-            if text_only == 'ai':
-                ydl.params['subtitleslangs'] = ['a.en,a.*', 'en,*']
-            elif text_only == 'uploaded':
-                ydl.params['subtitleslangs'] = ['en,*', 'a.en,a.*']
-            else:
-                ydl.params['subtitleslangs'] = ['en,*', 'a.en,a.*']
-                
-            try:
-                ydl.process_ie_result(video_info, download=True)
-                subtitle_files = find_subtitle_files(temp_dir, video_info['title'])
-                
-                if subtitle_files:
-                    for subtitle_file in subtitle_files:
-                        subtitle_chunks = clean_subtitles(subtitle_file, video_url, debug=verbose)
-                        if subtitle_chunks:
-                            video_chunks.extend(subtitle_chunks)
-                            break
-                
-                # If no subtitles found and we're in default mode, fall back to transcription
-                if not subtitle_files and text_only == 'default':  # Fixed comparison
-                    if verbose:
-                        print("[thepipe] No subtitles found, falling back to transcription...")
-                    # Update options for audio-only download
-                    ydl.params.update({
-                        'format': 'bestaudio/best',
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                        'skip_download': False
-                    })
-                    ydl.process_ie_result(video_info, download=True)
-                    audio_file = find_audio_file(temp_dir, video_info['title'])
-                    if audio_file:
-                        transcription_chunks = scrape_audio(audio_file, verbose=verbose)
-                        video_chunks.extend(transcription_chunks)
-                    else:
-                        video_chunks.append(Chunk(path=video_url, texts=["No transcription available"]))
-                elif not subtitle_files:
-                    video_chunks.append(Chunk(path=video_url, texts=[f"No {text_only} subtitles available"]))
-                    
-            except Exception as e:
-                if verbose:
-                    print(f"[thepipe] Error processing subtitles: {str(e)}")
-                video_chunks.append(Chunk(path=video_url, texts=[f"Error processing subtitles: {str(e)}"]))
-
+        transcript: List[str] = []
+        for segment in segments:
+            start = format_timestamp(segment["start"], 0, 0)
+            end = format_timestamp(segment["end"], 0, 0)
+            if segment["text"].strip():
+                transcript.append(f"[{start} --> {end}]  {segment['text']}")
+        
+        # Join the formatted transcription into a single string
+        transcription_text = '\n'.join(transcript)
+        if verbose:
+            print(f"[thepipe] Transcription completed for {file_path}")
+        return [Chunk(path=file_path, text=transcription_text)]
+        
     except Exception as e:
         if verbose:
-            print(f"[thepipe] Error processing video {video_url}: {str(e)}")
-        video_chunks.append(Chunk(path=video_url, texts=[f"Error: Unable to process video. {str(e)}"]))
-
-    return video_chunks
-
-def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
-    import whisper
-
-    model = whisper.load_model("base")
-    if verbose:
-        print(f"[thepipe] Transcribing audio file: {file_path}")
-    result = model.transcribe(audio=file_path, verbose=verbose)
-    segments = cast(List[Dict[str, Any]], result.get("segments", []))
-
-    transcript: List[str] = []
-    for segment in segments:
-        start = format_timestamp(segment["start"], 0, 0)
-        end = format_timestamp(segment["end"], 0, 0)
-        if segment["text"].strip():
-            transcript.append(f"[{start} --> {end}]  {segment['text']}")
-    # join the formatted transcription into a single string
-    transcription_text = '\n'.join(transcript)
-    if verbose:
-        print(f"[thepipe] Transcription completed for {file_path}")
-    return [Chunk(path=file_path, text=transcription_text)]
+            print(f"[thepipe] Error transcribing audio: {str(e)}")
+        return [Chunk(path=file_path, text=f"Error transcribing audio: {str(e)}")]
 
 def scrape_github(
     github_url: str, include_regex: Optional[str] = None, include_patterns: Optional[List[str]] = None,
