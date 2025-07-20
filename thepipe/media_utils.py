@@ -24,12 +24,13 @@ VIDEO_PLATFORMS = {
     "jwplayer.com", "kaltura.com", "panopto.com", "vidyard.com",
     "vk.com", "rutube.ru", "metacafe.com", "veoh.com",
     "ustream.tv", "livestream.com", "younow.com", "niconico.jp",
-    "vlive.tv", "afreecatv.com"
+    "vlive.tv", "afreecatv.com", "odysee.com"
 }
 
 # Global variables for lazy loading
 webvtt = None
 ffmpeg = None
+yt_dlp = None
 
 def initialize_subtitle_libraries():
     """Initialize the subtitle processing libraries."""
@@ -49,6 +50,16 @@ def initialize_ffmpeg():
         except ImportError:
             raise ImportError("ffmpeg-python library not found. Please install it with: pip install ffmpeg-python")
     return ffmpeg
+
+def initialize_video_processing():
+    """Initialize video processing libraries."""
+    global yt_dlp
+    if yt_dlp is None:
+        try:
+            import yt_dlp
+        except ImportError:
+            raise ImportError("yt-dlp library not found. Please install it with: pip install yt-dlp")
+    return yt_dlp
 
 @lru_cache(maxsize=1)
 def get_subtitle_parser():
@@ -183,7 +194,7 @@ def clean_subtitles(subtitle_file: str, video_url: str, debug: bool = False) -> 
             for sentence in sentences:
                 if sentence.strip():
                     formatted_text = f"[{entry['start']} --> {entry['end']}]  {sentence.strip()}"
-                    chunks.append(Chunk(path=video_url, texts=[formatted_text]))
+                    chunks.append(Chunk(path=video_url, text=formatted_text))
         else:
             # For shorter entries, check if they contain multiple complete thoughts
             parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
@@ -191,10 +202,10 @@ def clean_subtitles(subtitle_file: str, video_url: str, debug: bool = False) -> 
                 for part in parts:
                     if part.strip():
                         formatted_text = f"[{entry['start']} --> {entry['end']}]  {part.strip()}"
-                        chunks.append(Chunk(path=video_url, texts=[formatted_text]))
+                        chunks.append(Chunk(path=video_url, text=formatted_text))
             else:
                 formatted_text = f"[{entry['start']} --> {entry['end']}]  {text}"
-                chunks.append(Chunk(path=video_url, texts=[formatted_text]))
+                chunks.append(Chunk(path=video_url, text=formatted_text))
 
     if debug:
         with open("original_transcript.txt", "w", encoding="utf-8") as f:
@@ -202,7 +213,7 @@ def clean_subtitles(subtitle_file: str, video_url: str, debug: bool = False) -> 
                 f.write(f"[{caption.start} --> {caption.end}] {caption.text}\n")
         with open("cleaned_transcript.txt", "w", encoding="utf-8") as f:
             for chunk in chunks:
-                f.write(f"{chunk.texts[0]}\n")
+                f.write(f"{chunk.text}\n")
 
     return chunks
 
@@ -220,26 +231,31 @@ def get_images_from_markdown(text: str) -> List[Image.Image]:
         images.append(img)
     return images
 
-def find_subtitle_files(directory: str, video_title: str) -> List[str]:
-    """Find subtitle files for a given video title."""
-    subtitle_files = []
-    for file in os.listdir(directory):
-        if file.startswith(video_title) and file.endswith('.vtt'):
-            subtitle_files.append(os.path.join(directory, file))
-    return subtitle_files
-
-def find_audio_file(directory: str, video_title: str) -> Optional[str]:
-    """Find audio file for a given video title."""
-    for file in os.listdir(directory):
-        if file.startswith(video_title) and file.endswith(('.mp3', '.m4a', '.wav')):
-            return os.path.join(directory, file)
-    return None
-
-def find_video_file(directory: str, video_title: str) -> Optional[str]:
-    """Find video file for a given video title."""
-    for file in os.listdir(directory):
-        if file.startswith(video_title) and file.endswith(('.mp4', '.webm', '.mkv')):
-            return os.path.join(directory, file)
+def find_audio_file(temp_dir, title, verbose=False):
+    """Find extracted audio file with improved detection"""
+    if verbose:
+        print(f"[thepipe] Looking for audio file in: {temp_dir}")
+        print(f"[thepipe] Expected title: {title}")
+        print(f"[thepipe] Files in directory: {os.listdir(temp_dir)}")
+    
+    patterns = [f"{title}.mp3", f"{title}.m4a", f"{title}.wav", f"{title}.opus"]
+    
+    for pattern in patterns:
+        file_path = os.path.join(temp_dir, pattern)
+        if os.path.exists(file_path):
+            if verbose:
+                print(f"[thepipe] Found audio file: {pattern}")
+            return file_path
+    
+    # Fallback: find any audio file
+    audio_extensions = ['.mp3', '.m4a', '.wav', '.opus', '.aac']
+    for file in os.listdir(temp_dir):
+        if any(file.lower().endswith(ext) for ext in audio_extensions):
+            file_path = os.path.join(temp_dir, file)
+            if verbose:
+                print(f"[thepipe] Found fallback audio file: {file}")
+            return file_path
+    
     return None
 
 def is_subtitle_meaningful(subtitle_text: str) -> bool:
@@ -321,3 +337,341 @@ def has_audio_stream(file_path: str) -> bool:
         return any(s['codec_type'] == 'audio' for s in probe['streams'])
     except Exception:
         return False
+
+# Helper functions for video processing (moved from scraper.py)
+
+def process_video(ydl, video_info: Dict[str, Any], temp_dir: str, 
+                      text_only: Optional[Union[bool, str]], verbose: bool, 
+                      metadata_fields: Optional[List] = None) -> List[Chunk]:
+    """Process a single video with comprehensive error handling and fallback mechanisms."""
+    
+    # CRITICAL FIX: Ensure video_info is always a dict
+    if not isinstance(video_info, dict):
+        if verbose:
+            print(f"[thepipe] Invalid video_info type: {type(video_info)}")
+        return []
+    
+    video_url = video_info.get('webpage_url') or video_info.get('url')
+    if not video_url:
+        if verbose:
+            print("[thepipe] No URL found in video info")
+        return []
+
+    chunks = []
+    
+    try:
+        # 1. Extract metadata first
+        if metadata_fields or not text_only:
+            chunks.extend(extract_metadata_chunk(video_info, video_url, metadata_fields, verbose))
+        
+        # 2. Try subtitle extraction first (unless explicitly transcribing)
+        if text_only != 'transcribe':
+            subtitle_chunks = try_subtitle_extraction(ydl, video_info, video_url, temp_dir, text_only, verbose)
+            if subtitle_chunks:
+                chunks.extend(subtitle_chunks)
+                return chunks
+        
+        # 3. Fallback to transcription if no subtitles or explicitly requested
+        if verbose:
+            print("[thepipe] No subtitles found, falling back to transcription...")
+        transcription_chunks = try_transcription(ydl, video_info, video_url, temp_dir, verbose)
+        chunks.extend(transcription_chunks)
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error in process_video: {str(e)}")
+        chunks.append(Chunk(path=video_url, text=f"Error processing video: {str(e)}"))
+    
+    return chunks
+
+def extract_metadata_chunk(video_info: Dict[str, Any], video_url: str, 
+                                metadata_fields: Optional[List], verbose: bool) -> List[Chunk]:
+    """Safely extract metadata chunk with error handling."""
+    try:
+        if not isinstance(video_info, dict):
+            return []
+        
+        # Import YouTubeEnum here to avoid circular imports
+        from .enums import YouTubeEnum
+        metadata = YouTubeEnum.extract_metadata(video_info, metadata_fields)
+        return [Chunk(path=video_url, text=YouTubeEnum.format_metadata(metadata))]
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error extracting metadata: {str(e)}")
+        return []
+
+def try_subtitle_extraction(ydl, video_info: Dict[str, Any], video_url: str, 
+                                 temp_dir: str, text_only: Optional[Union[bool, str]], verbose: bool) -> List[Chunk]:
+    """Try to extract subtitles with comprehensive error handling."""
+    
+    if verbose:
+        print("[thepipe] Attempting to extract subtitles...")
+    
+    try:
+        if not isinstance(video_info, dict):
+            return []
+        
+        # Import sanitize_filename here to avoid circular imports
+        from .file_utils import sanitize_filename, find_subtitle_files
+        safe_title = sanitize_filename(video_info.get('title', 'video'))
+        
+        # Configure subtitle preferences
+        if text_only == 'ai':
+            subtitle_langs = ['a.en', 'a.*']  # Prefer AI-generated
+        elif text_only == 'uploaded':
+            subtitle_langs = ['en', '*']  # Prefer human-uploaded
+        else:  # default
+            subtitle_langs = ['en', 'en-orig', 'a.en', 'a.*']  # Prefer human, fallback to AI
+        
+        # Update ydl options for subtitle extraction
+        ydl.params.update({
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': subtitle_langs,
+            'outtmpl': os.path.join(temp_dir, f'{safe_title}.%(ext)s'),
+            'skip_download': True
+        })
+        
+        # Process the video for subtitles
+        ydl.process_ie_result(video_info, download=True)
+        
+        # Find and process subtitle files
+        subtitle_files = find_subtitle_files(temp_dir, safe_title)
+        
+        if subtitle_files:
+            for subtitle_file in subtitle_files:
+                if verbose:
+                    print(f"[thepipe] Processing subtitle file: {subtitle_file}")
+                subtitle_chunks = clean_subtitles(subtitle_file, video_url, debug=verbose)
+                if subtitle_chunks:
+                    return subtitle_chunks
+        
+        return []
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Subtitle extraction failed: {str(e)}")
+        return []
+
+def try_transcription(ydl, video_info: Dict[str, Any], video_url: str, temp_dir: str, verbose: bool) -> List[Chunk]:
+    """Try to transcribe audio with multiple fallback strategies."""
+    
+    if verbose:
+        print("[thepipe] Attempting audio transcription...")
+    
+    try:
+        # Step 1: Try audio-only download
+        audio_file = try_audio_download(ydl, video_info, video_url, temp_dir, verbose)
+        
+        # Step 2: Fallback to smallest video + audio extraction
+        if not audio_file:
+            audio_file = try_video_download(ydl, video_url, temp_dir, verbose)
+        
+        # Step 3: Transcribe the audio file
+        if audio_file and os.path.exists(audio_file):
+            if verbose:
+                print(f"[thepipe] Transcribing audio file: {audio_file}")
+            return scrape_audio(audio_file, verbose=verbose)
+        
+        return [Chunk(path=video_url, text="No transcription available")]
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Transcription failed: {str(e)}")
+        return [Chunk(path=video_url, text=f"Transcription error: {str(e)}")]
+
+def try_audio_download(ydl, video_info: Dict[str, Any], video_url: str, temp_dir: str, verbose: bool) -> Optional[str]:
+    """Try to download audio-only format safely."""
+    
+    try:
+        if verbose:
+            print("[thepipe] Trying audio-only download...")
+        
+        if not isinstance(video_info, dict):
+            return None
+        
+        # Import sanitize_filename here to avoid circular imports
+        from .file_utils import sanitize_filename
+        safe_title = sanitize_filename(video_info.get('title', 'video'))
+        
+        # Create fresh ydl instance for audio download
+        yt_dlp = initialize_video_processing()
+        audio_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(temp_dir, f'{safe_title}.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': not verbose,
+            'ignoreerrors': True,
+        }
+        
+        with yt_dlp.YoutubeDL(audio_opts) as audio_ydl:
+            audio_ydl.download([video_url])
+        
+        return find_audio_file(temp_dir, safe_title, verbose)
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Audio-only download failed: {str(e)}")
+        return None
+
+def try_video_download(ydl, video_url: str, temp_dir: str, verbose: bool) -> Optional[str]:
+    """Download smallest video format and extract audio safely."""
+    
+    try:
+        if verbose:
+            print("[thepipe] Downloading smallest video format...")
+        
+        # Get fresh info for format selection
+        yt_dlp = initialize_video_processing()
+        with yt_dlp.YoutubeDL({'quiet': not verbose}) as info_ydl:
+            info = info_ydl.extract_info(video_url, download=False)
+            
+        if not isinstance(info, dict):
+            return None
+            
+        # Find smallest format
+        formats = info.get('formats', [])
+        if not formats:
+            return None
+            
+        smallest_format = find_smallest_format(formats, verbose)
+        if not smallest_format:
+            smallest_format = 'worst'  # Final fallback
+        
+        # Import sanitize_filename here to avoid circular imports
+        from .file_utils import sanitize_filename
+        safe_title = sanitize_filename(info.get('title', 'video'))
+        
+        # Download with audio extraction
+        video_opts = {
+            'format': smallest_format,
+            'outtmpl': os.path.join(temp_dir, f'{safe_title}.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': not verbose,
+            'ignoreerrors': True,
+        }
+        
+        with yt_dlp.YoutubeDL(video_opts) as video_ydl:
+            video_ydl.download([video_url])
+        
+        return find_audio_file(temp_dir, safe_title, verbose)
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Video download failed: {str(e)}")
+        return None
+
+def find_smallest_format(formats: List[Dict], verbose: bool) -> Optional[str]:
+    """Safely find the smallest video format."""
+    try:
+        smallest_format = None
+        min_size = float('inf')
+        
+        for fmt in formats:
+            if not isinstance(fmt, dict):
+                continue
+                
+            # Skip audio-only formats
+            if not fmt.get('height') and not fmt.get('width'):
+                continue
+            
+            # Calculate size estimate
+            size_estimate = (
+                fmt.get('filesize') or 
+                fmt.get('filesize_approx') or 
+                (fmt.get('tbr', 0) * 1000) or
+                (fmt.get('height', 999) * fmt.get('width', 999))
+            )
+            
+            if size_estimate < min_size:
+                min_size = size_estimate
+                smallest_format = fmt.get('format_id')
+        
+        if verbose and smallest_format:
+            print(f"[thepipe] Selected smallest format: {smallest_format}")
+        
+        return smallest_format
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error finding smallest format: {str(e)}")
+        return None
+
+def fallback_to_transcription(url: str, temp_dir: str, verbose: bool) -> List[Chunk]:
+    """Final fallback: try direct transcription without yt-dlp metadata."""
+    try:
+        if verbose:
+            print("[thepipe] Attempting direct transcription fallback...")
+            
+        # Simple download with minimal options
+        yt_dlp = initialize_video_processing()
+        simple_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(temp_dir, 'fallback_audio.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': not verbose,
+            'ignoreerrors': True,
+        }
+        
+        with yt_dlp.YoutubeDL(simple_opts) as fallback_ydl:
+            fallback_ydl.download([url])
+        
+        # Find any audio file in temp directory
+        for file in os.listdir(temp_dir):
+            if file.lower().endswith(('.mp3', '.m4a', '.wav', '.opus')):
+                audio_path = os.path.join(temp_dir, file)
+                if verbose:
+                    print(f"[thepipe] Found fallback audio: {audio_path}")
+                return scrape_audio(audio_path, verbose=verbose)
+        
+        return []
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Fallback transcription failed: {str(e)}")
+        return []
+
+def scrape_audio(file_path: str, verbose: bool = False, options: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    """Transcribe audio file using Whisper with robust error handling."""
+    try:
+        import whisper
+    except ImportError:
+        raise ImportError("whisper library not found. Please install it with: pip install openai-whisper")
+
+    try:
+        model = whisper.load_model("base")
+        if verbose:
+            print(f"[thepipe] Transcribing audio file: {file_path}")
+        
+        result = model.transcribe(audio=file_path, verbose=verbose)
+        segments = result.get("segments", [])
+
+        transcript: List[str] = []
+        for segment in segments:
+            start = format_timestamp(segment["start"], 0, 0)
+            end = format_timestamp(segment["end"], 0, 0)
+            if segment["text"].strip():
+                transcript.append(f"[{start} --> {end}]  {segment['text']}")
+        
+        # Join the formatted transcription into a single string
+        transcription_text = '\n'.join(transcript)
+        if verbose:
+            print(f"[thepipe] Transcription completed for {file_path}")
+        return [Chunk(path=file_path, text=transcription_text)]
+        
+    except Exception as e:
+        if verbose:
+            print(f"[thepipe] Error transcribing audio: {str(e)}")
+        return [Chunk(path=file_path, text=f"Error transcribing audio: {str(e)}")]
