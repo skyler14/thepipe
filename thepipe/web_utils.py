@@ -40,7 +40,7 @@ def extract_page_content(url: str, text_only: bool = False, verbose: bool = Fals
     
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        context = browser.new_context(user_agent="USER_AGENT_STRING")
+        context = browser.new_context(user_agent=USER_AGENT_STRING)
         page = context.new_page()
         page.goto(url, wait_until='domcontentloaded')
         

@@ -19,7 +19,7 @@ def detect_source_type(source: str) -> str:
         if extension == '.ipynb':
             # special case for notebooks, mimetypes is not familiar
             return 'application/x-ipynb+json'
-        elif extension == '.ts':
+        elif '.ts' in extension or '.tsx' in extension:
             return 'text/'
         guessed_mimetype = mimetypes.guess_type(source)[0]
         if guessed_mimetype:

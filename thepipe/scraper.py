@@ -100,6 +100,8 @@ USER_AGENT_STRING: str = os.getenv(
 )
 FILESIZE_LIMIT_MB = int(os.getenv("FILESIZE_LIMIT_MB", 50))
 
+_magika_detector = Magika()
+
 # Global variables for lazy loading
 yt_dlp = None
 
@@ -112,28 +114,88 @@ def initialize_video_processing():
         except ImportError:
             raise ImportError("yt-dlp library not found. Please install it with: pip install yt-dlp")
 
-def detect_source_mimetype(source: str) -> str:
-    """Detect the MIME type of a source file."""
-    # try to detect the file type by its extension
+def detect_source_mimetype(source: str) -> Optional[str]:
+    """Detect the MIME type of a source file, including compiled binaries."""
+    if not os.path.isfile(source):
+        return None
+
     _, extension = os.path.splitext(source)
     if extension:
-        if extension == ".ipynb":
-            # special case for notebooks, mimetypes is not familiar
+        if extension.lower() == ".ipynb":
             return "application/x-ipynb+json"
+        elif '.ts' or '.tsx' in extension.lower():
+            return 'text/'
+        elif '.svg' in extension.lower():
+            return 'text/'
+
+    try:
+        magika_result = _magika_detector.identify_path(source)
+
+        compiled_magika_labels = {
+            "executable",          # Generic executable
+            "elf_executable",      # Linux/Unix ELF executable
+            "mach-o",              # macOS Mach-O executable
+            "pe_executable",       # Windows PE executable (e.g., .exe, .dll)
+            "object",              # Object files (.o, .obj)
+            "library",             # Generic shared/static library
+            "elf_library",         # Linux/Unix ELF shared library (.so)
+            "pe_library",          # Windows PE shared library (.dll)
+            "mach-o_library",      # macOS Mach-O shared library
+            "java_bytecode",       # Java compiled bytecode (.class, .jar)
+            "python_bytecode",     # Python compiled bytecode (.pyc)
+            "raw_binary",          # Generic unclassified binary data
+            "unknown",             # Magika couldn't identify, but often binary
+            "archive_executable",  # Self-extracting archives, installers
+
+            # Package/Installer formats (often contain binaries)
+            "dex",                 # Android Dalvik executable
+            "msi",                 # Microsoft Installer file
+            "nupkg",               # NuGet Package
+            "deb",                 # Debian package
+            "rpm",                 # Red Hat package
+            "apk",                 # Android package
+
+            # System Files / OS-specific binaries
+            "font",                # Fonts are binary and typically not text-scraped
+            "firmware",            # Device firmware images
+            "disk_image",          # ISO, DMG, etc.
+            "apple_desktop_services_store", # .DS_Store
+            "compound_file_binary_format", # Catch-all for OLE-structured files (like Thumbs.db, old MS Office docs sometimes, etc.)
+            "lnk",                 # Windows shortcut files
+            "cat",                 # Windows Catalog file
+            "mscompress",          # Microsoft Compress archive data
+            "cab",                 # Microsoft Cabinet archive
+            "pcap",                # Packet capture files
+
+            # Web/Node.js/NPM binaries
+            "wasm",                # WebAssembly binary module
+            # For NPM, Magika might detect specific executables within `node_modules/.bin`
+            # as `elf_executable`, `pe_executable`, etc.
+            # Other npm related files like `package-lock.json` are text, but can be caught by `FILES_TO_IGNORE`
+        }
+
+        if magika_result.output.ct_label in compiled_magika_labels:
+            return "application/x-compiled-binary"
+        
+        if magika_result.output.mime_type:
+            return magika_result.output.mime_type
+        
         guessed_mimetype, _ = mimetypes.guess_type(source)
         if guessed_mimetype:
             return guessed_mimetype
-    # if that fails, try AI detection with Magika
-    magika = Magika()
-    with open(source, "rb") as file:
-        result = magika.identify_bytes(file.read())
-    mimetype = result.output.mime_type
-    return mimetype
+
+    except Exception:
+        guessed_mimetype, _ = mimetypes.guess_type(source)
+        if guessed_mimetype:
+            return guessed_mimetype
+        return None
+
+    return None
 
 def scrape_file(
     filepath: str,
     verbose: bool = False,
-    chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = chunk_by_page,
+    chunking_method: Optional[Callable[[List[Chunk]], List[Chunk]]] = None,
     openai_client: Optional[OpenAI] = None,
     model: str = DEFAULT_AI_MODEL,
     text_only: bool = False,
@@ -141,78 +203,73 @@ def scrape_file(
     include_output_images: bool = True,
     options: Optional[Dict[str, Any]] = None,
 ) -> List[Chunk]:
-    # returns chunks of scraped content from any source (file, URL, etc.)
+    """Scrapes content from various file types, optionally omitting compiled binaries."""
+    if chunking_method is None:
+        from .chunker import chunk_by_page
+        chunking_method = chunk_by_page
+
     scraped_chunks = []
     source_mimetype = detect_source_mimetype(filepath)
+
+    # Determine if compiled binaries should be read
+    # Defaults to False, can be overridden by options["read_executable"]
+    read_executable = options.get("read_executable", False) if options else False
+
     if source_mimetype is None:
         if verbose:
-            print(f"[thepipe] Unsupported source type: {filepath}")
+            print(f"[thepipe] Unsupported or unreadable source: {filepath}")
         return scraped_chunks
         
+    # Skip compiled binaries unless read_executable is explicitly True
+    if source_mimetype == "application/x-compiled-binary" and not read_executable:
+        if verbose:
+            print(f"[thepipe] Skipping detected compiled binary file: {filepath}")
+        return scraped_chunks
+
     if verbose:
         print(f"[thepipe] Scraping {source_mimetype}: {filepath}...")
+
     if source_mimetype == "application/pdf":
         scraped_chunks = scrape_pdf(
-            file_path=filepath,
-            verbose=verbose,
-            model=model,
-            options=options,
-            openai_client=openai_client,
-            include_input_images=include_input_images,
+            file_path=filepath, verbose=verbose, model=model, options=options,
+            openai_client=openai_client, include_input_images=include_input_images,
             include_output_images=include_output_images
         )
     elif source_mimetype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         scraped_chunks = scrape_docx(
-            file_path=filepath, 
-            verbose=verbose, 
-            include_output_images=include_output_images,
+            file_path=filepath, verbose=verbose, include_output_images=include_output_images,
             options=options
         )
     elif source_mimetype == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
         scraped_chunks = scrape_pptx(
-            file_path=filepath, 
-            verbose=verbose, 
-            include_output_images=include_output_images,
+            file_path=filepath, verbose=verbose, include_output_images=include_output_images,
             options=options
         )
     elif source_mimetype.startswith("image/"):
         scraped_chunks = scrape_image(file_path=filepath, options=options)
-    elif (
-        source_mimetype.startswith("application/vnd.ms-excel")
-        or source_mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    ):
+    elif source_mimetype.startswith("application/vnd.ms-excel") or \
+         source_mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
         scraped_chunks = scrape_spreadsheet(file_path=filepath, source_type=source_mimetype, options=options)
     elif source_mimetype == "application/x-ipynb+json":
         scraped_chunks = scrape_ipynb(
-            file_path=filepath, 
-            verbose=verbose, 
-            include_output_images=include_output_images
+            file_path=filepath, verbose=verbose, include_output_images=include_output_images
         )
     elif source_mimetype == "application/zip" or source_mimetype == "application/x-zip-compressed":
         scraped_chunks = scrape_zip(
-            file_path=filepath,
-            verbose=verbose,
-            text_only=text_only,
-            options=options,
-            openai_client=openai_client,
-            include_input_images=include_input_images,
+            file_path=filepath, verbose=verbose, text_only=text_only, options=options,
+            openai_client=openai_client, include_input_images=include_input_images,
             include_output_images=include_output_images,
         )
     elif source_mimetype.startswith("video/"):
         scraped_chunks = scrape_video(
-            file_path=filepath, 
-            verbose=verbose, 
-            include_output_images=include_output_images,
-            text_only=text_only,
-            options=options
+            file_path=filepath, verbose=verbose, include_output_images=include_output_images,
+            text_only=text_only, options=options
         )
     elif source_mimetype.startswith("audio/"):
         scraped_chunks = scrape_audio(file_path=filepath, verbose=verbose, options=options)
     elif source_mimetype.startswith("text/html"):
         scraped_chunks = scrape_html(
-            file_path=filepath, 
-            verbose=verbose, 
-            include_output_images=include_output_images,
+            file_path=filepath, verbose=verbose, include_output_images=include_output_images,
             options=options
         )
     elif source_mimetype.startswith("text/"):
@@ -222,7 +279,7 @@ def scrape_file(
             scraped_chunks = scrape_plaintext(file_path=filepath, options=options)
         except Exception as e:
             if verbose:
-                print(f"[thepipe] Error extracting from {filepath}: {e}")
+                print(f"[thepipe] Error extracting from {filepath} (fallback to plaintext): {e}")
                 
     if verbose:
         if scraped_chunks:
