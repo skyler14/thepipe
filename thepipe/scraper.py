@@ -836,7 +836,13 @@ def extract_page_content(
                         continue  # Ignore incompatible image extractions
                 else:
                     try:
-                        image = Image.open(requests.get(img_path, stream=True).raw)
+                        response = requests.get(
+                            img_path,
+                            timeout=10,
+                            headers={"User-Agent": USER_AGENT_STRING},
+                        )
+                        response.raise_for_status()
+                        image = Image.open(BytesIO(response.content))
                         images.append(image)
                     except Exception as e:
                         if verbose:
@@ -852,9 +858,13 @@ def extract_page_content(
                                 path_with_schema = (
                                     urlparse(url).scheme + "://" + img_path
                                 )
-                                image = Image.open(
-                                    requests.get(path_with_schema, stream=True).raw
+                                response = requests.get(
+                                    path_with_schema,
+                                    timeout=10,
+                                    headers={"User-Agent": USER_AGENT_STRING},
                                 )
+                                response.raise_for_status()
+                                image = Image.open(BytesIO(response.content))
                                 images.append(image)
                             except Exception as e:
                                 if verbose:
@@ -870,11 +880,13 @@ def extract_page_content(
                                         + "/"
                                         + img_path
                                     )
-                                    image = Image.open(
-                                        requests.get(
-                                            path_with_schema_and_netloc, stream=True
-                                        ).raw
+                                    response = requests.get(
+                                        path_with_schema_and_netloc,
+                                        timeout=10,
+                                        headers={"User-Agent": USER_AGENT_STRING},
                                     )
+                                    response.raise_for_status()
+                                    image = Image.open(BytesIO(response.content))
                                     images.append(image)
                                 except Exception as e:
                                     if verbose:
