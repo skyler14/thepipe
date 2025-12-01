@@ -21,14 +21,6 @@ class Section(BaseModel):
 class SectionList(BaseModel):
     sections: List[Section]
 
-class Section(BaseModel):
-    title: str
-    start_line: int
-    end_line: int
-
-class SectionList(BaseModel):
-    sections: List[Section]
-
 def chunk_by_document(chunks: List[Chunk]) -> List[Chunk]:
     chunks_by_doc = {}
     new_chunks = []
@@ -44,7 +36,7 @@ def chunk_by_document(chunks: List[Chunk]) -> List[Chunk]:
         doc_texts = []
         doc_images = []
         for chunk in doc_chunks:
-            doc_texts.extend(chunk.text)
+            doc_texts.append(chunk.text)
             doc_images.extend(chunk.images)
         text = "\n".join(doc_texts) if doc_texts else None
         new_chunks.append(Chunk(path=doc_chunks[0].path, text=text, images=doc_images))
