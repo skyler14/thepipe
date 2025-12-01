@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 import requests
 from PIL import Image
 from llama_index.core.schema import Document, ImageDocument
@@ -20,18 +20,39 @@ DEFAULT_EMBEDDING_MODEL = os.getenv(
 HOST_IMAGES = os.getenv("HOST_IMAGES", "false").lower() == "true"
 HOST_URL = os.getenv("HOST_URL", "https://thepipe-api.up.railway.app")
 
+
+def prepare_image(image: Image.Image) -> Image.Image:
+    """Return an in-memory copy of ``image`` with its underlying resources closed."""
+    try:
+        image.load()
+    except Exception:
+        pass
+
+    try:
+        prepared_image = image.copy()
+    except Exception:
+        return image
+
+    try:
+        image.close()
+    except Exception:
+        pass
+
+    return prepared_image
+
+
 class Chunk:
     def __init__(
         self,
         path: Optional[str] = None,
         text: Optional[str] = None,
         texts: Optional[List[str]] = None,  # Backward compatibility
-        images: Optional[List[Image.Image]] = None,
-        audios: Optional[List] = None,
-        videos: Optional[List] = None,
+        images: Optional[Iterable[Image.Image]] = None,
+        audios: Optional[Iterable] = None,
+        videos: Optional[Iterable] = None,
     ):
         self.path = path
-        
+
         # Handle both text and texts for backward compatibility
         if text is not None and texts is not None:
             raise ValueError("Cannot specify both 'text' and 'texts'. Use 'text' for new code.")
@@ -40,10 +61,10 @@ class Chunk:
             self.text = "\n".join(texts) if texts else None
         else:
             self.text = text
-            
-        self.images = images or []
-        self.audios = audios or []
-        self.videos = videos or []
+
+        self.images = [prepare_image(image) for image in images] if images else []
+        self.audios = list(audios) if audios else []
+        self.videos = list(videos) if videos else []
 
     # Backward compatibility property
     @property
