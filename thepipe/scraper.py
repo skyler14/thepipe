@@ -300,7 +300,13 @@ def scrape_html(
 ) -> List[Chunk]:
     with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         html_content = file.read()
-    markdown_content = markdownify.markdownify(html_content, heading_style="ATX")
+
+    # Parse HTML and remove unwanted elements for cleaner content
+    soup = BeautifulSoup(html_content, "html.parser")
+    for script in soup(["script", "style", "nav", "footer", "header"]):
+        script.decompose()
+
+    markdown_content = markdownify.markdownify(str(soup), heading_style="ATX")
     images = get_images_from_markdown(html_content) if include_output_images else []
     return [Chunk(path=file_path, text=markdown_content, images=images)]
 
@@ -808,6 +814,11 @@ def extract_page_content(
 
         # Convert HTML to Markdown
         soup = BeautifulSoup(html_content, "html.parser")
+
+        # Remove script, style, and navigation elements for cleaner content
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
+
         markdown_content = markdownify.markdownify(str(soup), heading_style="ATX")
 
         # Remove excessive newlines in the markdown
