@@ -18,8 +18,10 @@ class test_scraper(unittest.TestCase):
     def setUp(self):
         self.files_directory = os.path.join(os.path.dirname(__file__), "files")
         self.outputs_directory = "outputs"
-        # create a client we can re-use for ai_extraction scenarios
-        self.client = OpenAI()
+        # create a client we can re-use for ai_extraction scenarios (optional)
+        self.client = None
+        if os.getenv("OPENAI_API_KEY"):
+            self.client = OpenAI()
 
     def tearDown(self):
         # clean up outputs
@@ -31,7 +33,7 @@ class test_scraper(unittest.TestCase):
     def test_scrape_directory(self):
         # verify scraping entire example directory, bar the 'unknown' file
         chunks = scraper.scrape_directory(
-            dir_path=self.files_directory, inclusion_pattern="^(?!.*unknown).*"
+            dir_path=self.files_directory, include_regex="^(?!.*unknown).*"
         )
         self.assertIsInstance(chunks, list)
         self.assertGreater(len(chunks), 0)
@@ -56,7 +58,7 @@ class test_scraper(unittest.TestCase):
             with open(good, "w") as f:
                 f.write("Y")
 
-            chunks = scraper.scrape_directory(tmp, inclusion_pattern="good")
+            chunks = scraper.scrape_directory(tmp, include_regex="good")
 
         self.assertEqual(len(chunks), 1)
 
@@ -142,6 +144,7 @@ class test_scraper(unittest.TestCase):
         )
 
     # requires LLM server to be set up
+    @unittest.skipUnless(os.environ.get("OPENAI_API_KEY"), "requires OPENAI_API_KEY")
     def test_scrape_pdf_with_ai_extraction(self):
         chunks = scraper.scrape_file(
             os.path.join(self.files_directory, "example.pdf"),
@@ -276,6 +279,7 @@ class test_scraper(unittest.TestCase):
         )
         self.assertEqual(len(chunks_pdf), 1)
 
+    @unittest.skipUnless(os.environ.get("OPENAI_API_KEY"), "requires OPENAI_API_KEY")
     def test_scrape_url_with_ai_extraction(self):
         # verify web page scrape result with ai extraction
         chunks = scraper.scrape_url(

@@ -45,6 +45,7 @@ class test_chunker(unittest.TestCase):
         self.assertIn("bar next", t2)
         self.assertIn("end", t2)
 
+    @unittest.skipUnless(os.environ.get("OPENAI_API_KEY"), "requires OPENAI_API_KEY")
     def test_chunk_agentic(self):
         openai_client = OpenAI()
         chunks = self.read_markdown_file(self.example_markdown_path)
