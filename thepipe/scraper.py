@@ -52,6 +52,7 @@ import mimetypes
 import dotenv
 from magika import Magika
 import markdownify
+from bs4 import BeautifulSoup
 import fitz
 from openai import OpenAI
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
@@ -123,9 +124,9 @@ def detect_source_mimetype(source: str) -> Optional[str]:
     if extension:
         if extension.lower() == ".ipynb":
             return "application/x-ipynb+json"
-        elif '.ts' or '.tsx' in extension.lower():
+        elif extension.lower() in ('.ts', '.tsx'):
             return 'text/'
-        elif '.svg' in extension.lower():
+        elif extension.lower() == '.svg':
             return 'text/'
 
     try:

@@ -102,7 +102,7 @@ class test_scraper(unittest.TestCase):
                 z.write(imgf, arcname="i.jpg")
             chunks = scraper.scrape_file(zf)
 
-        self.assertTrue(any("TXT" in cast(str, c.text) for c in chunks))
+        self.assertTrue(any(c.text and "TXT" in c.text for c in chunks))
         self.assertTrue(any(c.images for c in chunks))
 
     def test_scrape_spreadsheet(self):
