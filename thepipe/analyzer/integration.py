@@ -104,27 +104,67 @@ def process_code_relations(
     if verbose:
         print(f"Primary (full code): {len(primary_files)}, N_1 (digest): {len(n1_files)}, Excluded: {len(n2_excluded)}")
     
-    # Step 4: Build chunks
+    # Step 4: Build chunks and track token counts
     chunks = []
+    tokens_full = 0  # If we included everything as full code
+    tokens_actual = 0  # What we're actually sending
     
     # Primary files: full code
     for filepath in primary_files:
         chunk = _file_to_chunk(dir_path, filepath, result, analyzer, as_digest=False)
         if chunk:
             chunks.append(chunk)
+            chunk_tokens = _estimate_tokens(chunk.text)
+            tokens_full += chunk_tokens
+            tokens_actual += chunk_tokens
     
     # N_1 files: digests
     for filepath in n1_files:
+        # Track what full code would have cost
+        full_path = Path(dir_path) / filepath
+        try:
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                full_content = f.read()
+            tokens_full += _estimate_tokens(full_content)
+        except Exception:
+            pass
+        
         chunk = _file_to_chunk(dir_path, filepath, result, analyzer, as_digest=True)
         if chunk:
             chunks.append(chunk)
+            tokens_actual += _estimate_tokens(chunk.text)
+    
+    # Add excluded files to the "full" count for comparison
+    for filepath in n2_excluded:
+        full_path = Path(dir_path) / filepath
+        try:
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                tokens_full += _estimate_tokens(f.read())
+        except Exception:
+            pass
     
     # Add a summary chunk with semantic tags
     if result.semantic_tags:
-        summary = _build_summary_chunk(result, primary_files, n1_files)
+        summary = _build_summary_chunk(result, primary_files, n1_files, tokens_full, tokens_actual)
         chunks.insert(0, summary)
     
+    # Verbose token savings message
+    if verbose:
+        savings = tokens_full - tokens_actual
+        pct = (savings / tokens_full * 100) if tokens_full > 0 else 0
+        print(f"\n📊 Token Analysis:")
+        print(f"   Full codebase: ~{tokens_full:,} tokens")
+        print(f"   With digests:  ~{tokens_actual:,} tokens")
+        print(f"   💰 Saved: ~{savings:,} tokens ({pct:.1f}% reduction)")
+    
     return chunks
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token for code"""
+    if not text:
+        return 0
+    return len(text) // 4
 
 
 def _files_dont_interact(
@@ -280,8 +320,13 @@ def _build_summary_chunk(
     result: AnalysisResult,
     primary_files: Set[str],
     n1_files: Set[str],
+    tokens_full: int = 0,
+    tokens_actual: int = 0,
 ) -> Chunk:
     """Build a summary chunk with semantic tags and file overview"""
+    savings = tokens_full - tokens_actual
+    pct = (savings / tokens_full * 100) if tokens_full > 0 else 0
+    
     lines = [
         "# Code Relationship Summary",
         "",
@@ -289,10 +334,16 @@ def _build_summary_chunk(
         f"**Related files (digests):** {len(n1_files)}",
         f"**Total functions:** {result.total_functions}",
         f"**Total classes:** {result.total_classes}",
-        "",
     ]
     
+    if tokens_full > 0:
+        lines.extend([
+            "",
+            f"**Token savings:** ~{savings:,} tokens saved ({pct:.0f}% reduction)",
+        ])
+    
     if result.semantic_tags:
+        lines.append("")
         lines.append("## Semantic Tags")
         for tag, files in sorted(result.semantic_tags.items()):
             lines.append(f"- #{tag}: {len(files)} files")
