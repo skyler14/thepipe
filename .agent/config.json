@@ -1,0 +1,7 @@
+{
+  "terminal": {
+    "auto_execute_allowlist": [
+      "thepipe"
+    ]
+  }
+}
