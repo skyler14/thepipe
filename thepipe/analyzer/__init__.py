@@ -24,6 +24,23 @@ from .dependency_map import (
     DependencyMapper,
     build_analysis_result,
 )
+from .digest import (
+    Digest,
+    DigestGenerator,
+    generate_file_digest,
+)
+from .semantic_tagger import (
+    SemanticTagger,
+    build_semantic_index,
+    SEMANTIC_PATTERNS,
+)
+from .api import (
+    Analyzer,
+    AnalyzerConfig,
+    analyze_directory,
+    analyze_files,
+    discover_files,
+)
 
 __all__ = [
     # Types
@@ -42,4 +59,18 @@ __all__ = [
     # Dependency Mapping
     "DependencyMapper",
     "build_analysis_result",
+    # Digest
+    "Digest",
+    "DigestGenerator",
+    "generate_file_digest",
+    # Semantic
+    "SemanticTagger",
+    "build_semantic_index",
+    "SEMANTIC_PATTERNS",
+    # API
+    "Analyzer",
+    "AnalyzerConfig",
+    "analyze_directory",
+    "analyze_files",
+    "discover_files",
 ]
