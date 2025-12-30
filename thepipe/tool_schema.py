@@ -130,13 +130,13 @@ TOOLS = [
                     "properties": {
                         "code_relations": {
                             "type": "string",
-                            "enum": ["full", "map", "mapnn", "mapall"],
+                            "enum": ["limited", "map", "mapnn", "mapall"],
                             "description": (
                                 "Code analysis mode: "
-                                "'full' = all files as full code (no analysis), "
+                                "'limited' = only requested files, "
                                 "'map' = all files with digests, "
-                                "'mapnn' = digests with N1/N2 neighbor cutoff (auto for large repos), "
-                                "'mapall' = full for patterns, digest for rest (auto default)"
+                                "'mapnn' = digests with N1/N2 neighbor cutoff (recommended), "
+                                "'mapall' = full for patterns, digest for rest"
                             )
                         },
                         "code_n1": {

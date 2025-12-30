@@ -10,7 +10,6 @@ import os
 import tempfile
 from urllib.parse import urlparse
 import zipfile
-from pathlib import Path
 from PIL import Image
 import requests
 import json
@@ -361,36 +360,6 @@ def scrape_directory(
         blacklist_files=blacklist_files,
         verbose=verbose
     )
-    
-    # Auto-detect code files and trigger analyzer if we have multiple of the same type
-    code_extensions = {
-        '.py', '.js', '.ts', '.tsx', '.jsx',
-        '.go', '.rs', '.c', '.cpp', '.h', '.hpp'
-    }
-    
-    # Count files by extension
-    from collections import Counter
-    extension_counts = Counter(
-        Path(f).suffix.lower() for f in all_files 
-        if Path(f).suffix.lower() in code_extensions
-    )
-    
-    # If we have 2+ files of any code type OR code_relations is set, use analyzer
-    has_multiple_code_files = any(count >= 2 for count in extension_counts.values())
-    code_relations = options.get('code_relations')
-    
-    if has_multiple_code_files or code_relations:
-        # Use analyzer with auto-detection (mode=None) or explicit mode
-        from .analyzer.integration import process_code_relations
-        return process_code_relations(
-            dir_path=dir_path,
-            include_patterns=include_patterns,
-            mode=code_relations,  # None = auto-detect
-            code_n1=options.get('code_n1', 3),
-            code_n2=options.get('code_n2', 5),
-            verbose=verbose,
-            options=options,
-        )
     
     if verbose:
         print(f"[thepipe] Processing {len(all_files)} files in {dir_path}")
