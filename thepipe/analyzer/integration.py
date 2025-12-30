@@ -26,13 +26,13 @@ CODE_RELATIONS_MODES = {
     "mapall",    # Full files for include_patterns, digests for rest
 }
 
-# Thresholds for auto mode
-AUTO_LARGE_REPO_FILES = 50  # Consider "large" if >50 files
-AUTO_LARGE_REPO_TOKENS = 100000  # Or >100K estimated tokens
+# Default thresholds for auto mode
+DEFAULT_NF = 100  # File count threshold (code_nf)
+DEFAULT_NT = 150000  # Token count threshold (code_nt)
 
 # Default neighbor distances
-DEFAULT_N1 = 3  # Include as digest
-DEFAULT_N2 = 5  # Don't include beyond this
+DEFAULT_N1 = 3  # Include as digest (code_n1)
+DEFAULT_N2 = 5  # Don't include beyond this (code_n2)
 
 
 def process_code_relations(
@@ -41,6 +41,8 @@ def process_code_relations(
     mode: str = "mapnn",
     code_n1: int = DEFAULT_N1,
     code_n2: int = DEFAULT_N2,
+    code_nf: int = DEFAULT_NF,
+    code_nt: int = DEFAULT_NT,
     verbose: bool = False,
     options: Optional[Dict[str, Any]] = None,
 ) -> List[Chunk]:
@@ -58,6 +60,8 @@ def process_code_relations(
             - "mapall": Full for patterns, digests for rest
         code_n1: N_1 distance - include as digests (default: 3)
         code_n2: N_2 distance - cutoff, don't include (default: 5)
+        code_nf: File count threshold for auto mode (default: 100)
+        code_nt: Token count threshold for auto mode (default: 150000)
         verbose: Print progress
         options: Additional options
         
@@ -258,7 +262,7 @@ def _categorize_files(
         if not include_patterns or len(include_patterns) == 0:
             # No filtering patterns → use "map" (all as digests)
             mode = "map"
-        elif result.total_files > AUTO_LARGE_REPO_FILES or total_tokens > AUTO_LARGE_REPO_TOKENS:
+        elif result.total_files > code_nf or total_tokens > code_nt:
             # Large repo with patterns → use "mapnn" to limit scope
             mode = "mapnn"
         else:

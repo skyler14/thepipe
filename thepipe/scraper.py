@@ -345,6 +345,8 @@ def scrape_directory(
             mode=code_relations,
             code_n1=options.get('code_n1', 3),
             code_n2=options.get('code_n2', 5),
+            code_nf=options.get('code_nf', 100),
+            code_nt=options.get('code_nt', 150000),
             verbose=verbose,
             options=options,
         )
