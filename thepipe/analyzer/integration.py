@@ -2,7 +2,7 @@
 Code Relations Integration
 
 Integrates the analyzer with scrape_directory, outputting standard Chunks.
-Supports code_relations modes: limited, map, mapnn, mapall
+Supports code_relations modes: full, map, mapnn, mapall
 """
 
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Mode definitions
 CODE_RELATIONS_MODES = {
-    "limited",   # Only selected files (include_patterns)
+    "full",      # Full code for all files (no analysis)
     "map",       # Digests for everything
     "mapnn",     # Digests + N_1/N_2 neighbor die-off
     "mapall",    # Full files for include_patterns, digests for rest
@@ -29,11 +29,47 @@ CODE_RELATIONS_MODES = {
 DEFAULT_N1 = 3  # Include as digest
 DEFAULT_N2 = 5  # Don't include beyond this
 
+# Auto-detection thresholds
+LARGE_REPO_FILE_COUNT = 100
+LARGE_REPO_TOKEN_COUNT = 150000
+
+
+def _auto_detect_mode(
+    include_patterns: Optional[List[str]],
+    total_files: int,
+    estimated_tokens: int,
+    verbose: bool = False
+) -> str:
+    """
+    Auto-detect the best code_relations mode based on repo characteristics.
+    
+    Logic:
+    - No include_patterns → 'map' (digest everything)
+    - With include_patterns + small repo → 'mapall' (primary full, context digest)
+    - With include_patterns + large repo → 'mapnn' (N₁/N₂ cutoff)
+    
+    Large repo = >100 files OR >150K tokens
+    """
+    if not include_patterns:
+        # No filtering → digest everything for efficiency
+        mode = "map"
+    elif total_files > LARGE_REPO_FILE_COUNT or estimated_tokens > LARGE_REPO_TOKEN_COUNT:
+        # Large repo → use N₁/N₂ cutoff to avoid token explosion
+        mode = "mapnn"
+    else:
+        # Small repo with patterns → include all as context
+        mode = "mapall"
+    
+    if verbose:
+        print(f"Auto-detected mode: {mode} (files={total_files}, est_tokens={estimated_tokens:,})")
+    
+    return mode
+
 
 def process_code_relations(
     dir_path: str,
     include_patterns: Optional[List[str]] = None,
-    mode: str = "mapnn",
+    mode: Optional[str] = None,  # None = auto-detect
     code_n1: int = DEFAULT_N1,
     code_n2: int = DEFAULT_N2,
     verbose: bool = False,
@@ -45,8 +81,9 @@ def process_code_relations(
     Args:
         dir_path: Path to directory
         include_patterns: Glob patterns for primary files (returned as full code)
-        mode: Processing mode
-            - "limited": Only include_patterns files
+        mode: Processing mode (None = auto-detect based on repo size)
+            - None: Auto-detect best mode
+            - "full": Full code for all files (no analysis)
             - "map": Digests for everything
             - "mapnn": Digests + N_1/N_2 neighbor die-off
             - "mapall": Full for patterns, digests for rest
@@ -58,10 +95,6 @@ def process_code_relations(
     Returns:
         List of Chunks (full code or digests)
     """
-    if mode not in CODE_RELATIONS_MODES:
-        logger.warning(f"Unknown mode '{mode}', defaulting to 'mapnn'")
-        mode = "mapnn"
-    
     dir_path = str(Path(dir_path).resolve())
     
     # Configure analyzer to discover ALL code files
@@ -81,6 +114,24 @@ def process_code_relations(
     
     analyzer = Analyzer(dir_path, config)
     result = analyzer.analyze()
+    
+    # Estimate tokens for auto-detection
+    estimated_tokens = sum(
+        (f.line_count * 50) // 4  # Rough: 50 chars/line avg, 4 chars/token
+        for f in result.files.values()
+    )
+    
+    # Auto-detect mode if not specified
+    if mode is None:
+        mode = _auto_detect_mode(
+            include_patterns=include_patterns,
+            total_files=result.total_files,
+            estimated_tokens=estimated_tokens,
+            verbose=verbose
+        )
+    elif mode not in CODE_RELATIONS_MODES:
+        logger.warning(f"Unknown mode '{mode}', defaulting to 'mapnn'")
+        mode = "mapnn"
     
     if verbose:
         print(f"Found {result.total_files} files, {len(result.dependency_graph.edges)} dependencies")
@@ -241,7 +292,7 @@ def _categorize_files(
         # No patterns means all files are primary (for "map" mode)
         primary_files = all_files.copy()
     
-    if mode == "limited":
+    if mode == "full":
         # Only return primary files
         excluded_files = all_files - primary_files
         return primary_files, set(), excluded_files
@@ -359,7 +410,7 @@ def get_code_relations_options() -> Dict[str, Any]:
         options = {"code_relations": "mapnn", "code_n1": 3, "code_n2": 5}
     """
     return {
-        "code_relations": None,  # None, "limited", "map", "mapnn", "mapall"
+        "code_relations": None,  # None, "full", "map", "mapnn", "mapall"
         "code_n1": DEFAULT_N1,
         "code_n2": DEFAULT_N2,
     }

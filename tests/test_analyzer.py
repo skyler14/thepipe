@@ -361,14 +361,14 @@ class TestSemanticTagger(unittest.TestCase):
 class TestCodeRelationsIntegration(unittest.TestCase):
     """Test the code_relations integration with scrape_directory"""
     
-    def test_mode_limited(self):
-        """Test 'limited' mode - only include_patterns files"""
+    def test_mode_full(self):
+        """Test 'full' mode - full code for all files, no analysis"""
         from thepipe.scraper import scrape_directory
         
         chunks = scrape_directory(
             str(REPO_ROOT),
             include_patterns=["thepipe/core.py"],
-            options={"code_relations": "limited"}
+            options={"code_relations": "full"}
         )
         
         # Should only have core.py + summary
@@ -438,7 +438,7 @@ class TestCodeRelationsIntegration(unittest.TestCase):
         chunks = scrape_directory(
             str(REPO_ROOT),
             include_patterns=["thepipe/core.py"],
-            options={"code_relations": "limited"}
+            options={"code_relations": "full"}
         )
         
         for chunk in chunks:
