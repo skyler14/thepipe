@@ -53,17 +53,50 @@ def _get_thepipe_path() -> str:
 INSTRUCTION_TEMPLATE = """# Tool: thepipe
 **Description**: Extract clean markdown, text, images, and structured data from any file, URL, or database.
 
-## Core Capabilities
-- **Files**: PDFs, DOCX, PPTX, images, audio, video, spreadsheets, Jupyter notebooks
-- **URLs**: Webpages, GitHub repos, YouTube (transcription), Google Drive
-- **Databases**: SQL/natural language queries against DuckDB, SQLite, PostgreSQL, MySQL
-- **Code Analysis**: Dependency mapping, digests, semantic tagging (90%+ token savings)
-- **Extraction**: JSON schema-based structured data extraction
+> **⚡ FOR CODE/REPOS: ALWAYS use `--options '{"code_relations": "auto"}'`**
+> This gives 90%+ token savings while preserving full code context via intelligent digests.
 
 ## Invocation
 ```bash
 {thepipe_cmd}
 ```
+
+---
+
+## 🔥 Code Analysis (USE THIS FOR PROGRAMMING TASKS)
+
+**When working with code directories or GitHub repos, ALWAYS enable code analysis:**
+
+```bash
+# Recommended for any programming project
+thepipe ./repo --options '{"code_relations": "auto"}' -f
+
+# GitHub repo with code analysis
+thepipe https://github.com/user/repo --include_patterns "*.py" --options '{"code_relations": "auto"}' -f
+```
+
+**Why use code_relations?**
+- **90%+ token savings** - digests preserve structure without full code
+- **Dependency mapping** - understands imports and file relationships
+- **Semantic tagging** - identifies auth, database, API, testing code
+- **Intelligent context** - provides exactly what LLMs need to understand codebases
+
+**Modes:**
+| Mode | When to Use |
+|------|-------------|
+| `auto` | **Default choice** - picks optimal strategy |
+| `map` | Large repos - all files as digests |
+| `mapnn` | Focused work - primary files full, neighbors as digests |
+| `mapall` | Medium repos - primary full, rest as digests |
+
+---
+
+## Core Capabilities
+- **Code Analysis**: Dependency mapping, digests, semantic tagging (**USE THIS FOR CODE**)
+- **Files**: PDFs, DOCX, PPTX, images, audio, video, spreadsheets, Jupyter notebooks
+- **URLs**: Webpages, GitHub repos, YouTube (transcription), Google Drive
+- **Databases**: SQL/natural language queries against DuckDB, SQLite, PostgreSQL, MySQL
+- **Extraction**: JSON schema-based structured data extraction
 
 ---
 
