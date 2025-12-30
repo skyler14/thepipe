@@ -333,6 +333,22 @@ def scrape_directory(
     # Process options
     options = options or {}
     
+    # Check for code_relations mode
+    # Options: "limited", "map", "mapnn", "mapall"
+    # Additional: code_n1 (default 3), code_n2 (default 5)
+    code_relations = options.get('code_relations')
+    if code_relations:
+        from .analyzer.integration import process_code_relations
+        return process_code_relations(
+            dir_path=dir_path,
+            include_patterns=include_patterns,
+            mode=code_relations,
+            code_n1=options.get('code_n1', 3),
+            code_n2=options.get('code_n2', 5),
+            verbose=verbose,
+            options=options,
+        )
+    
     # Get blacklist files list (if any)
     blacklist_files = options.get('blacklist_files', [])
     

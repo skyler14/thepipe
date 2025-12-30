@@ -75,23 +75,30 @@ class DependencyGraph:
     
     def nearest_neighbors(self, target_file: str, depth: int = 1) -> Set[str]:
         """BFS to find N-nearest neighbor files by imports"""
-        visited: Set[str] = set()
+        if depth < 1:
+            return set()
+        
+        visited: Set[str] = {target_file}
         current_level: Set[str] = {target_file}
+        all_neighbors: Set[str] = set()
         
         for _ in range(depth):
             next_level: Set[str] = set()
             for file in current_level:
-                if file in visited:
-                    continue
-                visited.add(file)
                 # Add files this file imports
-                next_level.update(self.adjacency.get(file, []))
+                for neighbor in self.adjacency.get(file, []):
+                    if neighbor not in visited:
+                        next_level.add(neighbor)
+                        all_neighbors.add(neighbor)
                 # Add files that import this file
-                next_level.update(self.reverse_adjacency.get(file, []))
-            current_level = next_level - visited
+                for neighbor in self.reverse_adjacency.get(file, []):
+                    if neighbor not in visited:
+                        next_level.add(neighbor)
+                        all_neighbors.add(neighbor)
+            visited.update(next_level)
+            current_level = next_level
         
-        visited.discard(target_file)  # Don't include the target itself
-        return visited
+        return all_neighbors
     
     def imports_of(self, file: str) -> List[str]:
         """Get files that this file imports"""
