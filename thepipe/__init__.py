@@ -41,8 +41,8 @@ def parse_arguments() -> argparse.Namespace:
         help='Database query. Format: --db ["query"] [db_type] [mode]. '
              'If empty, shows preview. Mode can be "schema" or "preview".')
     parser.add_argument('--output-format', '-f', dest='output_format',
-        choices=['text', 'json', 'llm'], default='text',
-        help='Output format: text (default, raw to stdout), json (structured), llm (message format for APIs)')
+        nargs='?', const='md', choices=['md', 'text', 'json'], default=None,
+        help='Output to stdout: -f (md with code fences), -f text (raw), -f json (structured). Omit to write files.')
 
     # OpenAI-related flags
     parser.add_argument(
@@ -174,10 +174,20 @@ def main() -> None:
         )
     
     # Output results based on format
-    output_format = getattr(args, 'output_format', 'text')
+    output_format = getattr(args, 'output_format', None)
     
-    if output_format == 'text':
-        # Raw text to stdout (default)
+    if output_format is None:
+        # Default: write to files (old behavior)
+        save_outputs(chunks=chunks, verbose=args.verbose, text_only=args.text_only)
+    elif output_format == 'md':
+        # Markdown with path and code fences to stdout
+        for chunk in chunks:
+            if chunk.path:
+                print(f"{chunk.path}:")
+            if chunk.text:
+                print(f"```\n{chunk.text}\n```\n")
+    elif output_format == 'text':
+        # Raw text to stdout
         for chunk in chunks:
             if chunk.text:
                 print(chunk.text)
@@ -186,15 +196,6 @@ def main() -> None:
         import json as json_module
         output = [c.to_json(text_only=args.text_only) for c in chunks]
         print(json_module.dumps(output, indent=2))
-    elif output_format == 'llm':
-        # LLM message format to stdout
-        import json as json_module
-        from .core import chunks_to_messages
-        messages = chunks_to_messages(chunks, text_only=args.text_only)
-        print(json_module.dumps(messages, indent=2))
-    else:
-        # Fallback to file output
-        save_outputs(chunks=chunks, verbose=args.verbose, text_only=args.text_only)
 
 # Entry-point shim
 if __name__ == "__main__":
