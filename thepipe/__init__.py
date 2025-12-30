@@ -40,6 +40,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--db', nargs='*',
         help='Database query. Format: --db ["query"] [db_type] [mode]. '
              'If empty, shows preview. Mode can be "schema" or "preview".')
+    parser.add_argument('--output-format', '-f', dest='output_format',
+        choices=['text', 'json', 'llm'], default='text',
+        help='Output format: text (default, raw to stdout), json (structured), llm (message format for APIs)')
 
     # OpenAI-related flags
     parser.add_argument(
@@ -170,8 +173,28 @@ def main() -> None:
             model=args.openai_model,
         )
     
-    # Persist results
-    save_outputs(chunks=chunks, verbose=args.verbose, text_only=args.text_only)
+    # Output results based on format
+    output_format = getattr(args, 'output_format', 'text')
+    
+    if output_format == 'text':
+        # Raw text to stdout (default)
+        for chunk in chunks:
+            if chunk.text:
+                print(chunk.text)
+    elif output_format == 'json':
+        # JSON array to stdout
+        import json as json_module
+        output = [c.to_json(text_only=args.text_only) for c in chunks]
+        print(json_module.dumps(output, indent=2))
+    elif output_format == 'llm':
+        # LLM message format to stdout
+        import json as json_module
+        from .core import chunks_to_messages
+        messages = chunks_to_messages(chunks, text_only=args.text_only)
+        print(json_module.dumps(messages, indent=2))
+    else:
+        # Fallback to file output
+        save_outputs(chunks=chunks, verbose=args.verbose, text_only=args.text_only)
 
 # Entry-point shim
 if __name__ == "__main__":
