@@ -74,13 +74,33 @@ def process_code_relations(
     
     dir_path = str(Path(dir_path).resolve())
     
-    # Configure analyzer to discover ALL code files
-    # include_patterns is used later to determine which are "primary"
+    # UNIFIED FILE DISCOVERY: Use same logic as normal scraper
+    from ..file_utils import get_filtered_files
+    
+    # Get all files using the same logic as scrape_directory
+    all_discovered_files = get_filtered_files(
+        dir_path=dir_path,
+        include_patterns=include_patterns,
+        verbose=verbose
+    )
+    
+    # Filter to only code files that the analyzer can process
+    CODE_EXTENSIONS = {'.py', '.js', '.jsx', '.ts', '.tsx', '.go', '.rs', 
+                       '.c', '.cpp', '.h', '.hpp', '.java', '.kt', '.swift'}
+    
+    code_files = [
+        f for f in all_discovered_files 
+        if Path(f).suffix.lower() in CODE_EXTENSIONS
+    ]
+    
+    if not code_files:
+        if verbose:
+            print("No code files found for analysis")
+        return []
+    
+    # Configure analyzer to analyze discovered code files
     config = AnalyzerConfig(
-        include_patterns=[
-            "**/*.py", "**/*.js", "**/*.ts", "**/*.tsx", "**/*.jsx",
-            "**/*.go", "**/*.rs", "**/*.c", "**/*.cpp", "**/*.h",
-        ],  # Analyze all code files
+        include_patterns=["**/*"],  # Analyze all discovered files
         generate_digests=True,
         generate_semantic_tags=True,
     )
@@ -90,7 +110,11 @@ def process_code_relations(
         print(f"Analyzing {dir_path}...")
     
     analyzer = Analyzer(dir_path, config)
-    result = analyzer.analyze()
+    # Convert absolute paths to relative paths for the analyzer
+    relative_code_files = [
+        str(Path(f).relative_to(dir_path)) for f in code_files
+    ]
+    result = analyzer.analyze(target_files=relative_code_files)
     
     if verbose:
         print(f"Found {result.total_files} files, {len(result.dependency_graph.edges)} dependencies")

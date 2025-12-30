@@ -221,10 +221,15 @@ class Analyzer:
         if target_files:
             cfg.target_files = target_files
         
-        # Step 1: Discover files
-        logger.info(f"Discovering files in {self.repo_root}...")
-        files = discover_files(str(self.repo_root), cfg)
-        logger.info(f"Found {len(files)} files to analyze")
+        # Step 1: Discover files (or use target_files if provided)
+        if target_files:
+            # Use provided files directly - convert to absolute paths
+            files = [str(self.repo_root / f) for f in target_files]
+            logger.info(f"Using {len(files)} provided target files")
+        else:
+            logger.info(f"Discovering files in {self.repo_root}...")
+            files = discover_files(str(self.repo_root), cfg)
+            logger.info(f"Found {len(files)} files to analyze")
         
         # Step 2: Extract AST from each file
         logger.info("Extracting AST...")
