@@ -21,7 +21,7 @@ def parse_arguments() -> argparse.Namespace:
         description="Process files or display cookies."
     )
     parser.add_argument(
-        "source", type=str, help="The source file, directory, URL or database to process"
+        "source", type=str, nargs='?', default=None, help="The source file, directory, URL or database to process"
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--include_regex', type=str, nargs='?', const='.*', default=None, 
@@ -70,6 +70,15 @@ def parse_arguments() -> argparse.Namespace:
         default=DEFAULT_AI_MODEL,
         help=f"Chat/VLM model to use (default: {DEFAULT_AI_MODEL}).",
     )
+    
+    # Registration mode
+    parser.add_argument(
+        "--register",
+        nargs='?',
+        const='none',  # Default if flag present without argument
+        choices=['none', 'code', 'agent', 'help', 'mcp'],
+        help="Register thepipe with AI platforms: none (stdout), code (Claude), agent (Antigravity), help (docs), mcp (server)"
+    )
     args = parser.parse_args()
     
     # Process options
@@ -112,6 +121,39 @@ def create_openai_client(
 def main() -> None:
     """CLI entry point that handles both old and new functionality"""
     args = parse_arguments()
+    
+    # Handle registration mode (exits after completion)
+    if hasattr(args, 'register') and args.register is not None:
+        from .registration import (
+            register_stdout, register_claude_code, register_antigravity,
+            register_help, register_mcp
+        )
+        
+        mode = args.register
+        target_dir = args.source  # Optional target directory
+        
+        if mode == 'none':
+            print(register_stdout())
+        elif mode == 'code':
+            path = register_claude_code(target_dir)
+            print(f"✓ Registered with Claude Code at: {path}")
+        elif mode == 'agent':
+            action_path, agents_path = register_antigravity(target_dir)
+            print(f"✓ Created action file: {action_path}")
+            if agents_path:
+                print(f"✓ Updated: {agents_path}")
+            print(f"✓ Added to auto-execute allowlist")
+        elif mode == 'help':
+            print(register_help())
+        elif mode == 'mcp':
+            print(register_mcp(target_dir))
+        
+        return  # Exit after registration
+    
+    # Require source for normal operations
+    if not args.source:
+        print("Error: source is required unless using --register")
+        return
     
     # Process database-specific arguments if present
     parse_database_args(args)

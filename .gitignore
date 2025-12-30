@@ -19,3 +19,6 @@ drive_rendered.html
 drive_response.html
 thepipe/credentials/drive_api_key.json
 .DS_Store
+
+# AI agent local files
+AGENTS.md
