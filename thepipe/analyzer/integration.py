@@ -85,11 +85,13 @@ def process_code_relations(
     )
     
     # Filter to only code files that the analyzer can process
-    CODE_EXTENSIONS = {'.py', '.js', '.jsx', '.ts', '.tsx', '.go', '.rs', 
-                       '.c', '.cpp', '.h', '.hpp', '.java', '.kt', '.swift'}
+    # Import supported code extensions from ast_extractor (supports 165+ languages)
+    from .ast_extractor import EXTENSION_TO_LANGUAGE
+    CODE_EXTENSIONS = set(EXTENSION_TO_LANGUAGE.keys())
     
+    # Filter discovered files to only code files
     code_files = [
-        f for f in all_discovered_files 
+        f for f in all_discovered_files
         if Path(f).suffix.lower() in CODE_EXTENSIONS
     ]
     
