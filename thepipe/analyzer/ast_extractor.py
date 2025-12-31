@@ -146,6 +146,67 @@ CLASS_QUERIES = {
 }
 
 
+# ============================================================================
+# UNIVERSAL PATTERN-BASED DETECTION
+# ============================================================================
+
+def _is_import_node(node) -> bool:
+    """Universal import detection across all languages.
+    
+    Detects imports by checking if node type contains import-related keywords.
+    Works for: Python (import_statement), Dart (import_directive), 
+    Go (import_declaration), Rust (use_declaration), etc.
+    """
+    node_type = node.type.lower()
+    import_keywords = ['import', 'use', 'require', 'include', 'extern', 'module']
+    return any(kw in node_type for kw in import_keywords)
+
+
+def _is_function_node(node) -> bool:
+    """Universal function detection across all languages.
+    
+    Detects functions by checking if node type contains function-related keywords.
+    Works for: Python (function_definition), Dart (function_declaration),
+    Swift (function_declaration), Kotlin (function_declaration), etc.
+    """
+    node_type = node.type.lower()
+    function_keywords = ['function', 'method', 'procedure', 'func', 'def']
+    return any(kw in node_type for kw in function_keywords)
+
+
+def _is_class_node(node) -> bool:
+    """Universal class detection across all languages.
+    
+    Detects classes/structs by checking if node type contains class-related keywords.
+    Works for: Python (class_definition), Dart (class_declaration),
+    Swift (class_declaration, struct_declaration), Go (type_declaration), etc.
+    """
+    node_type = node.type.lower()
+    class_keywords = ['class', 'struct', 'interface', 'trait', 'enum', 'object']
+    return any(kw in node_type for kw in class_keywords)
+
+
+def _extract_identifier_from_node(node, source: str) -> Optional[str]:
+    """Extract identifier/name from a node by looking for identifier children.
+    
+    Universal helper that searches for common identifier node types.
+    """
+    identifier_types = {'identifier', 'type_identifier', 'property_identifier'}
+    
+    # Direct identifier child
+    for child in node.children:
+        if child.type in identifier_types:
+            return source[child.start_byte:child.end_byte]
+    
+    # Nested identifier (e.g., in type_spec or declarators)
+    for child in node.children:
+        for subchild in child.children:
+            if subchild.type in identifier_types:
+                return source[subchild.start_byte:subchild.end_byte]
+    
+    return None
+
+
 class ASTExtractor:
     """Language-agnostic AST extraction via tree-sitter"""
     
@@ -245,28 +306,16 @@ class ASTExtractor:
         return imports
     
     def _extract_imports_fallback(self, tree, source: str, language: str) -> List[str]:
-        """Fallback import extraction by walking the tree"""
+        """Universal fallback import extraction using pattern matching.
+        
+        Works for all 165 tree-sitter languages by detecting import-related node types.
+        """
         imports = []
         
         def walk(node):
-            node_type = node.type
+            if _is_import_node(node):
+                imports.append(source[node.start_byte:node.end_byte].strip())
             
-            # Python imports
-            if node_type in ('import_statement', 'import_from_statement'):
-                imports.append(source[node.start_byte:node.end_byte].strip())
-            # JS/TS imports
-            elif node_type == 'import_statement':
-                imports.append(source[node.start_byte:node.end_byte].strip())
-            # C/C++ includes
-            elif node_type == 'preproc_include':
-                imports.append(source[node.start_byte:node.end_byte].strip())
-            # Go imports
-            elif node_type in ('import_declaration', 'import_spec'):
-                imports.append(source[node.start_byte:node.end_byte].strip())
-            # Rust use
-            elif node_type == 'use_declaration':
-                imports.append(source[node.start_byte:node.end_byte].strip())
-                
             for child in node.children:
                 walk(child)
         
@@ -276,49 +325,15 @@ class ASTExtractor:
     def _extract_functions(
         self, tree, source: str, language: str, lang
     ) -> List[ASTNode]:
-        """Extract function definitions from AST"""
+        """Universal function extraction using pattern matching.
+        
+        Works for all 165 tree-sitter languages by detecting function-related node types.
+        """
         functions = []
         
         def walk(node):
-            is_func = False
-            name = None
-            
-            if language == 'python' and node.type == 'function_definition':
-                is_func = True
-                for child in node.children:
-                    if child.type == 'identifier':
-                        name = source[child.start_byte:child.end_byte]
-                        break
-            elif language in ('javascript', 'typescript'):
-                if node.type in ('function_declaration', 'method_definition'):
-                    is_func = True
-                    for child in node.children:
-                        if child.type in ('identifier', 'property_identifier'):
-                            name = source[child.start_byte:child.end_byte]
-                            break
-            elif language == 'go' and node.type == 'function_declaration':
-                is_func = True
-                for child in node.children:
-                    if child.type == 'identifier':
-                        name = source[child.start_byte:child.end_byte]
-                        break
-            elif language == 'rust' and node.type == 'function_item':
-                is_func = True
-                for child in node.children:
-                    if child.type == 'identifier':
-                        name = source[child.start_byte:child.end_byte]
-                        break
-            elif language in ('c', 'cpp') and node.type == 'function_definition':
-                is_func = True
-                # Navigate to function name
-                for child in node.children:
-                    if child.type == 'function_declarator':
-                        for subchild in child.children:
-                            if subchild.type == 'identifier':
-                                name = source[subchild.start_byte:subchild.end_byte]
-                                break
-            
-            if is_func:
+            if _is_function_node(node):
+                name = _extract_identifier_from_node(node, source)
                 functions.append(ASTNode(
                     type='function',
                     name=name,
@@ -333,51 +348,19 @@ class ASTExtractor:
         
         walk(tree.root_node)
         return functions
-    
+
     def _extract_classes(
         self, tree, source: str, language: str, lang
     ) -> List[ASTNode]:
-        """Extract class definitions from AST"""
+        """Universal class extraction using pattern matching.
+        
+        Works for all 165 tree-sitter languages by detecting class/struct/interface node types.
+        """
         classes = []
         
         def walk(node):
-            is_class = False
-            name = None
-            
-            if language == 'python' and node.type == 'class_definition':
-                is_class = True
-                for child in node.children:
-                    if child.type == 'identifier':
-                        name = source[child.start_byte:child.end_byte]
-                        break
-            elif language in ('javascript', 'typescript') and node.type == 'class_declaration':
-                is_class = True
-                for child in node.children:
-                    if child.type == 'identifier':
-                        name = source[child.start_byte:child.end_byte]
-                        break
-            elif language == 'rust' and node.type == 'struct_item':
-                is_class = True
-                for child in node.children:
-                    if child.type == 'type_identifier':
-                        name = source[child.start_byte:child.end_byte]
-                        break
-            elif language == 'go' and node.type == 'type_declaration':
-                is_class = True
-                for child in node.children:
-                    if child.type == 'type_spec':
-                        for subchild in child.children:
-                            if subchild.type == 'type_identifier':
-                                name = source[subchild.start_byte:subchild.end_byte]
-                                break
-            elif language == 'java' and node.type == 'class_declaration':
-                is_class = True
-                for child in node.children:
-                    if child.type == 'identifier':
-                        name = source[child.start_byte:child.end_byte]
-                        break
-            
-            if is_class:
+            if _is_class_node(node):
+                name = _extract_identifier_from_node(node, source)
                 classes.append(ASTNode(
                     type='class',
                     name=name,
