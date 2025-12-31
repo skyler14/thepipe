@@ -23,6 +23,8 @@ from .ast_extractor import (
 from .dependency_map import (
     DependencyMapper,
     build_analysis_result,
+    register_resolver,
+    get_registered_languages,
 )
 from .digest import (
     Digest,
@@ -59,6 +61,8 @@ __all__ = [
     # Dependency Mapping
     "DependencyMapper",
     "build_analysis_result",
+    "register_resolver",
+    "get_registered_languages",
     # Digest
     "Digest",
     "DigestGenerator",

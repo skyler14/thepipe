@@ -53,41 +53,62 @@ def _get_thepipe_path() -> str:
 INSTRUCTION_TEMPLATE = """# Tool: thepipe
 **Description**: Extract clean markdown, text, images, and structured data from any file, URL, or database.
 
-> **⚡ FOR CODE/REPOS: ALWAYS use `--options '{"code_relations": "auto"}'`**
-> This gives 90%+ token savings while preserving full code context via intelligent digests.
+---
 
-## Invocation
+## ⚡⚡⚡ CRITICAL: ALWAYS USE CODE_RELATIONS FOR PROGRAMMING TASKS ⚡⚡⚡
+
+**If the user's request involves code, repositories, or programming:**
+
 ```bash
-{thepipe_cmd}
+# DEFAULT APPROACH - ALWAYS DO THIS FOR CODE
+thepipe ./path/to/repo --options '{"code_relations": "auto"}' -f
+```
+
+**This gives:**
+- 🔥 **90%+ token savings** - intelligent digests preserve structure
+- 🔗 **Dependency mapping** - understands imports across files  
+- 🏷️ **Semantic tagging** - identifies auth, database, API, testing code
+- 📊 **Full context** - LLM understands entire codebase structure
+
+**Supported Languages (with dependency resolution):**
+| Language | Built-in | Dependency Mapping |
+|----------|----------|-------------------|
+| Python | ✅ Full | ✅ imports resolved |
+| JavaScript/TypeScript | ✅ Full | ✅ imports resolved |
+| Dart/Flutter | ✅ Full | ✅ imports resolved |
+| Swift | ✅ Full | ✅ framework detection |
+| Kotlin | ✅ Full | ✅ package detection |
+| Ruby | ✅ Full | ✅ require_relative |
+| Go, Rust, C/C++, Java | ✅ Full | ✅ imports resolved |
+| +155 more | ✅ AST | Pattern-based |
+
+**Language-Specific Examples:**
+
+```bash
+# Flutter/Dart project
+thepipe ./my_flutter_app --include_patterns "*.dart" --options '{"code_relations": "auto"}' -f
+
+# iOS Swift project  
+thepipe ./ios_app --include_patterns "*.swift" --options '{"code_relations": "auto"}' -f
+
+# Python project
+thepipe ./backend --include_patterns "*.py" --options '{"code_relations": "auto"}' -f
+
+# GitHub repo with code analysis
+thepipe https://github.com/user/repo --options '{"code_relations": "auto"}' -f
 ```
 
 ---
 
-## 🔥 Code Analysis (USE THIS FOR PROGRAMMING TASKS)
+## Code Analysis Modes
 
-**When working with code directories or GitHub repos, ALWAYS enable code analysis:**
-
-```bash
-# Recommended for any programming project
-thepipe ./repo --options '{"code_relations": "auto"}' -f
-
-# GitHub repo with code analysis
-thepipe https://github.com/user/repo --include_patterns "*.py" --options '{"code_relations": "auto"}' -f
-```
-
-**Why use code_relations?**
-- **90%+ token savings** - digests preserve structure without full code
-- **Dependency mapping** - understands imports and file relationships
-- **Semantic tagging** - identifies auth, database, API, testing code
-- **Intelligent context** - provides exactly what LLMs need to understand codebases
-
-**Modes:**
 | Mode | When to Use |
 |------|-------------|
-| `auto` | **Default choice** - picks optimal strategy |
-| `map` | Large repos - all files as digests |
+| `auto` | **DEFAULT - picks optimal strategy based on repo size** |
+| `map` | Large repos (>100 files) - all files as digests |
 | `mapnn` | Focused work - primary files full, neighbors as digests |
 | `mapall` | Medium repos - primary full, rest as digests |
+| `limited` | Only include_patterns files (no digests) |
 
 ---
 
