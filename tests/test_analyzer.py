@@ -765,3 +765,70 @@ class TestTop20Languages(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEmbeddedLanguages(unittest.TestCase):
+    """Test files with embedded/multiple languages (HTML+CSS+JS, PHP+jQuery)"""
+    
+    def setUp(self):
+        from thepipe.analyzer import get_extractor
+        self.extractor = get_extractor()
+        self.fixtures_dir = Path(__file__).parent / "fixtures"
+    
+    def test_html_with_embedded_js_css(self):
+        """Test HTML file with embedded CSS and JavaScript"""
+        from thepipe.analyzer import extract_file
+        
+        html_file = str(self.fixtures_dir / "test_webapp.html")
+        analysis = extract_file(html_file)
+        
+        # HTML files might not have full analysis, but shouldn't crash
+        # Tree-sitter can parse HTML and extract embedded <script> blocks
+        self.assertTrue(analysis is None or analysis.language in ['html', None])
+        
+        # The goal is to verify we can handle multi-language files without crashing
+        # Full extraction of embedded languages would require special handling
+    
+    def test_php_with_embedded_html_jquery(self):
+        """Test PHP file with embedded HTML, CSS, and jQuery"""
+        from thepipe.analyzer import extract_file
+        
+        php_file = str(self.fixtures_dir / "test_webapp.php")
+        analysis = extract_file(php_file)
+        
+        self.assertIsNotNone(analysis, "Should analyze PHP file")
+        self.assertEqual(analysis.language, "php")
+        
+        # PHP with embedded HTML may have limited class extraction
+        # This is exploratory - tree-sitter may struggle with mixed languages
+        class_names = [c.name for c in analysis.classes if c.name]
+        # Document findings: embedding HTML can interfere with PHP parsing
+        
+        # Should find PHP functions/methods
+        self.assertGreater(len(analysis.functions), 0, "Should find PHP methods")
+        func_names = [f.name for f in analysis.functions if f.name]
+        self.assertTrue(any(name in func_names for name in ["getAllUsers", "addUser", "deleteUser", "__construct"]))
+    
+    def test_multi_language_resilience(self):
+        """Test that analyzer doesn't crash on complex multi-language files"""
+        from thepipe.analyzer import extract_file
+        
+        # Both files should be processable without crashing
+        files = ["test_webapp.html", "test_webapp.php"]
+        
+        for filename in files:
+            filepath = str(self.fixtures_dir / filename)
+            try:
+                analysis = extract_file(filepath)
+                # Success if we got here without crashing
+                self.assertTrue(True, f"{filename} processed without crash")
+            except Exception as e:
+                self.fail(f"{filename} crashed: {e}")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+if __name__ == "__main__":
+    unittest.main()

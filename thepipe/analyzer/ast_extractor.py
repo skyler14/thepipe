@@ -80,6 +80,8 @@ EXTENSION_TO_LANGUAGE = {
     '.asm': 'asm',
     '.s': 'asm',
     '.S': 'asm',
+    '.html': 'html',
+    '.htm': 'html',
     '.m': 'objective_c',
     '.pl': 'perl',
     '.pm': 'perl',

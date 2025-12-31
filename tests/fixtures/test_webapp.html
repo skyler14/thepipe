@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Test Web App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+        
+        .user-card {
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>User Management</h1>
+        <div id="user-list"></div>
+        <button onclick="addUser()">Add Random User</button>
+    </div>
+
+    <script>
+        // User class
+        class User {
+            constructor(name, email, age) {
+                this.name = name;
+                this.email = email;
+                this.age = age;
+                this.id = Date.now() + Math.random();
+            }
+            
+            toHTML() {
+                return `
+                    <div class="user-card" data-id="${this.id}">
+                        <h3>${this.name}</h3>
+                        <p>Email: ${this.email}</p>
+                        <p>Age: ${this.age}</p>
+                        <button onclick="deleteUser('${this.id}')">Delete</button>
+                    </div>
+                `;
+            }
+        }
+        
+        // Global state
+        const users = [];
+        
+        // Functions
+        function addUser() {
+            const names = ['Alice', 'Bob', 'Charlie', 'Diana'];
+            const domains = ['example.com', 'test.com', 'demo.org'];
+            
+            const name = names[Math.floor(Math.random() * names.length)];
+            const email = `${name.toLowerCase()}@${domains[Math.floor(Math.random() * domains.length)]}`;
+            const age = Math.floor(Math.random() * 50) + 20;
+            
+            const user = new User(name, email, age);
+            users.push(user);
+            renderUsers();
+        }
+        
+        function deleteUser(id) {
+            const index = users.findIndex(u => u.id == id);
+            if (index > -1) {
+                users.splice(index, 1);
+                renderUsers();
+            }
+        }
+        
+        function renderUsers() {
+            const container = document.getElementById('user-list');
+            container.innerHTML = users.map(u => u.toHTML()).join('');
+        }
+        
+        // Initialize with sample data
+        function init() {
+            addUser();
+            addUser();
+        }
+        
+        // Run on load
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
