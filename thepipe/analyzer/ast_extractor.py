@@ -80,6 +80,9 @@ EXTENSION_TO_LANGUAGE = {
     '.asm': 'asm',
     '.s': 'asm',
     '.S': 'asm',
+    '.m': 'objective_c',
+    '.pl': 'perl',
+    '.pm': 'perl',
 }
 
 # Query patterns for extracting imports (language-specific)
