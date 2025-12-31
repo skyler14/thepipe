@@ -16,6 +16,9 @@ from .digest import generate_file_digest
 
 logger = logging.getLogger(__name__)
 
+# Auto-register language resolvers for non-built-in languages
+from . import resolvers  # noqa: F401
+
 
 # Mode definitions
 CODE_RELATIONS_MODES = {
@@ -134,6 +137,8 @@ def process_code_relations(
         mode=mode,
         code_n1=code_n1,
         code_n2=code_n2,
+        code_nf=code_nf,
+        code_nt=code_nt,
         dir_path=dir_path,
     )
     
@@ -251,6 +256,8 @@ def _categorize_files(
     mode: str,
     code_n1: int,
     code_n2: int,
+    code_nf: int,
+    code_nt: int,
     dir_path: str,
 ) -> Tuple[Set[str], Set[str], Set[str]]:
     """
