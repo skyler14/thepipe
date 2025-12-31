@@ -20,6 +20,44 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# PLUGIN SYSTEM FOR CUSTOM DEPENDENCY RESOLVERS
+# ============================================================================
+
+from typing import Callable
+
+# Global registry for custom language resolvers
+_CUSTOM_RESOLVERS: Dict[str, Callable] = {}
+
+def register_resolver(
+    language: str,
+    resolver_func: Callable[[str, str, 'DependencyMapper'], Optional[DependencyEdge]]
+) -> None:
+    """
+    Register a custom dependency resolver for a language.
+    
+    Allows community extensions to add support for languages not built-in.
+    
+    Args:
+        language: Language identifier (e.g., 'dart', 'swift', 'kotlin')
+        resolver_func: Function(import_stmt, from_file, mapper) -> DependencyEdge | None
+    
+    Example:
+        def resolve_dart(stmt, file, mapper):
+            # Parse Dart imports
+            return DependencyEdge(...) or None
+        
+        register_resolver('dart', resolve_dart)
+    """
+    _CUSTOM_RESOLVERS[language.lower()] = resolver_func
+    logger.info(f"Registered custom resolver for: {language}")
+
+def get_registered_languages() -> List[str]:
+    """Get list of languages with custom resolvers."""
+    return list(_CUSTOM_RESOLVERS.keys())
+
+
+
 class DependencyMapper:
     """
     Maps imports between files and builds a dependency graph.
@@ -94,8 +132,11 @@ class DependencyMapper:
         """
         Resolve an import statement to a file path.
         
+        Checks built-in resolvers first, then custom registered resolvers.
+        
         Returns DependencyEdge or None if resolution fails.
         """
+        # Built-in language resolvers
         if language == 'python':
             return self._resolve_python_import(import_stmt, from_file)
         elif language in ('javascript', 'typescript'):
@@ -106,8 +147,17 @@ class DependencyMapper:
             return self._resolve_rust_import(import_stmt, from_file)
         elif language in ('c', 'cpp'):
             return self._resolve_c_import(import_stmt, from_file)
-        else:
-            return None
+        
+        # Check custom resolver registry (plugin system)
+        if language in _CUSTOM_RESOLVERS:
+            try:
+                return _CUSTOM_RESOLVERS[language](import_stmt, from_file, self)
+            except Exception as e:
+                logger.warning(f"Custom resolver for {language} failed: {e}")
+                return None
+        
+        # No resolver available for this language
+        return None
     
     def _resolve_python_import(
         self, import_stmt: str, from_file: str
