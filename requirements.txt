@@ -48,3 +48,6 @@ pymysql>=1.0.0
 psycopg2-binary>=2.9.0  
 pyarrow>=14.0.0  
 sqlfluff
+# AST analysis
+numpy
+tree-sitter-language-pack
