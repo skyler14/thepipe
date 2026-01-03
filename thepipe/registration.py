@@ -362,7 +362,11 @@ Copy the content below and paste it into your AI assistant's chat interface (Cha
 def register_claude_code(target_dir: Optional[str] = None) -> Path:
     """
     Register thepipe as a Claude Code skill.
-    Creates .claude/skills/thepipe/SKILL.md
+    Creates .claude/skills/thepipe/SKILL.md with proper skill format.
+    
+    Skills are installed to:
+    - Project-local: .claude/skills/thepipe/
+    - Global: ~/.claude/skills/thepipe/
     """
     base_dir = Path(target_dir or os.getcwd())
     skill_dir = base_dir / ".claude" / "skills" / "thepipe"
@@ -370,13 +374,34 @@ def register_claude_code(target_dir: Optional[str] = None) -> Path:
     
     skill_file = skill_dir / "SKILL.md"
     
+    # Get the actual thepipe command path
+    thepipe_cmd = _get_thepipe_path()
+    
+    # Build skill content with proper frontmatter
+    instructions = INSTRUCTION_TEMPLATE.replace("{thepipe_cmd}", thepipe_cmd)
+    
     content = f"""---
 name: thepipe
-description: Data extraction and document processing
-invocation_pattern: "thepipe.*"
+description: Extract data from files, URLs, databases. Use code_relations for code analysis with 90%+ token savings.
+version: 1.0.0
 ---
 
-{INSTRUCTION_TEMPLATE}
+# thepipe - Data Extraction & Code Analysis
+
+**Invocation**: `{thepipe_cmd}`
+
+---
+
+## ⚡ CRITICAL: Before Re-running
+
+If you have previously run thepipe on this codebase in this conversation:
+1. Check if the output is still in context
+2. Only re-run if you made significant code changes
+3. Use `--include_patterns` to narrow scope if needed
+
+---
+
+{instructions}
 """
     
     skill_file.write_text(content)
