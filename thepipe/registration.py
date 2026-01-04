@@ -82,20 +82,26 @@ thepipe ./path/to/repo --options '{"code_relations": "auto"}' -f
 | Go, Rust, C/C++, Java | ✅ Full | ✅ imports resolved |
 | +155 more | ✅ AST | Pattern-based |
 
-**Language-Specific Examples:**
+> ⚠️ **WARNING**: Do NOT use generic patterns like `*.py` with `code_relations` mapping modes!
+> This marks ALL files as primary (full code), defeating the 90% token savings.
+> Either: (1) use NO include_patterns to let auto-mode decide, or (2) use specific 
+> file patterns like `src/api/*.py` to focus on relevant files only.
+
+**Correct Usage:**
 
 ```bash
-# Flutter/Dart project
-thepipe ./my_flutter_app --include_patterns "*.dart" --options '{"code_relations": "auto"}' -f
+# ✅ GOOD - Let auto-mode decide what to include
+thepipe ./repo --options '{{"code_relations": "auto"}}' -f
 
-# iOS Swift project  
-thepipe ./ios_app --include_patterns "*.swift" --options '{"code_relations": "auto"}' -f
+# ✅ GOOD - Specific patterns for focused analysis
+thepipe ./repo --include_patterns "src/core/*.py" "src/api/*.py" --options '{{"code_relations": "auto"}}' -f
 
-# Python project
-thepipe ./backend --include_patterns "*.py" --options '{"code_relations": "auto"}' -f
+# ❌ BAD - Generic *.py defeats token savings (all files become primary)
+# thepipe ./repo --include_patterns "*.py" --options '{{"code_relations": "map"}}' -f
+```
 
 # GitHub repo with code analysis
-thepipe https://github.com/user/repo --options '{"code_relations": "auto"}' -f
+thepipe https://github.com/user/repo --options '{{"code_relations": "auto"}}' -f
 ```
 
 ---
