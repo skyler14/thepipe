@@ -118,6 +118,31 @@ thepipe https://github.com/user/repo --options '{{"code_relations": "auto"}}' -f
 
 ---
 
+## 🔄 Agent Mode (LLM Inference Delegation)
+
+**For agentic tasks requiring LLM inference, use `--llm-provider agent`:**
+
+```bash
+thepipe data.pdf --extract '{{\"title\": \"str\"}}' --llm-provider agent
+```
+
+**How it works:** Named Pipes (FIFOs) provide true bidirectional, synchronous communication:
+1. thepipe creates two FIFOs in `/tmp/thepipe_pipes/`
+2. thepipe writes query to `query_<pid>` and **blocks**
+3. Agent reads query, executes LLM call, writes response to `response_<pid>`
+4. thepipe reads response and continues execution seamlessly
+
+This lets thepipe pause while the agent handles inference, avoiding double API calls 
+when running inside an AI coding assistant (Antigravity, Claude Code, etc.).
+
+**Agent instructions:** When you see `<<<THEPIPE_LLM_QUERY>>>` in stderr:
+1. Read `QUERY_PIPE` path from the output
+2. Read the JSON query from that pipe
+3. Execute the LLM call with the messages
+4. Write your response to `RESPONSE_PIPE`
+
+---
+
 ## Core Capabilities
 - **Code Analysis**: Dependency mapping, digests, semantic tagging (**USE THIS FOR CODE**)
 - **Files**: PDFs, DOCX, PPTX, images, audio, video, spreadsheets, Jupyter notebooks

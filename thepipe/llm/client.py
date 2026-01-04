@@ -288,51 +288,94 @@ class LLMClient:
         model: str,
     ) -> LLMResponse:
         """
-        Delegate query to calling agent via stdin/stdout protocol.
+        Delegate query to calling agent via Named Pipes (FIFOs).
         
-        The agent reads the query from stdout, executes it, and writes
-        the response to stdin.
+        Named pipes provide true bidirectional, synchronous communication:
+        1. thepipe creates two FIFOs: query_pipe and response_pipe
+        2. thepipe writes the query to query_pipe
+        3. Agent reads from query_pipe, processes the LLM call
+        4. Agent writes response to response_pipe
+        5. thepipe reads response and continues
+        
+        This allows thepipe to pause execution while the agent handles
+        the LLM inference, then seamlessly resume with the response.
         """
-        query_payload = {
-            "messages": messages,
-            "model": model,
-            "response_format": "text",
-        }
+        import tempfile
+        import stat
+        import atexit
         
-        # Output query for agent to process
-        print(f"{QUERY_START}", file=sys.stderr, flush=True)
-        print(json.dumps(query_payload, indent=2), file=sys.stderr, flush=True)
-        print(f"{QUERY_END}", file=sys.stderr, flush=True)
+        # Create unique pipe names based on PID
+        pid = os.getpid()
+        pipe_dir = Path(tempfile.gettempdir()) / "thepipe_pipes"
+        pipe_dir.mkdir(exist_ok=True)
         
-        # Also print user-friendly message
-        print(f"\n[thepipe] Waiting for agent to provide LLM response...", file=sys.stderr, flush=True)
-        print(f"[thepipe] Paste response below, then type {RESPONSE_END} on a new line:", file=sys.stderr, flush=True)
+        query_pipe = pipe_dir / f"query_{pid}"
+        response_pipe = pipe_dir / f"response_{pid}"
         
-        # Read response from stdin
-        response_lines = []
-        start_time = time.time()
+        # Cleanup function
+        def cleanup_pipes():
+            for pipe in [query_pipe, response_pipe]:
+                try:
+                    if pipe.exists():
+                        pipe.unlink()
+                except:
+                    pass
+        
+        atexit.register(cleanup_pipes)
         
         try:
-            for line in sys.stdin:
-                if time.time() - start_time > self.config.timeout:
-                    raise TimeoutError(f"Agent response timeout after {self.config.timeout}s")
-                
-                line = line.rstrip('\n')
-                if line == RESPONSE_END:
-                    break
-                response_lines.append(line)
-        except KeyboardInterrupt:
-            raise RuntimeError("Agent query interrupted")
-        
-        content = '\n'.join(response_lines)
-        
-        return LLMResponse(
-            content=content,
-            model=model,
-            provider="agent",
-            input_tokens=0,  # Agent tracks its own tokens
-            output_tokens=0,
-        )
+            # Create named pipes (FIFOs) if they don't exist
+            for pipe in [query_pipe, response_pipe]:
+                if pipe.exists():
+                    pipe.unlink()
+                os.mkfifo(str(pipe))
+            
+            # Prepare query payload
+            query_payload = {
+                "type": "llm_query",
+                "messages": messages,
+                "model": model,
+                "response_format": "text",
+                "query_pipe": str(query_pipe),
+                "response_pipe": str(response_pipe),
+            }
+            
+            # Notify agent via stderr about the pipes
+            print(f"\n{QUERY_START}", file=sys.stderr, flush=True)
+            print(f"QUERY_PIPE: {query_pipe}", file=sys.stderr, flush=True)
+            print(f"RESPONSE_PIPE: {response_pipe}", file=sys.stderr, flush=True)
+            print(json.dumps(query_payload, indent=2), file=sys.stderr, flush=True)
+            print(f"{QUERY_END}", file=sys.stderr, flush=True)
+            
+            # Write query to the query pipe (will block until agent reads)
+            logger.info(f"Writing query to {query_pipe}")
+            with open(query_pipe, 'w') as qp:
+                qp.write(json.dumps(query_payload))
+                qp.flush()
+            
+            # Read response from response pipe (will block until agent writes)
+            logger.info(f"Waiting for response on {response_pipe}")
+            start_time = time.time()
+            
+            with open(response_pipe, 'r') as rp:
+                content = rp.read()
+            
+            elapsed = time.time() - start_time
+            logger.info(f"Received response in {elapsed:.2f}s")
+            
+            return LLMResponse(
+                content=content.strip(),
+                model=model,
+                provider="agent",
+                input_tokens=0,  # Agent tracks its own tokens
+                output_tokens=0,
+            )
+            
+        except Exception as e:
+            logger.error(f"Agent query failed: {e}")
+            raise RuntimeError(f"Agent communication failed: {e}")
+        finally:
+            cleanup_pipes()
 
 
 # Convenience function for simple queries
