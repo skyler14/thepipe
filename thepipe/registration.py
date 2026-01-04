@@ -411,15 +411,19 @@ If you have previously run thepipe on this codebase in this conversation:
 def register_antigravity(target_dir: Optional[str] = None) -> tuple[Path, Optional[Path]]:
     """
     Register thepipe as an Antigravity workflow.
-    Creates .agent/workflows/thepipe.md with YAML frontmatter
+    Creates .antigravity/workflows/thepipe.md with YAML frontmatter
+    
+    Workflows can be triggered with /thepipe in the Antigravity chat.
     
     Returns:
         (workflow_file_path, agents_md_path or None)
     """
     base_dir = Path(target_dir or os.getcwd())
     
-    # Create workflow file (Antigravity uses .agent/workflows/, not actions)
-    workflows_dir = base_dir / ".agent" / "workflows"
+    # Create workflow file in correct Antigravity folder
+    # Workspace workflows: .antigravity/workflows/
+    # Global workflows: ~/.antigravity/workflows/
+    workflows_dir = base_dir / ".antigravity" / "workflows"
     workflows_dir.mkdir(parents=True, exist_ok=True)
     
     workflow_file = workflows_dir / "thepipe.md"
@@ -526,7 +530,7 @@ To install my capabilities into your AI development environment:
    - Creates `.claude/skills/thepipe/` with skill definitions
    
 2. **Google Antigravity**: Run `thepipe --register agent`
-   - Creates `.agent/actions/thepipe.md`
+   - Creates `.antigravity/workflows/thepipe.md`
    - Updates `AGENTS.md` if present
    - Adds to auto-execute allowlist
 
