@@ -665,19 +665,19 @@ class DatabaseManager:
         Returns:
             List of Chunk objects with query results and insights
         """
-        # Setup
-        import os
-        from openai import OpenAI
+        # Setup - use unified LLMClient
+        from .llm import LLMClient
         
-        api_key = llm_config.get("api_key", os.environ.get("OPENAI_API_KEY"))
-        api_base = llm_config.get("api_base")
-        model = llm_config.get("model", "gpt-3.5-turbo")
+        # Convert llm_config to options format
+        options = {
+            'llm_provider': llm_config.get('llm_provider', 'openai'),
+            'api_key': llm_config.get('api_key'),
+            'api_base': llm_config.get('api_base'),
+            'model': llm_config.get('model', 'gpt-3.5-turbo'),
+        }
+        model = options['model']
         
-        client_args = {"api_key": api_key}
-        if api_base:
-            client_args["base_url"] = api_base
-        
-        client = OpenAI(**client_args)
+        llm_client = LLMClient.from_options(options=options)
         
         chunks = []
         schema_chunk = Chunk(path=f"database://{self.db_type}/schema", texts=[schema_text])
@@ -714,8 +714,7 @@ class DatabaseManager:
         [Additional queries as needed]
         """
         
-        strategy_response = client.chat.completions.create(
-            model=model,
+        strategy_response = llm_client.query(
             messages=[
                 {"role": "system", "content": "You are a database expert planning an analysis strategy."},
                 {"role": "user", "content": strategy_prompt}
@@ -723,7 +722,7 @@ class DatabaseManager:
             temperature=0.2
         )
         
-        strategy_text = strategy_response.choices[0].message.content
+        strategy_text = strategy_response.content
         
         # Extract queries from strategy
         query_pattern = r"QUERY \d+:\s*```(?:sql)?\s*([\s\S]*?)```\s*PURPOSE:\s*([\s\S]*?)(?=QUERY \d+:|$)"
@@ -805,8 +804,7 @@ class DatabaseManager:
                     PURPOSE: What this query will help determine
                     """
                     
-                    refine_response = client.chat.completions.create(
-                        model=model,
+                    refine_response = llm_client.query(
                         messages=[
                             {"role": "system", "content": "You are a database expert refining an analysis."},
                             {"role": "user", "content": refine_prompt}
@@ -814,7 +812,7 @@ class DatabaseManager:
                         temperature=0.2
                     )
                     
-                    refine_text = refine_response.choices[0].message.content
+                    refine_text = refine_response.content
                     
                     if "COMPLETE" not in refine_text.upper():
                         # Extract next query
@@ -871,8 +869,7 @@ class DatabaseManager:
         3. A brief conclusion
         """
         
-        insight_response = client.chat.completions.create(
-            model=model,
+        insight_response = llm_client.query(
             messages=[
                 {"role": "system", "content": "You are a data analyst creating a clear insights report."},
                 {"role": "user", "content": insight_prompt}
@@ -883,7 +880,7 @@ class DatabaseManager:
         # Create final report
         final_report = f"# Data Insight Report\n\n"
         final_report += f"## Question\n\n{natural_language_query}\n\n"
-        final_report += f"{insight_response.choices[0].message.content}\n\n"
+        final_report += f"{insight_response.content}\n\n"
         
         # Add supporting queries
         final_report += f"## Supporting Data\n\n"
@@ -1042,27 +1039,26 @@ class DatabaseManager:
         
         # If not using iterative mode, proceed with the existing approach
         try:
-            import os
-            from openai import OpenAI
+            from .llm import LLMClient
             
-            # Set up OpenAI client
-            api_key = llm_config.get("api_key", os.environ.get("OPENAI_API_KEY"))
-            api_base = llm_config.get("api_base", os.environ.get("OPENAI_API_BASE"))
-            model = llm_config.get("model", "gpt-3.5-turbo")
+            # Set up LLMClient from options
+            options = {
+                'llm_provider': llm_config.get('llm_provider', 'openai'),
+                'api_key': llm_config.get('api_key'),
+                'api_base': llm_config.get('api_base'),
+                'model': llm_config.get('model', 'gpt-3.5-turbo'),
+            }
+            model = options['model']
             
-            if not api_key:
+            # Check for API key if not using agent mode
+            if options['llm_provider'] != 'agent' and not options.get('api_key') and not os.environ.get('OPENAI_API_KEY'):
                 chunks.append(Chunk(
                     path=f"database://{self.db_type}/error",
                     texts=["API key is required for natural language queries."]
                 ))
                 return chunks
             
-            # Create OpenAI client
-            client_args = {"api_key": api_key}
-            if api_base:
-                client_args["base_url"] = api_base
-                
-            client = OpenAI(**client_args)
+            llm_client = LLMClient.from_options(options=options)
             
             # Create prompt that includes both schema and analysis
             prompt = f"""
@@ -1081,8 +1077,7 @@ class DatabaseManager:
             """
             
             # Get SQL query from LLM
-            response = client.chat.completions.create(
-                model=model,
+            response = llm_client.query(
                 messages=[
                     {"role": "system", "content": "You are a database expert. Convert questions to SQL."},
                     {"role": "user", "content": prompt}
@@ -1090,7 +1085,7 @@ class DatabaseManager:
                 temperature=0
             )
             
-            sql_query = response.choices[0].message.content.strip()
+            sql_query = response.content.strip()
             
             # Clean up the SQL query
             if sql_query.startswith("```sql"):

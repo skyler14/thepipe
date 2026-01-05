@@ -22,3 +22,4 @@ thepipe/credentials/drive_api_key.json
 
 # AI agent local files
 AGENTS.md
+.antigravity/

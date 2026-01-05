@@ -119,6 +119,42 @@ class LLMClient:
                 setattr(config, key, value)
         return cls.from_config(config)
     
+    @classmethod
+    def from_options(
+        cls,
+        options: Optional[Dict[str, Any]] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> "LLMClient":
+        """
+        Create client from thepipe options dict.
+        
+        This is the primary way to get an LLMClient in thepipe code.
+        It reads llm_provider from options and falls back to env vars.
+        
+        Args:
+            options: thepipe options dict (may contain 'llm_provider')
+            api_key: Explicit API key (overrides options)
+            base_url: Explicit base URL
+            model: Explicit model name
+        """
+        options = options or {}
+        
+        # Determine provider from options, default to openai
+        provider = options.get('llm_provider', 'openai')
+        
+        # If explicit API key provided, always use openai
+        if api_key:
+            provider = 'openai'
+        
+        return cls(
+            provider=provider,
+            api_key=api_key or options.get('api_key'),
+            base_url=base_url or options.get('api_base'),
+            model=model or options.get('model', 'gpt-4o'),
+        )
+    
     def _get_openai_client(self):
         """Get or create OpenAI client."""
         if self._client is None:

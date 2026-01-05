@@ -487,16 +487,17 @@ def scrape_pdf(
                         }
                     )
 
-            messages = cast(
-                Iterable[ChatCompletionMessageParam],
-                [{"role": "user", "content": msg_content}],
-            )
+            messages = [{"role": "user", "content": msg_content}]
 
-            response = openai_client.chat.completions.create(
-                model=model, messages=messages
+            # Use unified LLMClient (supports both OpenAI and agent mode)
+            from .llm import LLMClient
+            llm_client = LLMClient.from_options(
+                options=options,
+                model=model,
             )
+            response = llm_client.query(messages=messages)
 
-            llm_response = response.choices[0].message.content
+            llm_response = response.content
             if not llm_response:
                 raise RuntimeError("Empty LLM response.")
 
@@ -702,11 +703,11 @@ def parse_webpage_with_vlm(
     url: str,
     model: str = DEFAULT_AI_MODEL,
     verbose: Optional[bool] = False,
-    openai_client: Optional[OpenAI] = None,
+    openai_client: Optional[OpenAI] = None,  # Legacy, kept for compatibility
     include_output_images: bool = True,
+    options: Optional[Dict[str, Any]] = None,  # New: options with llm_provider
 ) -> Chunk:
-    if openai_client is None:
-        raise ValueError("parse_webpage_with_vlm requires an openai_client argument.")
+    # LLMClient handles agent mode automatically via options
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -771,14 +772,17 @@ def parse_webpage_with_vlm(
                 ],
             },
         ]
-        response = openai_client.chat.completions.create(
+        # Use unified LLMClient (supports both OpenAI and agent mode)
+        from .llm import LLMClient
+        llm_client = LLMClient.from_options(
+            options=options,
             model=model,
-            messages=cast(Iterable[ChatCompletionMessageParam], messages),
         )
-        llm_response = response.choices[0].message.content
+        response = llm_client.query(messages=messages)
+        llm_response = response.content
         if not llm_response:
             raise Exception(
-                f"Failed to receive a message content from LLM Response: {response}"
+                f"Failed to receive a message content from LLM Response"
             )
         if verbose:
             print(f"[thepipe] LLM response: {llm_response}")

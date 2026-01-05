@@ -62,6 +62,25 @@ class TestLLMClient:
         assert key1 == key2  # Same messages + model = same key
         assert key1 != key3  # Different model = different key
     
+    def test_from_options_with_agent_provider(self):
+        """Test from_options correctly reads llm_provider from options."""
+        options = {"llm_provider": "agent", "model": "gpt-4"}
+        client = LLMClient.from_options(options=options)
+        assert client.config.provider == "agent"
+        assert client.config.model == "gpt-4"
+    
+    def test_from_options_with_api_key_overrides_agent(self):
+        """Test that explicit API key forces openai provider."""
+        options = {"llm_provider": "agent"}
+        client = LLMClient.from_options(options=options, api_key="explicit-key")
+        assert client.config.provider == "openai"
+        assert client.config.api_key == "explicit-key"
+    
+    def test_from_options_defaults_to_openai(self):
+        """Test from_options defaults to openai when no provider specified."""
+        client = LLMClient.from_options(options={})
+        assert client.config.provider == "openai"
+    
     @patch("openai.OpenAI")
     def test_openai_query(self, mock_openai_class):
         # Setup mock

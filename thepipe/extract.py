@@ -70,27 +70,24 @@ def extract_from_chunk(
     multiple_extractions: bool,
     extraction_prompt: str,
     host_images: bool,
-    openai_client: OpenAI,
+    openai_client: OpenAI = None,  # Legacy, kept for compatibility
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
+    options: Optional[Dict] = None,  # New: options dict with llm_provider
 ) -> Tuple[Dict, int]:
     response_dict = {"chunk_index": chunk_index, "source": source}
     tokens_used = 0
     try:
-        # Use provided client or create one if needed
-        if openai_client is None:
-            # Configure OpenAI client with provided credentials
-            client_args = {
-                "api_key": api_key or os.environ.get("OPENAI_API_KEY", os.environ.get("LLM_SERVER_API_KEY")),
-            }
-            
-            # Set API base if provided
-            if api_base:
-                client_args["base_url"] = api_base
-            elif os.environ.get("LLM_SERVER_BASE_URL"):
-                client_args["base_url"] = os.environ.get("LLM_SERVER_BASE_URL")
-                
-            openai_client = OpenAI(**client_args)
+        # Import LLMClient here to avoid circular imports
+        from .llm import LLMClient
+        
+        # Create LLMClient from options (handles agent mode automatically)
+        llm_client = LLMClient.from_options(
+            options=options,
+            api_key=api_key,
+            base_url=api_base,
+            model=ai_model,
+        )
 
         corrected_extraction_prompt = extraction_prompt.replace("{schema}", schema)
         if multiple_extractions:
@@ -108,15 +105,15 @@ def extract_from_chunk(
             },
         ]
 
-        response = openai_client.chat.completions.create(
-            model=ai_model,
+        # Use unified LLMClient (supports both OpenAI and agent mode)
+        response = llm_client.query(
             messages=cast(Iterable[ChatCompletionMessageParam], messages),
             response_format={"type": "json_object"},
         )
-        llm_response = response.choices[0].message.content
+        llm_response = response.content
         if not llm_response:
             raise Exception(
-                f"Failed to receive a message content from LLM Response: {response}"
+                f"Failed to receive a message content from LLM Response"
             )
         input_tokens = calculate_tokens([chunk])
         output_tokens = calculate_tokens([Chunk(text=llm_response)])
@@ -202,6 +199,7 @@ def extract(
                 extraction_prompt=extraction_prompt,
                 host_images=host_images,
                 openai_client=openai_client,
+                options=options,
             ): i
             for i, chunk in enumerate(chunks)
         }

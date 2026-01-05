@@ -90,6 +90,17 @@ def parse_arguments() -> argparse.Namespace:
             exit(1)
     elif not hasattr(args, 'options') or args.options is None:
         args.options = {}
+    
+    # When outputting to agent (-f flag), auto-enable agent LLM provider
+    # unless an explicit API key is provided
+    if args.output_format is not None:  # -f flag was used
+        if 'llm_provider' not in args.options:
+            # Check if user provided explicit API key - if so, use OpenAI
+            if getattr(args, 'openai_api_key', None):
+                args.options['llm_provider'] = 'openai'
+            else:
+                # Agentic output mode - delegate LLM calls to the agent
+                args.options['llm_provider'] = 'agent'
         
     return args
 
