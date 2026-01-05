@@ -50,20 +50,35 @@ class DatabaseManager:
     def _detect_database_type(self, source: Union[str, Dict]) -> str:
         """Detect database type from connection string or configuration."""
         if isinstance(source, str):
+            # JDBC URL support - convert to standard format
+            if source.startswith("jdbc:"):
+                source = self._convert_jdbc_url(source)
+                self.connection_info = source  # Update stored connection
+            
             if source.startswith("postgresql://") or source.startswith("postgres://"):
                 return "postgres"
-            elif source.startswith("mysql://"):
-                return "mysql"
+            elif source.startswith("mysql://") or source.startswith("mysql+pymysql://") or source.startswith("mariadb://"):
+                return "mysql"  # MariaDB uses same driver as MySQL
             elif source.startswith("sqlite://"):
                 return "sqlite"
-            elif source.startswith("mssql://"):
+            elif source.startswith("mssql://") or source.startswith("mssql+pyodbc://"):
                 return "mssql"
+            elif source.startswith("duckdb://"):
+                return "duckdb"
             elif source.endswith((".parquet", ".parq")) or "/parquet/" in source or "*.parquet" in source:
                 return "parquet"
+            elif source.endswith(".orc"):
+                return "orc"
+            elif source.endswith((".feather", ".arrow", ".ipc")):
+                return "feather"
+            elif source.endswith((".jsonl", ".ndjson")):
+                return "jsonl"
             elif source.endswith(".csv"):
                 return "csv"
             elif source.endswith((".xlsx", ".xls")):
                 return "excel"
+            elif source.endswith(".duckdb") or source.endswith(".db"):
+                return "duckdb"
             elif os.path.isdir(source):
                 # Check if directory contains parquet files
                 for file in os.listdir(source):
@@ -73,6 +88,42 @@ class DatabaseManager:
             return source["type"]
             
         return "unknown"
+    
+    def _convert_jdbc_url(self, jdbc_url: str) -> str:
+        """Convert JDBC URL to SQLAlchemy-compatible format.
+        
+        Supported formats:
+        - jdbc:mysql://host:port/database -> mysql+pymysql://host:port/database
+        - jdbc:mariadb://host:port/database -> mysql+pymysql://host:port/database
+        - jdbc:postgresql://host:port/database -> postgresql://host:port/database
+        - jdbc:sqlite:/path/to/db -> sqlite:///path/to/db
+        - jdbc:sqlserver://host:port;databaseName=db -> mssql+pyodbc://host:port/db
+        """
+        if jdbc_url.startswith("jdbc:mysql://"):
+            return jdbc_url.replace("jdbc:mysql://", "mysql+pymysql://")
+        elif jdbc_url.startswith("jdbc:mariadb://"):
+            # MariaDB uses same pymysql driver
+            return jdbc_url.replace("jdbc:mariadb://", "mysql+pymysql://")
+        elif jdbc_url.startswith("jdbc:postgresql://"):
+            return jdbc_url.replace("jdbc:postgresql://", "postgresql://")
+        elif jdbc_url.startswith("jdbc:sqlite:"):
+            # jdbc:sqlite:/path/to/db -> sqlite:///path/to/db
+            path = jdbc_url.replace("jdbc:sqlite:", "")
+            return f"sqlite:///{path}"
+        elif jdbc_url.startswith("jdbc:sqlserver://"):
+            url = jdbc_url.replace("jdbc:sqlserver://", "")
+            if "databaseName=" in url:
+                parts = url.split(";")
+                host_port = parts[0]
+                db_name = ""
+                for part in parts[1:]:
+                    if part.startswith("databaseName="):
+                        db_name = part.replace("databaseName=", "")
+                return f"mssql+pyodbc://{host_port}/{db_name}?driver=ODBC+Driver+17+for+SQL+Server"
+            return f"mssql+pyodbc://{url}"
+        else:
+            # Unsupported JDBC, return as-is
+            return jdbc_url
     
     def _connect(self):
         """Establish connection to the database using JupySQL middleware."""
@@ -146,6 +197,52 @@ class DatabaseManager:
                 
                 # Store path for cleanup
                 self._temp_path = temp_path
+            elif self.db_type == "orc":
+                # Handle ORC files with DuckDB
+                connection_str = f"duckdb://"
+                self.db = Database(connection_str, config_dict=config_dict)
+                
+                if self.verbose:
+                    print(f"[thepipe] Creating view for ORC file: {self.connection_info}")
+                    
+                # DuckDB can read ORC files directly
+                self.db.execute(f"CREATE VIEW orc_data AS SELECT * FROM read_parquet('{self.connection_info}')")
+            elif self.db_type == "feather":
+                # Handle Feather/Arrow IPC files with DuckDB
+                connection_str = f"duckdb://"
+                self.db = Database(connection_str, config_dict=config_dict)
+                
+                if self.verbose:
+                    print(f"[thepipe] Creating view for Feather/Arrow file: {self.connection_info}")
+                
+                # DuckDB reads feather via read_parquet or we use pyarrow
+                import pyarrow.feather as feather
+                import pyarrow as pa
+                table = feather.read_table(self.connection_info)
+                # Register the Arrow table with DuckDB
+                self.db.execute("CREATE VIEW feather_data AS SELECT * FROM table")
+            elif self.db_type == "jsonl":
+                # Handle JSON Lines files with DuckDB
+                connection_str = f"duckdb://"
+                self.db = Database(connection_str, config_dict=config_dict)
+                
+                if self.verbose:
+                    print(f"[thepipe] Creating view for JSONL file: {self.connection_info}")
+                    
+                # DuckDB can read JSON/JSONL directly
+                self.db.execute(f"CREATE VIEW jsonl_data AS SELECT * FROM read_json_auto('{self.connection_info}')")
+            elif self.db_type == "duckdb":
+                # Handle DuckDB database files directly
+                if self.connection_info.startswith("duckdb://"):
+                    connection_str = self.connection_info
+                else:
+                    # It's a .duckdb file path
+                    connection_str = f"duckdb:///{self.connection_info}"
+                
+                if self.verbose:
+                    print(f"[thepipe] Connecting to DuckDB: {connection_str}")
+                    
+                self.db = Database(connection_str, config_dict=config_dict)
             else:
                 # Standard database connection
                 if isinstance(self.connection_info, str):
@@ -154,6 +251,20 @@ class DatabaseManager:
                     # Create connection string from dictionary
                     connection_str = self._create_connection_string(
                         self.connection_info, self.db_type)
+                
+                # Normalize connection URLs to SQLAlchemy format
+                # mysql:// -> mysql+pymysql://
+                if connection_str.startswith("mysql://"):
+                    connection_str = connection_str.replace("mysql://", "mysql+pymysql://", 1)
+                # mariadb:// -> mysql+pymysql:// (compatible driver)
+                elif connection_str.startswith("mariadb://"):
+                    connection_str = connection_str.replace("mariadb://", "mysql+pymysql://", 1)
+                # postgres:// -> postgresql:// (SQLAlchemy standard)
+                elif connection_str.startswith("postgres://"):
+                    connection_str = connection_str.replace("postgres://", "postgresql://", 1)
+                # mssql:// -> mssql+pyodbc://
+                elif connection_str.startswith("mssql://"):
+                    connection_str = connection_str.replace("mssql://", "mssql+pyodbc://", 1)
                 
                 if self.verbose:
                     print(f"[thepipe] Connecting to database with connection string: {connection_str}")
