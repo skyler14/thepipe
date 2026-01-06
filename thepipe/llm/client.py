@@ -424,9 +424,9 @@ class LLMClient:
             if write_result["error"]:
                 raise write_result["error"]
             
-            # Use remaining timeout for read
+            # Use remaining timeout for read (respect user's timeout, with reasonable minimum)
             elapsed = time.time() - start_time
-            remaining_timeout = max(timeout - elapsed, 10)  # At least 10s for read
+            remaining_timeout = max(timeout - elapsed, min(10, timeout))  # At least 10s or user's timeout
             
             # Read response in thread with timeout
             logger.info(f"Waiting for response on {response_pipe} (timeout: {remaining_timeout:.0f}s)")

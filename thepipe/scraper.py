@@ -14,6 +14,9 @@ from PIL import Image
 import requests
 import json
 import logging
+
+# Module logger (avoid polluting root logger)
+logger = logging.getLogger(__name__)
 from .drive_utils import extract_drive_id, process_drive_content
 from .file_utils import (
     detect_source_type, find_subtitle_files, get_filtered_files, 
@@ -169,7 +172,7 @@ def detect_source_mimetype_from_bytes(data: bytes, filename_hint: Optional[str] 
                 return guessed_mimetype
                 
     except Exception as e:
-        logging.debug(f"Magika detection failed: {e}")
+        logger.debug(f"Magika detection failed: {e}")
         if filename_hint:
             guessed_mimetype, _ = mimetypes.guess_type(filename_hint)
             if guessed_mimetype:
@@ -203,7 +206,7 @@ def _read_fifo_with_timeout(
     """
     import threading
     
-    result = {"data": None, "error": None, "finished": False}
+    result = {"data": None, "error": None}
     
     def read_fifo():
         try:
@@ -225,8 +228,6 @@ def _read_fifo_with_timeout(
                 result["data"] = b''.join(chunks)
         except Exception as e:
             result["error"] = e
-        finally:
-            result["finished"] = True
     
     # Run read in thread with timeout
     read_thread = threading.Thread(target=read_fifo, daemon=True)
@@ -235,7 +236,7 @@ def _read_fifo_with_timeout(
     
     if read_thread.is_alive():
         # Thread is still blocking on open() - FIFO has no writer
-        logging.warning(
+        logger.warning(
             f"FIFO read timed out after {timeout}s - reader thread will be orphaned "
             f"(cleanup occurs on process exit)"
         )
@@ -264,50 +265,8 @@ def detect_source_mimetype(source: str) -> Optional[str]:
     try:
         magika_result = _magika_detector.identify_path(source)
 
-        compiled_magika_labels = {
-            "executable",          # Generic executable
-            "elf_executable",      # Linux/Unix ELF executable
-            "mach-o",              # macOS Mach-O executable
-            "pe_executable",       # Windows PE executable (e.g., .exe, .dll)
-            "object",              # Object files (.o, .obj)
-            "library",             # Generic shared/static library
-            "elf_library",         # Linux/Unix ELF shared library (.so)
-            "pe_library",          # Windows PE shared library (.dll)
-            "mach-o_library",      # macOS Mach-O shared library
-            "java_bytecode",       # Java compiled bytecode (.class, .jar)
-            "python_bytecode",     # Python compiled bytecode (.pyc)
-            "raw_binary",          # Generic unclassified binary data
-            "unknown",             # Magika couldn't identify, but often binary
-            "archive_executable",  # Self-extracting archives, installers
-
-            # Package/Installer formats (often contain binaries)
-            "dex",                 # Android Dalvik executable
-            "msi",                 # Microsoft Installer file
-            "nupkg",               # NuGet Package
-            "deb",                 # Debian package
-            "rpm",                 # Red Hat package
-            "apk",                 # Android package
-
-            # System Files / OS-specific binaries
-            "font",                # Fonts are binary and typically not text-scraped
-            "firmware",            # Device firmware images
-            "disk_image",          # ISO, DMG, etc.
-            "apple_desktop_services_store", # .DS_Store
-            "compound_file_binary_format", # Catch-all for OLE-structured files (like Thumbs.db, old MS Office docs sometimes, etc.)
-            "lnk",                 # Windows shortcut files
-            "cat",                 # Windows Catalog file
-            "mscompress",          # Microsoft Compress archive data
-            "cab",                 # Microsoft Cabinet archive
-            "pcap",                # Packet capture files
-
-            # Web/Node.js/NPM binaries
-            "wasm",                # WebAssembly binary module
-            # For NPM, Magika might detect specific executables within `node_modules/.bin`
-            # as `elf_executable`, `pe_executable`, etc.
-            # Other npm related files like `package-lock.json` are text, but can be caught by `FILES_TO_IGNORE`
-        }
-
-        if magika_result.output.ct_label in compiled_magika_labels:
+        # Use module-level constant (shared with detect_source_mimetype_from_bytes)
+        if magika_result.output.ct_label in COMPILED_BINARY_LABELS:
             return "application/x-compiled-binary"
         
         if magika_result.output.mime_type:
