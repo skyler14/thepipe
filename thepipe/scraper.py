@@ -13,6 +13,7 @@ import zipfile
 from PIL import Image
 import requests
 import json
+import logging
 from .drive_utils import extract_drive_id, process_drive_content
 from .file_utils import (
     detect_source_type, find_subtitle_files, get_filtered_files, 
@@ -123,6 +124,23 @@ def is_fifo(path: str) -> bool:
     except (OSError, IOError):
         return False
 
+
+# Module-level constants
+COMPILED_BINARY_LABELS = frozenset({
+    "executable", "elf_executable", "mach-o", "pe_executable",
+    "object", "library", "elf_library", "pe_library", "mach-o_library",
+    "java_bytecode", "python_bytecode", "raw_binary", "unknown",
+    "archive_executable", "dex", "msi", "nupkg", "deb", "rpm", "apk",
+    "font", "firmware", "disk_image", "apple_desktop_services_store",
+    "compound_file_binary_format", "lnk", "cat", "mscompress", "cab",
+    "pcap", "wasm",
+})
+
+# FIFO configuration
+FIFO_READ_TIMEOUT = 60  # seconds
+FIFO_MAX_SIZE = 100 * 1024 * 1024  # 100MB max
+
+
 def detect_source_mimetype_from_bytes(data: bytes, filename_hint: Optional[str] = None) -> Optional[str]:
     """Detect MIME type from raw bytes using Magika.
     
@@ -138,18 +156,7 @@ def detect_source_mimetype_from_bytes(data: bytes, filename_hint: Optional[str] 
     try:
         magika_result = _magika_detector.identify_bytes(data)
         
-        # Same compiled binary detection as detect_source_mimetype
-        compiled_magika_labels = {
-            "executable", "elf_executable", "mach-o", "pe_executable",
-            "object", "library", "elf_library", "pe_library", "mach-o_library",
-            "java_bytecode", "python_bytecode", "raw_binary", "unknown",
-            "archive_executable", "dex", "msi", "nupkg", "deb", "rpm", "apk",
-            "font", "firmware", "disk_image", "apple_desktop_services_store",
-            "compound_file_binary_format", "lnk", "cat", "mscompress", "cab",
-            "pcap", "wasm",
-        }
-        
-        if magika_result.output.ct_label in compiled_magika_labels:
+        if magika_result.output.ct_label in COMPILED_BINARY_LABELS:
             return "application/x-compiled-binary"
         
         if magika_result.output.mime_type:
@@ -161,13 +168,84 @@ def detect_source_mimetype_from_bytes(data: bytes, filename_hint: Optional[str] 
             if guessed_mimetype:
                 return guessed_mimetype
                 
-    except Exception:
+    except Exception as e:
+        logging.debug(f"Magika detection failed: {e}")
         if filename_hint:
             guessed_mimetype, _ = mimetypes.guess_type(filename_hint)
             if guessed_mimetype:
                 return guessed_mimetype
     
     return None
+
+
+def _read_fifo_with_timeout(
+    filepath: str,
+    timeout: int = FIFO_READ_TIMEOUT,
+    max_size: int = FIFO_MAX_SIZE,
+) -> bytes:
+    """Read from a FIFO with timeout and size limit.
+    
+    Args:
+        filepath: Path to the FIFO
+        timeout: Maximum seconds to wait for data
+        max_size: Maximum bytes to read
+        
+    Returns:
+        Data read from the FIFO
+        
+    Raises:
+        TimeoutError: If no data received within timeout
+        ValueError: If data exceeds max_size
+        
+    Note:
+        If timeout occurs, the reader thread may continue running as a daemon.
+        This is acceptable since the process will clean up on exit.
+    """
+    import threading
+    
+    result = {"data": None, "error": None, "finished": False}
+    
+    def read_fifo():
+        try:
+            with open(filepath, 'rb') as f:
+                # Read in chunks to enforce size limit
+                chunks = []
+                total_size = 0
+                while True:
+                    chunk = f.read(8192)  # 8KB chunks
+                    if not chunk:
+                        break
+                    total_size += len(chunk)
+                    if total_size > max_size:
+                        result["error"] = ValueError(
+                            f"FIFO data exceeds {max_size/(1024*1024):.0f}MB limit"
+                        )
+                        return
+                    chunks.append(chunk)
+                result["data"] = b''.join(chunks)
+        except Exception as e:
+            result["error"] = e
+        finally:
+            result["finished"] = True
+    
+    # Run read in thread with timeout
+    read_thread = threading.Thread(target=read_fifo, daemon=True)
+    read_thread.start()
+    read_thread.join(timeout=timeout)
+    
+    if read_thread.is_alive():
+        # Thread is still blocking on open() - FIFO has no writer
+        logging.warning(
+            f"FIFO read timed out after {timeout}s - reader thread will be orphaned "
+            f"(cleanup occurs on process exit)"
+        )
+        raise TimeoutError(f"FIFO read timed out after {timeout}s - no data received")
+    
+    if result["error"]:
+        raise result["error"]
+    
+    return result["data"] or b''
+
 
 def detect_source_mimetype(source: str) -> Optional[str]:
     """Detect the MIME type of a source file, including compiled binaries."""
@@ -272,12 +350,16 @@ def scrape_file(
     if is_fifo(filepath):
         if verbose:
             print(f"[thepipe] Detected FIFO input: {filepath}")
-            print(f"[thepipe] Reading from pipe (will block until writer connects)...")
+            print(f"[thepipe] Reading from pipe (timeout: {FIFO_READ_TIMEOUT}s, max: {FIFO_MAX_SIZE/(1024*1024):.0f}MB)...")
         
         try:
-            # Read entire FIFO content into buffer (FIFOs are one-shot reads)
-            with open(filepath, 'rb') as f:
-                fifo_data = f.read()
+            # Read FIFO with timeout and size limit
+            fifo_data = _read_fifo_with_timeout(filepath)
+            
+            if not fifo_data:
+                if verbose:
+                    print(f"[thepipe] Empty FIFO - no data received")
+                return scraped_chunks
             
             if verbose:
                 print(f"[thepipe] Read {len(fifo_data)} bytes from FIFO")

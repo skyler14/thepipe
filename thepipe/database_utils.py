@@ -198,15 +198,31 @@ class DatabaseManager:
                 # Store path for cleanup
                 self._temp_path = temp_path
             elif self.db_type == "orc":
-                # Handle ORC files with DuckDB
+                # Handle ORC files with DuckDB via PyArrow
                 connection_str = f"duckdb://"
                 self.db = Database(connection_str, config_dict=config_dict)
                 
                 if self.verbose:
                     print(f"[thepipe] Creating view for ORC file: {self.connection_info}")
-                    
-                # DuckDB can read ORC files directly
-                self.db.execute(f"CREATE VIEW orc_data AS SELECT * FROM read_parquet('{self.connection_info}')")
+                
+                try:
+                    import pyarrow.orc as orc
+                except ImportError:
+                    raise ImportError(
+                        "pyarrow with ORC support is required to read ORC files. "
+                        "Install with: pip install 'pyarrow[orc]'"
+                    )
+                
+                try:
+                    orc_table = orc.read_table(self.connection_info)
+                except Exception as e:
+                    raise ValueError(f"Failed to read ORC file '{self.connection_info}': {e}")
+                
+                # NOTE: Using _connection (private API) because JupySQL's Database 
+                # doesn't expose register() for Arrow tables. This may break if 
+                # JupySQL refactors internals.
+                conn = self.db._connection
+                conn.register('orc_data', orc_table)
             elif self.db_type == "feather":
                 # Handle Feather/Arrow IPC files with DuckDB
                 connection_str = f"duckdb://"
@@ -215,12 +231,22 @@ class DatabaseManager:
                 if self.verbose:
                     print(f"[thepipe] Creating view for Feather/Arrow file: {self.connection_info}")
                 
-                # DuckDB reads feather via read_parquet or we use pyarrow
-                import pyarrow.feather as feather
-                import pyarrow as pa
-                table = feather.read_table(self.connection_info)
-                # Register the Arrow table with DuckDB
-                self.db.execute("CREATE VIEW feather_data AS SELECT * FROM table")
+                try:
+                    import pyarrow.feather as feather
+                except ImportError:
+                    raise ImportError(
+                        "pyarrow is required to read Feather/Arrow files. "
+                        "Install with: pip install pyarrow"
+                    )
+                
+                try:
+                    arrow_table = feather.read_table(self.connection_info)
+                except Exception as e:
+                    raise ValueError(f"Failed to read Feather file '{self.connection_info}': {e}")
+                
+                # NOTE: Using _connection (private API) - see ORC handler comment
+                conn = self.db._connection
+                conn.register('feather_data', arrow_table)
             elif self.db_type == "jsonl":
                 # Handle JSON Lines files with DuckDB
                 connection_str = f"duckdb://"

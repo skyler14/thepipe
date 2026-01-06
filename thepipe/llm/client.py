@@ -322,6 +322,7 @@ class LLMClient:
         self,
         messages: List[Dict],
         model: str,
+        timeout: int = 300,  # 5 minute default timeout
     ) -> LLMResponse:
         """
         Delegate query to calling agent via Named Pipes (FIFOs).
@@ -338,33 +339,37 @@ class LLMClient:
         """
         import tempfile
         import stat
-        import atexit
+        import select
+        import threading
         
-        # Create unique pipe names based on PID
+        # Create unique pipe names using PID + timestamp to avoid collisions
         pid = os.getpid()
+        timestamp = int(time.time() * 1000)  # Millisecond precision
         pipe_dir = Path(tempfile.gettempdir()) / "thepipe_pipes"
-        pipe_dir.mkdir(exist_ok=True)
+        pipe_dir.mkdir(mode=0o700, exist_ok=True)  # Secure permissions
         
-        query_pipe = pipe_dir / f"query_{pid}"
-        response_pipe = pipe_dir / f"response_{pid}"
+        query_pipe = pipe_dir / f"query_{pid}_{timestamp}"
+        response_pipe = pipe_dir / f"response_{pid}_{timestamp}"
         
-        # Cleanup function
+        # Track created pipes for cleanup
+        created_pipes = []
+        
         def cleanup_pipes():
-            for pipe in [query_pipe, response_pipe]:
+            """Clean up FIFO pipes."""
+            for pipe in created_pipes:
                 try:
                     if pipe.exists():
                         pipe.unlink()
-                except:
-                    pass
-        
-        atexit.register(cleanup_pipes)
+                except Exception as e:
+                    logger.debug(f"Failed to clean up pipe {pipe}: {e}")
         
         try:
-            # Create named pipes (FIFOs) if they don't exist
+            # Create named pipes (FIFOs)
             for pipe in [query_pipe, response_pipe]:
                 if pipe.exists():
-                    pipe.unlink()
-                os.mkfifo(str(pipe))
+                    pipe.unlink()  # Remove stale pipe
+                os.mkfifo(str(pipe), mode=0o600)  # Secure permissions
+                created_pipes.append(pipe)
             
             # Prepare query payload
             query_payload = {
@@ -374,6 +379,7 @@ class LLMClient:
                 "response_format": "text",
                 "query_pipe": str(query_pipe),
                 "response_pipe": str(response_pipe),
+                "timeout": timeout,
             }
             
             # Notify agent via stderr about the pipes
@@ -383,18 +389,59 @@ class LLMClient:
             print(json.dumps(query_payload, indent=2), file=sys.stderr, flush=True)
             print(f"{QUERY_END}", file=sys.stderr, flush=True)
             
-            # Write query to the query pipe (will block until agent reads)
-            logger.info(f"Writing query to {query_pipe}")
-            with open(query_pipe, 'w') as qp:
-                qp.write(json.dumps(query_payload))
-                qp.flush()
+            # Use threading with timeout for pipe operations
+            write_result = {"error": None}
+            read_result = {"content": None, "error": None}
             
-            # Read response from response pipe (will block until agent writes)
-            logger.info(f"Waiting for response on {response_pipe}")
+            def write_query():
+                try:
+                    with open(query_pipe, 'w') as qp:
+                        qp.write(json.dumps(query_payload))
+                        qp.flush()
+                except Exception as e:
+                    write_result["error"] = e
+            
+            def read_response():
+                try:
+                    with open(response_pipe, 'r') as rp:
+                        read_result["content"] = rp.read()
+                except Exception as e:
+                    read_result["error"] = e
+            
+            # Start write in thread (blocks until reader connects)
+            logger.info(f"Writing query to {query_pipe}")
             start_time = time.time()
             
-            with open(response_pipe, 'r') as rp:
-                content = rp.read()
+            # Split timeout between write and read phases
+            write_timeout = timeout // 2
+            
+            write_thread = threading.Thread(target=write_query, daemon=True)
+            write_thread.start()
+            write_thread.join(timeout=write_timeout)
+            
+            if write_thread.is_alive():
+                raise TimeoutError(f"Timeout after {write_timeout}s waiting for agent to read query")
+            if write_result["error"]:
+                raise write_result["error"]
+            
+            # Use remaining timeout for read
+            elapsed = time.time() - start_time
+            remaining_timeout = max(timeout - elapsed, 10)  # At least 10s for read
+            
+            # Read response in thread with timeout
+            logger.info(f"Waiting for response on {response_pipe} (timeout: {remaining_timeout:.0f}s)")
+            read_thread = threading.Thread(target=read_response, daemon=True)
+            read_thread.start()
+            read_thread.join(timeout=remaining_timeout)
+            
+            if read_thread.is_alive():
+                raise TimeoutError(f"Timeout after {remaining_timeout:.0f}s waiting for agent response")
+            if read_result["error"]:
+                raise read_result["error"]
+            
+            content = read_result["content"]
+            if content is None:
+                raise RuntimeError("No response received from agent")
             
             elapsed = time.time() - start_time
             logger.info(f"Received response in {elapsed:.2f}s")
@@ -407,6 +454,9 @@ class LLMClient:
                 output_tokens=0,
             )
             
+        except TimeoutError as e:
+            logger.error(f"Agent query timed out: {e}")
+            raise
         except Exception as e:
             logger.error(f"Agent query failed: {e}")
             raise RuntimeError(f"Agent communication failed: {e}")
