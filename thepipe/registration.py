@@ -147,7 +147,9 @@ when running inside an AI coding assistant (Antigravity, Claude Code, etc.).
 - **Code Analysis**: Dependency mapping, digests, semantic tagging (**USE THIS FOR CODE**)
 - **Files**: PDFs, DOCX, PPTX, images, audio, video, spreadsheets, Jupyter notebooks
 - **URLs**: Webpages, GitHub repos, YouTube (transcription), Google Drive
-- **Databases**: SQL/natural language queries against DuckDB, SQLite, PostgreSQL, MySQL
+- **Databases**: PostgreSQL, MySQL/MariaDB, SQLite, DuckDB, MS SQL Server, JDBC URLs
+- **Data Formats**: Parquet, ORC, Feather/Arrow, CSV, JSONL, Excel
+- **Stream Input**: Named pipes (FIFOs) with auto content-type detection
 - **Extraction**: JSON schema-based structured data extraction
 
 ---
@@ -167,7 +169,10 @@ thepipe <source> [options]
 | URL | `thepipe https://example.com` |
 | GitHub | `thepipe https://github.com/user/repo` |
 | YouTube | `thepipe https://youtube.com/watch?v=abc123` |
-| Database | `thepipe data.db --db` |
+| Database | `thepipe "postgresql://host/db" --db "SELECT *"` |
+| JDBC | `thepipe "jdbc:mysql://host/db" --db "SELECT *"` |
+| Data File | `thepipe data.parquet --db "SELECT * FROM parquet_data"` |
+| Named Pipe | `thepipe /tmp/my_fifo` (auto-detects content type) |
 
 ---
 
@@ -228,6 +233,28 @@ thepipe <database> --db [query] [options]
 | `--db "SELECT * FROM users"` | Execute SQL query |
 | `--db "What products sold most?"` | Natural language query (requires LLM) |
 
+### Connection Formats
+| Format | Example |
+|--------|---------|
+| PostgreSQL | `postgresql://user:pass@host:5432/db` |
+| MySQL | `mysql://user:pass@host:3306/db` |
+| MariaDB | `mariadb://user:pass@host:3306/db` |
+| SQLite | `sqlite:///path/to/database.db` |
+| DuckDB | `duckdb:///path/to/database.duckdb` |
+| MS SQL Server | `mssql://user:pass@host:1433/db` |
+| JDBC MySQL | `jdbc:mysql://host:3306/db` (auto-converted) |
+| JDBC PostgreSQL | `jdbc:postgresql://host:5432/db` (auto-converted) |
+
+### Data File Formats
+| Format | Extensions | View Name |
+|--------|------------|-----------|
+| Parquet | `.parquet`, `.parq` | `parquet_data` |
+| ORC | `.orc` | `orc_data` |
+| Feather/Arrow | `.feather`, `.arrow`, `.ipc` | `feather_data` |
+| JSON Lines | `.jsonl`, `.ndjson` | `jsonl_data` |
+| CSV | `.csv` | `csv_data` |
+| Excel | `.xlsx`, `.xls` | `excel_data` |
+
 ### Options (via `--options`)
 ```json
 {
@@ -240,8 +267,6 @@ thepipe <database> --db [query] [options]
   }
 }
 ```
-
-**Supported databases:** SQLite, DuckDB, PostgreSQL, MySQL, Parquet, CSV, Excel
 
 ---
 

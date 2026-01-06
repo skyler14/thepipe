@@ -115,6 +115,60 @@ def initialize_video_processing():
         except ImportError:
             raise ImportError("yt-dlp library not found. Please install it with: pip install yt-dlp")
 
+def is_fifo(path: str) -> bool:
+    """Check if a path is a named pipe (FIFO)."""
+    import stat
+    try:
+        return os.path.exists(path) and stat.S_ISFIFO(os.stat(path).st_mode)
+    except (OSError, IOError):
+        return False
+
+def detect_source_mimetype_from_bytes(data: bytes, filename_hint: Optional[str] = None) -> Optional[str]:
+    """Detect MIME type from raw bytes using Magika.
+    
+    Used for FIFOs and other streams where we can't use identify_path().
+    
+    Args:
+        data: Raw bytes to analyze
+        filename_hint: Optional filename for extension-based fallback
+    
+    Returns:
+        MIME type string or None
+    """
+    try:
+        magika_result = _magika_detector.identify_bytes(data)
+        
+        # Same compiled binary detection as detect_source_mimetype
+        compiled_magika_labels = {
+            "executable", "elf_executable", "mach-o", "pe_executable",
+            "object", "library", "elf_library", "pe_library", "mach-o_library",
+            "java_bytecode", "python_bytecode", "raw_binary", "unknown",
+            "archive_executable", "dex", "msi", "nupkg", "deb", "rpm", "apk",
+            "font", "firmware", "disk_image", "apple_desktop_services_store",
+            "compound_file_binary_format", "lnk", "cat", "mscompress", "cab",
+            "pcap", "wasm",
+        }
+        
+        if magika_result.output.ct_label in compiled_magika_labels:
+            return "application/x-compiled-binary"
+        
+        if magika_result.output.mime_type:
+            return magika_result.output.mime_type
+        
+        # Fallback to extension if we have a filename hint
+        if filename_hint:
+            guessed_mimetype, _ = mimetypes.guess_type(filename_hint)
+            if guessed_mimetype:
+                return guessed_mimetype
+                
+    except Exception:
+        if filename_hint:
+            guessed_mimetype, _ = mimetypes.guess_type(filename_hint)
+            if guessed_mimetype:
+                return guessed_mimetype
+    
+    return None
+
 def detect_source_mimetype(source: str) -> Optional[str]:
     """Detect the MIME type of a source file, including compiled binaries."""
     if not os.path.isfile(source):
@@ -204,12 +258,76 @@ def scrape_file(
     include_output_images: bool = True,
     options: Optional[Dict[str, Any]] = None,
 ) -> List[Chunk]:
-    """Scrapes content from various file types, optionally omitting compiled binaries."""
+    """Scrapes content from various file types, optionally omitting compiled binaries.
+    
+    Also supports named pipes (FIFOs) as input - will read entire content and detect type.
+    """
     if chunking_method is None:
         from .chunker import chunk_by_page
         chunking_method = chunk_by_page
 
     scraped_chunks = []
+    
+    # Handle FIFO (named pipe) inputs
+    if is_fifo(filepath):
+        if verbose:
+            print(f"[thepipe] Detected FIFO input: {filepath}")
+            print(f"[thepipe] Reading from pipe (will block until writer connects)...")
+        
+        try:
+            # Read entire FIFO content into buffer (FIFOs are one-shot reads)
+            with open(filepath, 'rb') as f:
+                fifo_data = f.read()
+            
+            if verbose:
+                print(f"[thepipe] Read {len(fifo_data)} bytes from FIFO")
+            
+            # Detect content type from bytes using Magika
+            source_mimetype = detect_source_mimetype_from_bytes(fifo_data)
+            
+            if source_mimetype is None:
+                if verbose:
+                    print(f"[thepipe] Could not detect content type from FIFO data")
+                return scraped_chunks
+            
+            if verbose:
+                print(f"[thepipe] Detected FIFO content type: {source_mimetype}")
+            
+            # Write to temp file so existing scrapers can process it
+            import tempfile
+            suffix = mimetypes.guess_extension(source_mimetype) or ''
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(fifo_data)
+                temp_filepath = tmp.name
+            
+            try:
+                # Recursively call scrape_file with the temp file
+                scraped_chunks = scrape_file(
+                    filepath=temp_filepath,
+                    verbose=verbose,
+                    chunking_method=chunking_method,
+                    openai_client=openai_client,
+                    model=model,
+                    text_only=text_only,
+                    include_input_images=include_input_images,
+                    include_output_images=include_output_images,
+                    options=options,
+                )
+                # Update path references to point to original FIFO
+                for chunk in scraped_chunks:
+                    if chunk.path == temp_filepath:
+                        chunk.path = filepath
+            finally:
+                # Cleanup temp file
+                os.unlink(temp_filepath)
+            
+            return scraped_chunks
+            
+        except Exception as e:
+            if verbose:
+                print(f"[thepipe] Error reading from FIFO: {e}")
+            return scraped_chunks
+    
     source_mimetype = detect_source_mimetype(filepath)
 
     # Determine if compiled binaries should be read
