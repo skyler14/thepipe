@@ -1,5 +1,6 @@
 # cookie_utils.py
 import json
+import logging
 import sys
 import os
 import webbrowser
@@ -7,6 +8,8 @@ from typing import Dict, List, Optional, Any, Union, Tuple
 from urllib.parse import urlparse
 import rookiepy
 from .core import Chunk
+
+logger = logging.getLogger(__name__)
 
 # Browser type enum for compatibility
 class BrowserType:
@@ -79,8 +82,8 @@ def get_system_default_browser() -> Optional[Tuple[str, str]]:
                     return BrowserType.EDGE, r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
                 elif 'Brave' in prog_id:
                     return BrowserType.BRAVE, r'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
-        except:
-            pass
+        except (OSError, ImportError) as e:
+            logger.debug(f"Failed to detect Windows default browser: {e}")
     elif sys.platform == 'darwin':
         try:
             import subprocess
@@ -96,8 +99,8 @@ def get_system_default_browser() -> Optional[Tuple[str, str]]:
                 return BrowserType.SAFARI, '/Applications/Safari.app/Contents/MacOS/Safari'
             elif 'brave' in output:
                 return BrowserType.BRAVE, '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
-        except:
-            pass
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.debug(f"Failed to detect macOS default browser: {e}")
     return None
 
 def get_domain_cookies(domain_or_url: str, browser_type: Optional[str] = None) -> List[Dict[str, Any]]:

@@ -4,6 +4,7 @@ This module provides a clean interface for database operations in thepipe.
 """
 
 from typing import Dict, List, Optional, Any, Union, Tuple
+import logging
 import os
 import pandas as pd
 import json
@@ -19,6 +20,8 @@ from .database_analysis import execute_fallback, format_analysis_for_llm, get_al
 # Constants
 DEFAULT_MAX_ROWS = 15
 DEFAULT_PREVIEW_ROWS = 5
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
@@ -418,10 +421,11 @@ class DatabaseManager:
                     try:
                         result = self.db.execute("SHOW TABLES")
                         tables = result.iloc[:, 0].tolist() if not result.empty else []
-                    except:
+                    except Exception as e:
+                        logger.error(f"Failed to retrieve table list: {e}", exc_info=True)
                         return Chunk(
                             path=f"database://{self.db_type}/schema",
-                            texts=["Could not retrieve schema information"]
+                            text=f"Could not retrieve schema information: {type(e).__name__}: {e}"
                         )
                 
                 if self.verbose:
@@ -449,12 +453,14 @@ class DatabaseManager:
                                 schema_info += "|--------|------|----------|--------|\n"
                                 for _, row in columns_df.iterrows():
                                     schema_info += f"| {row['column_name']} | {row['data_type']} | {row['is_nullable']} | {row['column_default'] or 'NULL'} |\n"
-                            except:
+                            except Exception as e:
+                                logger.debug(f"Failed to get detailed schema for {table}: {e}")
                                 # Fallback to basic DESCRIBE
                                 try:
                                     describe_df = self.db.query(f"DESCRIBE {table}")
                                     schema_info += describe_df.to_markdown()
-                                except:
+                                except Exception as e2:
+                                    logger.warning(f"DESCRIBE also failed for {table}: {e2}")
                                     schema_info += f"*Schema information not available for this table*\n\n"
                     except Exception as e:
                         schema_info += f"*Error retrieving schema: {str(e)}*\n\n"
