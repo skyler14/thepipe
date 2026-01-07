@@ -307,3 +307,32 @@ class test_scraper(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ============================================================================
+# FIFO Input Tests (consolidated from test_fifo_input.py)
+# ============================================================================
+
+class TestFIFOInput(unittest.TestCase):
+    """Tests for FIFO input handling."""
+    
+    def test_is_fifo_with_regular_file(self):
+        """is_fifo should return False for regular files."""
+        with tempfile.NamedTemporaryFile() as f:
+            self.assertFalse(scraper.is_fifo(f.name))
+    
+    def test_is_fifo_with_actual_fifo(self):
+        """is_fifo should return True for named pipes."""
+        import stat
+        fifo_path = tempfile.mktemp(suffix='_test_fifo')
+        try:
+            os.mkfifo(fifo_path)
+            self.assertTrue(scraper.is_fifo(fifo_path))
+        finally:
+            if os.path.exists(fifo_path):
+                os.unlink(fifo_path)
+    
+    def test_compiled_binary_labels_is_frozenset(self):
+        """COMPILED_BINARY_LABELS should be a frozenset for performance."""
+        self.assertIsInstance(scraper.COMPILED_BINARY_LABELS, frozenset)
+        self.assertGreater(len(scraper.COMPILED_BINARY_LABELS), 20)

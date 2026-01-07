@@ -308,10 +308,11 @@ def _categorize_files(
         return primary_files, set(), excluded_files
     
     if mode == "map":
-        # Everything as digest, no primary files (unless patterns specified)
+        # Map mode: ALL matched files become digests, no full code output
+        # The include_patterns filter defines the universe of files to map
         if include_patterns:
-            n1_files = all_files - primary_files
-            return primary_files, n1_files, set()
+            # Matched files become digests, everything else is excluded
+            return set(), primary_files, all_files - primary_files
         else:
             # No patterns = all files as digests
             return set(), all_files, set()
