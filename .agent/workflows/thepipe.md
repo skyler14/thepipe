@@ -5,17 +5,42 @@ description: Extract data from files, URLs, databases using thepipe. Use when as
 # Tool: thepipe
 **Description**: Extract clean markdown, text, images, and structured data from any file, URL, or database.
 
-> **⚡ FOR CODE/REPOS: ALWAYS use `--options '{"code_relations": "auto"}'`**
+> **FOR CODE/REPOS: ALWAYS use `--options '{"code_relations": "auto"}'`**
 > This gives 90%+ token savings while preserving full code context via intelligent digests.
 
+## Installation
+
+**From PyPI (Recommended):**
+```bash
+pip install thepipe-api
+```
+
+**From Source (Development):**
+```bash
+git clone https://github.com/emcf/thepipe
+cd thepipe
+pip install -r requirements.txt
+pip install -e .
+```
+
 ## Invocation
+
+**After PyPI install:**
+```bash
+thepipe
+```
+
+**If installed in conda environment:**
 ```bash
 /opt/anaconda3/envs/thepipe/bin/thepipe
+# or activate the environment first:
+conda activate thepipe
+thepipe
 ```
 
 ---
 
-## 🔥 Code Analysis (USE THIS FOR PROGRAMMING TASKS)
+## Code Analysis (USE THIS FOR PROGRAMMING TASKS)
 
 **When working with code directories or GitHub repos, ALWAYS enable code analysis:**
 
