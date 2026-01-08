@@ -472,7 +472,7 @@ class DatabaseManager:
                 
             return Chunk(
                 path=f"database://{self.db_type}/schema",
-                texts=[schema_info]
+                text=schema_info
             )
             
         except Exception as e:
@@ -482,7 +482,7 @@ class DatabaseManager:
                 traceback.print_exc()
             return Chunk(
                 path=f"database://{self.db_type}/schema",
-                texts=[f"Error retrieving schema: {str(e)}"]
+                text=f"Error retrieving schema: {str(e)}"
             )
 
     def get_preview(self, max_rows: int = DEFAULT_PREVIEW_ROWS) -> Chunk:
@@ -587,10 +587,11 @@ class DatabaseManager:
                         try:
                             result = self.db.execute("SHOW TABLES")
                             tables = result.iloc[:, 0].tolist() if not result.empty else []
-                        except:
+                        except Exception as e:
+                            logger.error(f"Failed to retrieve preview tables: {e}", exc_info=True)
                             return Chunk(
                                 path=f"database://{self.db_type}/preview",
-                                texts=["Could not retrieve table information"]
+                                text=f"Could not retrieve table information: {type(e).__name__}: {e}"
                             )
                     
                     # Get preview for each table
@@ -618,7 +619,7 @@ class DatabaseManager:
             
             return Chunk(
                 path=f"database://{self.db_type}/preview",
-                texts=[preview_text]
+                text=preview_text
             )
             
         except Exception as e:
@@ -626,7 +627,7 @@ class DatabaseManager:
                 print(f"[thepipe] Error generating data preview: {str(e)}")
             return Chunk(
                 path=f"database://{self.db_type}/preview",
-                texts=[f"Error generating data preview: {str(e)}"]
+                text=f"Error generating data preview: {str(e)}"
             )
     
     def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Chunk]:
@@ -731,7 +732,7 @@ class DatabaseManager:
         
         schema_chunk = Chunk(
             path=f"database://{self.db_type}/schema",
-            texts=[combined_text]
+            text=combined_text
         )
         chunks = [schema_chunk]
         
@@ -767,7 +768,7 @@ class DatabaseManager:
             
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/query",
-                texts=[result_text]
+                text=result_text
             ))
             
             return chunks
@@ -778,7 +779,7 @@ class DatabaseManager:
             
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/error",
-                texts=[f"Error executing query: {str(e)}"]
+                text=f"Error executing query: {str(e)}"
             ))
             
             return chunks
@@ -823,7 +824,7 @@ class DatabaseManager:
         llm_client = LLMClient.from_options(options=options)
         
         chunks = []
-        schema_chunk = Chunk(path=f"database://{self.db_type}/schema", texts=[schema_text])
+        schema_chunk = Chunk(path=f"database://{self.db_type}/schema", text=schema_text)
         chunks.append(schema_chunk)
         
         executed_queries = []
@@ -879,7 +880,7 @@ class DatabaseManager:
         # Save strategy as a chunk
         strategy_chunk = Chunk(
             path=f"database://{self.db_type}/strategy",
-            texts=[f"## Query Strategy\n\n{strategy_text}"]
+            text=f"## Query Strategy\n\n{strategy_text}"
         )
         chunks.append(strategy_chunk)
         
@@ -1037,7 +1038,7 @@ class DatabaseManager:
                     final_report += df.head(15).to_json(orient='records', indent=2)
                     final_report += "\n```\n\n"
         
-        chunks.append(Chunk(path=f"database://{self.db_type}/insights", texts=[final_report]))
+        chunks.append(Chunk(path=f"database://{self.db_type}/insights", text=final_report))
         return chunks
 
     def process_nl_query(self, natural_language_query: str, llm_config: Optional[Dict[str, Any]] = None, 
@@ -1063,7 +1064,7 @@ class DatabaseManager:
         if not view_name:
             chunks = [Chunk(
                 path=f"database://{self.db_type}/error",
-                texts=["Could not determine database table name. Please provide a table name explicitly."]
+                text="Could not determine database table name. Please provide a table name explicitly."
             )]
             return chunks
         
@@ -1152,7 +1153,7 @@ class DatabaseManager:
         
         schema_chunk = Chunk(
             path=f"database://{self.db_type}/schema",
-            texts=[combined_text]
+            text=combined_text
         )
         chunks = [schema_chunk]
         
@@ -1164,7 +1165,7 @@ class DatabaseManager:
         if not llm_config:
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/error",
-                texts=["Natural language queries require LLM configuration."]
+                text="Natural language queries require LLM configuration."
             ))
             return chunks
         
@@ -1197,7 +1198,7 @@ class DatabaseManager:
             if options['llm_provider'] != 'agent' and not options.get('api_key') and not os.environ.get('OPENAI_API_KEY'):
                 chunks.append(Chunk(
                     path=f"database://{self.db_type}/error",
-                    texts=["API key is required for natural language queries."]
+                    text="API key is required for natural language queries."
                 ))
                 return chunks
             
@@ -1260,7 +1261,7 @@ class DatabaseManager:
                 
                 chunks.append(Chunk(
                     path=f"database://{self.db_type}/debug",
-                    texts=[result_text]
+                    text=result_text
                 ))
                 return chunks
                 
@@ -1295,7 +1296,7 @@ class DatabaseManager:
                 
                 chunks.append(Chunk(
                     path=f"database://{self.db_type}/nl_query",
-                    texts=[result_text]
+                    text=result_text
                 ))
                 
             except Exception as e:
@@ -1313,7 +1314,7 @@ class DatabaseManager:
         except Exception as e:
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/error",
-                texts=[f"Error processing natural language query: {str(e)}"]
+                text=f"Error processing natural language query: {str(e)}"
             ))
             
             return chunks
@@ -1323,16 +1324,16 @@ class DatabaseManager:
         if hasattr(self, '_temp_path') and os.path.exists(self._temp_path):
             try:
                 os.unlink(self._temp_path)
-            except:
-                pass
+            except OSError as e:
+                logger.debug(f"Failed to delete temp file {self._temp_path}: {e}")
         
         # Close the database connection
         if self.db:
             try:
                 if hasattr(self.db, 'close'):
                     self.db.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to close database connection: {e}")
 
 def parse_database_args(args) -> None:
     """
@@ -1498,7 +1499,7 @@ def process_database(
             traceback.print_exc()
         return [Chunk(
             path=f"database://{db_type if db_type else 'unknown'}/error",
-            texts=[f"Error processing database: {str(e)}"]
+            text=f"Error processing database: {str(e)}"
         )]
         
 def is_sql(query: str) -> bool:

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any, Set
 from pathlib import Path
 import json
+import logging
 import os
 import requests
 import tempfile
@@ -11,6 +12,8 @@ from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from .core import Chunk
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class DriveFile:
@@ -341,7 +344,8 @@ def get_file_metadata(file_id: str) -> Optional[str]:
                                 re.IGNORECASE)
                 if match:
                     return match.group(1).strip()
-        except:
+        except (requests.RequestException, OSError) as e:
+            logger.debug(f"Failed to fetch metadata from {url}: {e}")
             continue
             
     return None
@@ -690,5 +694,5 @@ def process_drive_content(
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
-            except:
-                pass
+            except OSError as e:
+                logger.debug(f"Failed to delete temp file {temp_file_path}: {e}")

@@ -517,5 +517,5 @@ def execute_fallback(query: str, db_instance, view_name: str,
     except Exception as e:
         result_text += f"*Error executing fallback query: {str(e)}*"
     
-    chunks.append(Chunk(path=f"database://fallback", texts=[result_text]))
+    chunks.append(Chunk(path=f"database://fallback", text=result_text))
     return chunks

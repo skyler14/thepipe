@@ -9,9 +9,12 @@ across different database technologies and connection types.
 
 from typing import Union, Optional, Any, Dict, List
 import pandas as pd
+import logging
 import os
 import importlib.util
 import warnings
+
+logger = logging.getLogger(__name__)
 
 # Check if JupySQL is installed
 JUPYSQL_AVAILABLE = importlib.util.find_spec("sql") is not None
@@ -42,7 +45,8 @@ class Database:
                 import subprocess
                 subprocess.check_call(["pip", "install", "jupysql", "--quiet"])
                 JUPYSQL_AVAILABLE = True
-            except:
+            except (subprocess.CalledProcessError, OSError) as e:
+                logger.error(f"Failed to install JupySQL: {e}", exc_info=True)
                 raise ImportError(
                     "JupySQL is required but not installed. Please install it with: pip install jupysql"
                 )

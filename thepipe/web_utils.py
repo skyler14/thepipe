@@ -1,6 +1,7 @@
 import fnmatch
 from io import BytesIO
 import io
+import logging
 import os
 import re
 from typing import Any, Dict, List, Optional, Set, Union
@@ -13,6 +14,8 @@ import markdownify
 from thepipe.core import HOST_IMAGES, Chunk, make_image_url
 
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 USER_AGENT_STRING: str = os.getenv("USER_AGENT_STRING", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3")
 
@@ -89,7 +92,7 @@ def extract_page_content(url: str, text_only: bool = False, verbose: bool = Fals
                     try:
                         image = Image.open(requests.get(img_path, stream=True).raw)
                         images.append(image)
-                    except:
+                    except (OSError, requests.RequestException) as e:
                         if 'https://' not in img_path and 'http://' not in img_path:
                             try:
                                 while img_path.startswith('/'):
@@ -97,12 +100,12 @@ def extract_page_content(url: str, text_only: bool = False, verbose: bool = Fals
                                 path_with_schema = urlparse(url).scheme + "://" + img_path
                                 image = Image.open(requests.get(path_with_schema, stream=True).raw)
                                 images.append(image)
-                            except:
+                            except (OSError, requests.RequestException) as e:
                                 try:
                                     path_with_schema_and_netloc = urlparse(url).scheme + "://" + urlparse(url).netloc + "/" + img_path
                                     image = Image.open(requests.get(path_with_schema_and_netloc, stream=True).raw)
                                     images.append(image)
-                                except:
+                                except (OSError, requests.RequestException) as e:
                                     if verbose: print(f"[thepipe] Ignoring error loading image {img_path}")
                                     continue  # Ignore incompatible image extractions
                         else:
