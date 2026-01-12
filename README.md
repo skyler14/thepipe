@@ -248,6 +248,26 @@ python -m playwright install --with-deps chromium
 
 ---
 
+## AI Registration
+
+thepipe can self-register with your AI coding assistant, enabling it to call the tool directly.
+
+```bash
+# Register with Claude Code
+thepipe --register code
+
+# Register with Google Antigravity
+thepipe --register agent
+
+# Show all registration options
+thepipe --register help
+
+# Generate manual instructions for any chat interface (ChatGPT, Claude.ai, etc.)
+thepipe --register
+```
+
+---
+
 ## Contributing
 
 ```bash
