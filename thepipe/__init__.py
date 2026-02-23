@@ -76,8 +76,8 @@ def parse_arguments() -> argparse.Namespace:
         "--register",
         nargs='?',
         const='none',  # Default if flag present without argument
-        choices=['none', 'code', 'agent', 'help', 'mcp'],
-        help="Register thepipe with AI platforms: none (stdout), code (Claude), agent (Antigravity), help (docs), mcp (server)"
+        choices=['none', 'code', 'agent', 'codex', 'help', 'mcp'],
+        help="Register thepipe with AI platforms: none (stdout), code (Claude), agent (Antigravity), codex (AGENTS.md), help (docs), mcp (server)"
     )
     args = parser.parse_args()
     
@@ -137,7 +137,7 @@ def main() -> None:
     if hasattr(args, 'register') and args.register is not None:
         from .registration import (
             register_stdout, register_claude_code, register_antigravity,
-            register_help, register_mcp
+            register_codex, register_help, register_mcp
         )
         
         mode = args.register
@@ -154,6 +154,9 @@ def main() -> None:
             if agents_path:
                 print(f"✓ Updated: {agents_path}")
             print(f"✓ Added to auto-execute allowlist")
+        elif mode == 'codex':
+            path = register_codex(target_dir)
+            print(f"✓ Registered with Codex at: {path}")
         elif mode == 'help':
             print(register_help())
         elif mode == 'mcp':

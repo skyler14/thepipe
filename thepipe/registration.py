@@ -548,6 +548,79 @@ See `.agent/workflows/thepipe.md` for detailed documentation.
     return workflow_file, agents_md_updated
 
 
+def register_codex(target_dir: Optional[str] = None) -> Path:
+    """Register thepipe for Codex by writing AGENTS.md instructions."""
+    import sys
+
+    base_dir = Path(target_dir or os.getcwd())
+    agents_file = base_dir / "AGENTS.md"
+
+    thepipe_cmd = _get_thepipe_path()
+    python_exe = sys.executable
+
+    begin_marker = "<!-- thepipe-codex:begin -->"
+    end_marker = "<!-- thepipe-codex:end -->"
+
+    block = f"""{begin_marker}
+## thepipe
+
+Use thepipe for file/URL/database extraction and codebase mapping.
+
+### Absolute Paths (Codex)
+- `thepipe`: `{thepipe_cmd}`
+- `python`: `{python_exe}`
+
+### Recommended Commands
+```bash
+{thepipe_cmd} ./repo --options '{{"code_relations": "auto"}}' -f
+{thepipe_cmd} ./repo --include_patterns "src/*.py" --options '{{"code_relations": "mapnn"}}' -f
+```
+
+### Notes
+- Use the absolute `thepipe` path above instead of relying on shell PATH.
+- Prefer `code_relations` modes for programming/repo analysis tasks.
+{end_marker}
+"""
+
+    if agents_file.exists():
+        existing = agents_file.read_text(encoding="utf-8")
+        begin_count = existing.count(begin_marker)
+        end_count = existing.count(end_marker)
+
+        if begin_count == 0 and end_count == 0:
+            if existing.endswith("\n\n"):
+                sep = ""
+            elif existing.endswith("\n"):
+                sep = "\n"
+            elif existing:
+                sep = "\n\n"
+            else:
+                sep = ""
+            updated = existing + sep + block + "\n"
+        elif begin_count == 1 and end_count == 1:
+            start = existing.index(begin_marker)
+            end = existing.index(end_marker, start) + len(end_marker)
+            prefix = existing[:start].rstrip()
+            suffix = existing[end:]
+            updated = (prefix + "\n\n" if prefix else "") + block
+            if suffix:
+                if not suffix.startswith("\n"):
+                    updated += "\n"
+                updated += suffix
+            else:
+                updated += "\n"
+        else:
+            raise ValueError(
+                "AGENTS.md contains malformed or duplicate thepipe codex markers; "
+                "please fix markers before re-running --register codex"
+            )
+    else:
+        updated = block + "\n"
+
+    agents_file.write_text(updated, encoding="utf-8")
+    return agents_file
+
+
 def _add_to_allowlist(base_dir: Path):
     """Add thepipe to auto-execute allowlist in .agent/config.json"""
     config_file = base_dir / ".agent" / "config.json"
@@ -590,10 +663,13 @@ To install my capabilities into your AI development environment:
    - Updates `AGENTS.md` if present
    - Adds to auto-execute allowlist
 
-3. **Manual/Chat**: Run `thepipe --register`
+3. **Codex**: Run `thepipe --register codex`
+   - Creates or updates `AGENTS.md` with absolute thepipe/python paths
+
+4. **Manual/Chat**: Run `thepipe --register`
    - Outputs markdown to copy-paste into chat interfaces
 
-4. **MCP Server**: Run `thepipe --register mcp` (coming soon)
+5. **MCP Server**: Run `thepipe --register mcp` (coming soon)
    - Registers as persistent Model Context Protocol server
 
 After registration, you can call me directly without manual prompting in future conversations.
