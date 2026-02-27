@@ -11,6 +11,7 @@ Usage:
     register_all_resolvers()
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -20,6 +21,23 @@ from .types import DependencyEdge
 from .dependency_map import register_resolver
 
 logger = logging.getLogger(__name__)
+
+_SWIFT_SYSTEM_FRAMEWORKS = {
+    'Accessibility', 'ActivityKit', 'AppKit', 'ARKit', 'AVFoundation',
+    'ClockKit', 'CloudKit', 'Combine', 'Contacts', 'CoreBluetooth',
+    'CoreData', 'CoreFoundation', 'CoreGraphics', 'CoreImage', 'CoreLocation',
+    'CoreML', 'CoreMotion', 'CryptoKit', 'Darwin', 'Dispatch', 'EventKit',
+    'FileProvider', 'Foundation', 'GameKit', 'GroupActivities', 'HealthKit',
+    'Intents', 'LocalAuthentication', 'MapKit', 'MediaPlayer', 'Metal',
+    'MetalKit', 'MusicKit', 'NaturalLanguage', 'Network', 'ObjectiveC',
+    'Observation', 'OSLog', 'PassKit', 'PDFKit', 'PencilKit', 'Photos',
+    'QuartzCore', 'RealityKit', 'ReplayKit', 'SafariServices', 'SceneKit',
+    'ShazamKit', 'Speech', 'SpriteKit', 'StoreKit', 'Swift', 'SwiftData',
+    'SwiftUI', 'TipKit', 'UIKit', 'UserNotifications', 'VideoToolbox',
+    'Vision', 'WatchConnectivity', 'WatchKit', 'WebKit', 'WidgetKit',
+    'XCTest', 'os',
+}
+_SWIFT_SYSTEM_FRAMEWORKS_LOWER = {name.casefold() for name in _SWIFT_SYSTEM_FRAMEWORKS}
 
 
 # ============================================================================
@@ -58,6 +76,21 @@ def resolve_dart_import(
     
     # Package imports (external - from pub.dev or local packages)
     if import_path.startswith('package:'):
+        pkg_match = re.match(r'package:([^/]+)/(.*)', import_path)
+        if pkg_match:
+            pkg_name = pkg_match.group(1)
+            rel_path = pkg_match.group(2)
+
+            local_match = mapper.lookup_dart_package_file(pkg_name, rel_path)
+
+            if local_match:
+                return DependencyEdge(
+                    from_file=from_file,
+                    to_file=local_match,
+                    import_statement=import_stmt.strip(),
+                    is_external=False
+                )
+
         return DependencyEdge(
             from_file=from_file,
             to_file=import_path,
@@ -91,7 +124,10 @@ def resolve_dart_import(
                 # File outside repo root
                 pass
     except Exception as e:
-        logger.debug(f"Dart import resolution failed for '{import_path}': {e}")
+        logger.warning(
+            f"Dart import resolution failed for '{import_path}'",
+            exc_info=True,
+        )
     
     return None
 
@@ -113,28 +149,43 @@ def resolve_swift_import(
     - import UIKit                -> System framework (external)
     - import MyModule             -> Could be local module (need to resolve)
     - @_exported import X         -> Re-exported import
+    - @testable import X          -> Test dependencies
+    - import class MyModule.Foo   -> Import specific symbol
     
     Note: Swift uses module-based imports, not file-based. 
     Local file dependencies are implicit through the same module.
     We mark system frameworks as external.
     """
     # Extract module name from import statement
-    match = re.search(r'import\s+(?:class\s+|struct\s+|enum\s+|func\s+)?(\w+)', import_stmt)
-    if not match:
+    # Captures the last part of the import path, ignoring attributes and kinds
+    # e.g., "@testable import class Module.Submodule" -> "Module.Submodule"
+    
+    # Cleaning the statement first
+    clean_stmt = import_stmt.strip()
+    
+    # 1. Remove attributes (starting with @)
+    clean_stmt = re.sub(r'@\w+(?:\([^)]*\))?\s*', '', clean_stmt)
+    
+    # 2. Remove 'import' keyword
+    if clean_stmt.startswith('import '):
+        clean_stmt = clean_stmt[7:].strip()
+    
+    # 3. Remove import kind (struct, class, enum, func, etc.) if present
+    # These are usually followed by the module path
+    import_kinds = {'typealias', 'struct', 'class', 'enum', 'protocol', 'let', 'var', 'func'}
+    parts = clean_stmt.split()
+    if parts and parts[0] in import_kinds:
+        clean_stmt = " ".join(parts[1:])
+        
+    module_path = clean_stmt.strip()
+    
+    if not module_path:
         return None
+        
+    # Get the top-level module name (e.g., "UIKit" from "UIKit.UIView")
+    module_name = module_path.split('.')[0]
     
-    module_name = match.group(1)
-    
-    # Common Swift system frameworks (external)
-    swift_system_frameworks = {
-        'Foundation', 'UIKit', 'SwiftUI', 'Combine', 'CoreData',
-        'CoreGraphics', 'CoreLocation', 'CoreMotion', 'CoreFoundation',
-        'Darwin', 'Dispatch', 'ObjectiveC', 'os', 'Swift', 'XCTest',
-        'HealthKit', 'WatchKit', 'ClockKit', 'WatchConnectivity',
-        'AVFoundation', 'MapKit', 'StoreKit', 'CloudKit', 'GameKit'
-    }
-    
-    if module_name in swift_system_frameworks:
+    if module_name.casefold() in _SWIFT_SYSTEM_FRAMEWORKS_LOWER:
         return DependencyEdge(
             from_file=from_file,
             to_file=module_name,
@@ -142,10 +193,12 @@ def resolve_swift_import(
             is_external=True
         )
     
-    # Try to find local module file (ModuleName.swift)
+    # Try to find a local module file by convention.
     possible_names = [
         f"{module_name}.swift",
         f"{module_name}/{module_name}.swift",
+        f"Sources/{module_name}.swift",
+        f"Sources/{module_name}/main.swift", 
     ]
     
     for name in possible_names:
@@ -157,7 +210,6 @@ def resolve_swift_import(
                 is_external=False
             )
     
-    # Unknown module - assume external (SPM package, etc.)
     return DependencyEdge(
         from_file=from_file,
         to_file=module_name,

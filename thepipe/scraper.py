@@ -449,7 +449,7 @@ def scrape_file(
             
     if chunking_method:
         scraped_chunks = chunking_method(scraped_chunks)
-        
+
     return scraped_chunks
 
 def scrape_html(

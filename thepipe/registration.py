@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 import json
 import os
+import sys
 
 def _add_to_gitignore(base_dir: Path, pattern: str):
     """Add pattern to .gitignore if not already present"""
@@ -27,323 +28,181 @@ def _add_to_gitignore(base_dir: Path, pattern: str):
 
 
 def _get_thepipe_path() -> str:
-    """Get the exact path to the thepipe executable"""
-    import sys
-    import shutil
-    import os
+    """Get the absolute path to invoke thepipe, independent of shell PATH.
     
-    # First try to find thepipe in PATH
-    thepipe_cmd = shutil.which('thepipe')
-    if thepipe_cmd:
-        return thepipe_cmd
+    Uses sys.executable to determine the Python environment's bin directory,
+    ensuring agents can invoke thepipe without relying on PATH resolution.
     
-    # Try to find thepipe in the same bin dir as python
-    python_bin = os.path.dirname(sys.executable)
-    thepipe_in_env = os.path.join(python_bin, 'thepipe')
+    Returns:
+        Absolute path to the thepipe executable, OR a python -m invocation.
+    """
+    # PRIMARY: Use sys.executable to find thepipe in the same bin directory
+    # This is the Pythonic equivalent of `which` for the current environment
+    python_bin_dir = os.path.dirname(sys.executable)
+    thepipe_in_env = os.path.join(python_bin_dir, 'thepipe')
+    
     if os.path.exists(thepipe_in_env):
         return thepipe_in_env
     
-    # Fall back to calling the module's main function directly
-    return f"{sys.executable} -c \"from thepipe import main; main()\""
+    # FALLBACK: Avoid `python -m thepipe` because thepipe may not ship __main__.py
+    return f'{sys.executable} -c "from thepipe import main; main()"'
 
 
 
 
-# Universal instruction template
-INSTRUCTION_TEMPLATE = """# Tool: thepipe
-**Description**: Extract clean markdown, text, images, and structured data from any file, URL, or database.
+# Universal instruction template - uses {thepipe_cmd} placeholder
+INSTRUCTION_TEMPLATE = """# thepipe
 
----
+Data extraction for files, URLs, databases. 165+ language AST support.
 
-## ⚡⚡⚡ CRITICAL: ALWAYS USE CODE_RELATIONS FOR PROGRAMMING TASKS ⚡⚡⚡
-
-**If the user's request involves code, repositories, or programming:**
+## Code Analysis (use for any programming task)
 
 ```bash
-# DEFAULT APPROACH - ALWAYS DO THIS FOR CODE
-thepipe ./path/to/repo --options '{"code_relations": "auto"}' -f
+{thepipe_cmd} ./repo --options '{"code_relations": "auto"}' -f
+# 90%+ token savings via intelligent digests
 ```
 
-**This gives:**
-- 🔥 **90%+ token savings** - intelligent digests preserve structure
-- 🔗 **Dependency mapping** - understands imports across files  
-- 🏷️ **Semantic tagging** - identifies auth, database, API, testing code
-- 📊 **Full context** - LLM understands entire codebase structure
-
-**Supported Languages (with dependency resolution):**
-| Language | Built-in | Dependency Mapping |
-|----------|----------|-------------------|
-| Python | ✅ Full | ✅ imports resolved |
-| JavaScript/TypeScript | ✅ Full | ✅ imports resolved |
-| Dart/Flutter | ✅ Full | ✅ imports resolved |
-| Swift | ✅ Full | ✅ framework detection |
-| Kotlin | ✅ Full | ✅ package detection |
-| Ruby | ✅ Full | ✅ require_relative |
-| Go, Rust, C/C++, Java | ✅ Full | ✅ imports resolved |
-| +155 more | ✅ AST | Pattern-based |
-
-> ⚠️ **WARNING**: Do NOT use generic patterns like `*.py` with `code_relations` mapping modes!
-> This marks ALL files as primary (full code), defeating the 90% token savings.
-> Either: (1) use NO include_patterns to let auto-mode decide, or (2) use specific 
-> file patterns like `src/api/*.py` to focus on relevant files only.
-
-**Correct Usage:**
+## Common Commands
 
 ```bash
-# ✅ GOOD - Let auto-mode decide what to include
-thepipe ./repo --options '{{"code_relations": "auto"}}' -f
+# PDF/document
+{thepipe_cmd} document.pdf -f
 
-# ✅ GOOD - Specific patterns for focused analysis
-thepipe ./repo --include_patterns "src/core/*.py" "src/api/*.py" --options '{{"code_relations": "auto"}}' -f
+# Directory with filter
+{thepipe_cmd} ./src --include_patterns "*.py" -f
 
-# ❌ BAD - Generic *.py defeats token savings (all files become primary)
-# thepipe ./repo --include_patterns "*.py" --options '{{"code_relations": "map"}}' -f
-```
+# URL
+{thepipe_cmd} https://example.com -f
 
 # GitHub repo with code analysis
-thepipe https://github.com/user/repo --options '{{"code_relations": "auto"}}' -f
+{thepipe_cmd} https://github.com/user/repo --options '{"code_relations": "auto"}' -f
+
+# Video/audio text extraction
+{thepipe_cmd} video.mp4 --text_only -f
 ```
 
----
+## Output Formats
+
+```bash
+{thepipe_cmd} source -f        # markdown to stdout
+{thepipe_cmd} source -f text   # raw text
+{thepipe_cmd} source -f json   # JSON array
+{thepipe_cmd} source           # writes to outputs/prompt.txt
+```
 
 ## Code Analysis Modes
 
-| Mode | When to Use |
-|------|-------------|
-| `auto` | **DEFAULT - picks optimal strategy based on repo size** |
-| `map` | Large repos (>100 files) - all files as digests |
-| `mapnn` | Focused work - primary files full, neighbors as digests |
-| `mapall` | Medium repos - primary full, rest as digests |
-| `limited` | Only include_patterns files (no digests) |
-
----
-
-## 🔄 Agent Mode (LLM Inference Delegation)
-
-**For agentic tasks requiring LLM inference, use `--llm-provider agent`:**
-
 ```bash
-thepipe data.pdf --extract '{{\"title\": \"str\"}}' --llm-provider agent
+# auto (default) - picks strategy based on repo size
+{thepipe_cmd} ./repo --options '{"code_relations": "auto"}' -f
+
+# map - all files as digests (large repos)
+{thepipe_cmd} ./repo --options '{"code_relations": "map"}' -f
+
+# mapnn - primary files full, neighbors as digests
+{thepipe_cmd} ./repo --include_patterns "src/*.py" --options '{"code_relations": "mapnn"}' -f
+
+# limited - only matched files, no digests
+{thepipe_cmd} ./repo --include_patterns "*.py" --options '{"code_relations": "limited"}' -f
 ```
 
-**How it works:** Named Pipes (FIFOs) provide true bidirectional, synchronous communication:
-1. thepipe creates two FIFOs in `/tmp/thepipe_pipes/`
-2. thepipe writes query to `query_<pid>` and **blocks**
-3. Agent reads query, executes LLM call, writes response to `response_<pid>`
-4. thepipe reads response and continues execution seamlessly
+## Code Analysis Parameters (`--options`)
 
-This lets thepipe pause while the agent handles inference, avoiding double API calls 
-when running inside an AI coding assistant (Antigravity, Claude Code, etc.).
-
-**Agent instructions:** When you see `<<<THEPIPE_LLM_QUERY>>>` in stderr:
-1. Read `QUERY_PIPE` path from the output
-2. Read the JSON query from that pipe
-3. Execute the LLM call with the messages
-4. Write your response to `RESPONSE_PIPE`
-
----
-
-## Core Capabilities
-- **Code Analysis**: Dependency mapping, digests, semantic tagging (**USE THIS FOR CODE**)
-- **Files**: PDFs, DOCX, PPTX, images, audio, video, spreadsheets, Jupyter notebooks
-- **URLs**: Webpages, GitHub repos, YouTube (transcription), Google Drive
-- **Databases**: PostgreSQL, MySQL/MariaDB, SQLite, DuckDB, MS SQL Server, JDBC URLs
-- **Data Formats**: Parquet, ORC, Feather/Arrow, CSV, JSONL, Excel
-- **Stream Input**: Named pipes (FIFOs) with auto content-type detection
-- **Extraction**: JSON schema-based structured data extraction
-
----
-
-## CLI Reference
-
-### Basic Syntax
-```bash
-thepipe <source> [options]
+```json
+{
+  "code_relations": "mapnn",
+  "code_n1": 3,
+  "code_n2": 5,
+  "code_nf": 100,
+  "code_nt": 150000
+}
 ```
 
-### Source Types
-| Source | Example |
-|--------|---------|
-| File | `thepipe document.pdf` |
-| Directory | `thepipe ./src` |
-| URL | `thepipe https://example.com` |
-| GitHub | `thepipe https://github.com/user/repo` |
-| YouTube | `thepipe https://youtube.com/watch?v=abc123` |
-| Database | `thepipe "postgresql://host/db" --db "SELECT *"` |
-| JDBC | `thepipe "jdbc:mysql://host/db" --db "SELECT *"` |
-| Data File | `thepipe data.parquet --db "SELECT * FROM parquet_data"` |
-| Named Pipe | `thepipe /tmp/my_fifo` (auto-detects content type) |
-
----
-
-## Output Options
-
-| Flag | Description |
-|------|-------------|
-| (none) | Write to `outputs/prompt.txt` |
-| `-f` or `-f md` | Stdout: Markdown with code fences |
-| `-f text` | Stdout: Raw concatenated text |
-| `-f json` | Stdout: Structured JSON array |
-| `--verbose` | Print status messages |
-
----
+- `code_n1`: Neighbor depth to include as digests in `mapnn`
+- `code_n2`: Cutoff depth in `mapnn`
+- `code_nf`: File-count threshold used by `auto`
+- `code_nt`: Token threshold used by `auto`
 
 ## File Filtering
 
-| Flag | Description |
-|------|-------------|
-| `--include_patterns "*.py" "*.ts"` | Glob patterns (recommended) |
-| `--include_regex ".*\\.py$"` | Regex pattern |
-
-**Examples:**
 ```bash
-# Only Python files
-thepipe ./src --include_patterns "*.py"
+# Glob patterns (recommended)
+{thepipe_cmd} ./repo --include_patterns "*.py" "*.ts" -f
 
-# Multiple patterns
-thepipe ./project --include_patterns "*.py" "*.js" "*.tsx"
-
-# Regex (alternative)
-thepipe ./src --include_regex ".*\\.(py|js)$"
+# Regex filter
+{thepipe_cmd} ./repo --include_regex ".*\\.(py|ts)$" -f
 ```
-
----
 
 ## Text Extraction Modes
 
-| Flag | Description |
-|------|-------------|
-| `--text_only` | Extract text only (default method) |
-| `--text_only transcribe` | Force local transcription (video/audio) |
-| `--text_only ai` | Prefer AI-generated transcription |
-| `--text_only uploaded` | Prefer uploaded captions |
-
----
-
-## Database Mode
-
-### Flags
 ```bash
-thepipe <database> --db [query] [options]
+{thepipe_cmd} video.mp4 --text_only             -f  # default
+{thepipe_cmd} video.mp4 --text_only transcribe  -f  # force local transcription
+{thepipe_cmd} video.mp4 --text_only ai          -f  # prefer AI-generated transcript
+{thepipe_cmd} video.mp4 --text_only uploaded    -f  # prefer uploaded captions
 ```
 
-| Usage | Description |
-|-------|-------------|
-| `--db` | Show schema + preview |
-| `--db "SELECT * FROM users"` | Execute SQL query |
-| `--db "What products sold most?"` | Natural language query (requires LLM) |
+## Database Operations
 
-### Connection Formats
-| Format | Example |
-|--------|---------|
-| PostgreSQL | `postgresql://user:pass@host:5432/db` |
-| MySQL | `mysql://user:pass@host:3306/db` |
-| MariaDB | `mariadb://user:pass@host:3306/db` |
-| SQLite | `sqlite:///path/to/database.db` |
-| DuckDB | `duckdb:///path/to/database.duckdb` |
-| MS SQL Server | `mssql://user:pass@host:1433/db` |
-| JDBC MySQL | `jdbc:mysql://host:3306/db` (auto-converted) |
-| JDBC PostgreSQL | `jdbc:postgresql://host:5432/db` (auto-converted) |
+```bash
+# PostgreSQL query
+{thepipe_cmd} "postgresql://user:pass@host:5432/db" --db "SELECT * FROM users" -f
 
-### Data File Formats
-| Format | Extensions | View Name |
-|--------|------------|-----------|
-| Parquet | `.parquet`, `.parq` | `parquet_data` |
-| ORC | `.orc` | `orc_data` |
-| Feather/Arrow | `.feather`, `.arrow`, `.ipc` | `feather_data` |
-| JSON Lines | `.jsonl`, `.ndjson` | `jsonl_data` |
-| CSV | `.csv` | `csv_data` |
-| Excel | `.xlsx`, `.xls` | `excel_data` |
+# MySQL query
+{thepipe_cmd} "mysql://user:pass@host:3306/db" --db "SELECT * FROM orders" -f
 
-### Options (via `--options`)
+# SQLite file
+{thepipe_cmd} data.db --db "SELECT * FROM table" -f
+
+# SQLite with path syntax
+{thepipe_cmd} "sqlite:///path/to/db.sqlite" --db "SELECT *" -f
+
+# DuckDB
+{thepipe_cmd} "duckdb:///path/to/db.duckdb" --db "SELECT *" -f
+
+# Show schema only (no query)
+{thepipe_cmd} "postgresql://host/db" --db -f
+
+# Parquet file as database
+{thepipe_cmd} data.parquet --db "SELECT * FROM parquet_data WHERE col > 10" -f
+
+# CSV file as database  
+{thepipe_cmd} data.csv --db "SELECT * FROM csv_data LIMIT 100" -f
+
+# Excel file as database
+{thepipe_cmd} data.xlsx --db "SELECT * FROM excel_data" -f
+```
+
+## Database Connection Formats
+
+- PostgreSQL: `postgresql://user:pass@host:5432/db`
+- MySQL: `mysql://user:pass@host:3306/db`
+- MariaDB: `mariadb://user:pass@host:3306/db`
+- SQLite: `sqlite:///path/to/database.db`
+- DuckDB: `duckdb:///path/to/database.duckdb`
+- MS SQL Server: `mssql://user:pass@host:1433/db`
+- JDBC MySQL: `jdbc:mysql://host:3306/db` (auto-converted)
+- JDBC PostgreSQL: `jdbc:postgresql://host:5432/db` (auto-converted)
+
+## Data File View Names (`--db`)
+
+- Parquet: `parquet_data`
+- ORC: `orc_data`
+- Feather/Arrow/IPC: `feather_data`
+- JSONL/NDJSON: `jsonl_data`
+- CSV: `csv_data`
+- Excel: `excel_data`
+
+## Common `--options` JSON
+
 ```json
 {
-  "max_rows": 100,
-  "schema_only": true,
-  "preview": true,
-  "llm_extractor": {
-    "api_key": "...",
-    "model": "gpt-4o"
-  }
-}
-```
-
----
-
-## Code Analysis Mode
-
-### Enable via `--options`
-```bash
-thepipe ./repo --options '{"code_relations": "MODE"}'
-```
-
-### Modes
-| Mode | Description |
-|------|-------------|
-| `auto` | **Recommended**. Picks strategy based on repo size |
-| `limited` | Only files matching `--include_patterns` |
-| `map` | All files as token-efficient digests |
-| `mapnn` | Primary files full code, neighbors as digests |
-| `mapall` | Primary full, all others as digests |
-
-### Parameters
-| Option | Default | Description |
-|--------|---------|-------------|
-| `code_n1` | 3 | Neighbor depth for mapnn |
-| `code_n2` | 5 | Cutoff depth for mapnn |
-| `code_nf` | 100 | File count threshold for auto mode |
-| `code_nt` | 150000 | Token threshold for auto mode |
-
-**Example:**
-```bash
-thepipe ./project --include_patterns "src/**/*.py" --options '{
-  "code_relations": "mapnn",
-  "code_n1": 2,
-  "code_n2": 4
-}'
-```
-
----
-
-## OpenAI/LLM Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--openai-api-key KEY` | `$OPENAI_API_KEY` | API key |
-| `--openai-base-url URL` | `https://api.openai.com/v1` | Custom endpoint |
-| `--openai-model MODEL` | `gpt-4o` | Model for AI extraction |
-
----
-
-## Advanced Options (via `--options` JSON)
-
-### File Processing
-```json
-{
-  "read_executable": true,
-  "blacklist_files": [".gitignore"]
-}
-```
-
-### GitHub
-```json
-{
+  "read_executable": false,
+  "blacklist_files": [".gitignore"],
   "github_token": "ghp_...",
-  "gitignore": true
-}
-```
-
-### Google Drive
-```json
-{
+  "gitignore": true,
   "max_depth": 3,
-  "service_account_file": "/path/to/creds.json"
-}
-```
-
-### Cookies
-```json
-{
+  "service_account_file": "/path/to/creds.json",
   "cookies": {
     "browser_type": "chrome",
     "show": "format"
@@ -351,63 +210,80 @@ thepipe ./project --include_patterns "src/**/*.py" --options '{
 }
 ```
 
----
+## OpenAI / LLM Flags
 
-## Examples for AI Agents
-
-**Task: "Analyze this Python project"**
 ```bash
-thepipe ./src --include_patterns "*.py" --options '{"code_relations": "auto"}' -f
+{thepipe_cmd} source --openai-api-key "$OPENAI_API_KEY" --openai-model gpt-4o -f
+{thepipe_cmd} source --openai-base-url https://api.openai.com/v1 -f
 ```
 
-**Task: "Extract text from this PDF"**
+## Agent Mode (LLM Delegation)
+
+When thepipe needs LLM inference inside an agent, use `--llm-provider agent`:
+
 ```bash
-thepipe document.pdf -f text
+{thepipe_cmd} data.pdf --extract '{"title": "str"}' --llm-provider agent
 ```
 
-**Task: "Get data from this webpage"**
-```bash
-thepipe https://example.com/article -f
-```
+**How agent mode works:**
 
-**Task: "Query this database"**
-```bash
-thepipe data.db --db "SELECT * FROM users LIMIT 10" -f json
-```
+1. thepipe creates two named pipes (FIFOs) in `/tmp/thepipe_pipes/`
+2. thepipe prints to stderr:
+   ```
+   <<<THEPIPE_LLM_QUERY>>>
+   QUERY_PIPE: /tmp/thepipe_pipes/query_<pid>_<timestamp>
+   RESPONSE_PIPE: /tmp/thepipe_pipes/response_<pid>_<timestamp>
+   {json payload with messages}
+   <<<END_QUERY>>>
+   ```
+3. Agent must:
+   - Read the JSON from QUERY_PIPE (blocking read)
+   - Execute LLM call with the messages array
+   - Write response text to RESPONSE_PIPE
+4. thepipe reads response and continues execution
 
-**Task: "Transcribe this video"**
+**Agent response steps:**
 ```bash
-thepipe https://youtube.com/watch?v=abc123 --text_only -f
-```
+# 1. Read query (blocks until thepipe writes)
+cat /tmp/thepipe_pipes/query_<pid>_<timestamp>
 
-**Task: "Clone and analyze GitHub repo"**
-```bash
-thepipe https://github.com/user/repo --include_patterns "*.py" --options '{"code_relations": "map"}' -f
-```
+# 2. Execute LLM call with messages from JSON
 
----
+# 3. Write response
+echo "your LLM response text" > /tmp/thepipe_pipes/response_<pid>_<timestamp>
+```
 
 ## Registration
 
-Self-register thepipe with AI platforms:
+Install thepipe capability into AI agents:
+
 ```bash
-thepipe --register agent   # Antigravity/Gemini
-thepipe --register code    # Claude Code
-thepipe --register help    # Show documentation
-thepipe --register         # Output for manual copy-paste
+# Antigravity/Gemini - creates .antigravity/workflows/thepipe.md
+{thepipe_cmd} --register agent
+
+# Claude Code - creates .claude/skills/thepipe/SKILL.md
+{thepipe_cmd} --register code
+
+# Stdout for copy-paste
+{thepipe_cmd} --register
 ```
+
+After registration, agents can invoke thepipe using the absolute paths shown in the generated files.
 """
+
+
 
 
 def register_stdout() -> str:
     """Generate markdown for manual copy-paste into chat interfaces"""
+    instructions = INSTRUCTION_TEMPLATE.replace("{thepipe_cmd}", _get_thepipe_path())
     return f"""# thepipe Installation Instructions
 
 Copy the content below and paste it into your AI assistant's chat interface (ChatGPT, Claude.ai, Gemini, etc.) to enable thepipe capabilities.
 
 ---
 
-{INSTRUCTION_TEMPLATE}
+{instructions}
 
 ---
 
@@ -430,8 +306,9 @@ def register_claude_code(target_dir: Optional[str] = None) -> Path:
     
     skill_file = skill_dir / "SKILL.md"
     
-    # Get the actual thepipe command path
+    # Get the actual thepipe command path and Python executable
     thepipe_cmd = _get_thepipe_path()
+    python_exe = sys.executable
     
     # Build skill content with proper frontmatter
     instructions = INSTRUCTION_TEMPLATE.replace("{thepipe_cmd}", thepipe_cmd)
@@ -440,6 +317,17 @@ def register_claude_code(target_dir: Optional[str] = None) -> Path:
 name: thepipe
 description: Extract data from files, URLs, databases. Use code_relations for code analysis with 90%+ token savings.
 version: 1.0.0
+---
+
+# ENVIRONMENT INFO
+
+> **CRITICAL**: Use these EXACT paths when invoking thepipe. Do NOT rely on shell PATH.
+
+| Component | Absolute Path |
+|-----------|---------------|
+| **thepipe command** | `{thepipe_cmd}` |
+| **Python executable** | `{python_exe}` |
+
 ---
 
 # thepipe - Data Extraction & Code Analysis
@@ -483,14 +371,27 @@ def register_antigravity(target_dir: Optional[str] = None) -> tuple[Path, Option
     workflows_dir.mkdir(parents=True, exist_ok=True)
     
     workflow_file = workflows_dir / "thepipe.md"
-    # Get the actual thepipe command path
+    
+    # Get the actual thepipe command path and Python executable
     thepipe_cmd = _get_thepipe_path()
+    python_exe = sys.executable
     
     # Use YAML frontmatter format like other Antigravity workflows
     # Inject the actual command path into the template
     instructions = INSTRUCTION_TEMPLATE.replace("{thepipe_cmd}", thepipe_cmd)
     workflow_content = f"""---
 description: Extract data from files, URLs, databases using thepipe. Use when asked to pipe, pipe in, or extract content from any source.
+---
+
+# ENVIRONMENT INFO
+
+> **CRITICAL**: Use these EXACT paths when invoking thepipe. Do NOT rely on shell PATH.
+
+| Component | Absolute Path |
+|-----------|---------------|
+| **thepipe command** | `{thepipe_cmd}` |
+| **Python executable** | `{python_exe}` |
+
 ---
 
 {instructions}
@@ -502,10 +403,10 @@ description: Extract data from files, URLs, databases using thepipe. Use when as
     agents_md_updated = None
     
     if agents_md.exists():
-        existing_content = agents_md.read_text()
+        existing_content = agents_md.read_text(encoding="utf-8")
         if "thepipe" not in existing_content:
             # Append thepipe section
-            new_content = f"""{content}
+            new_content = f"""{existing_content.rstrip()}
 
 ## thepipe
 
@@ -515,9 +416,9 @@ Data extraction and document processing tool. Use for extracting content from fi
 
 **Basic usage**: `thepipe <source> [-f md|text|json]`
 
-See `.agent/workflows/thepipe.md` for detailed documentation.
+See `.antigravity/workflows/thepipe.md` for detailed documentation.
 """
-            agents_md.write_text(new_content)
+            agents_md.write_text(new_content, encoding="utf-8")
             agents_md_updated = agents_md
     else:
         # Create new AGENTS.md with thepipe section
@@ -533,25 +434,23 @@ Data extraction and document processing tool. Use for extracting content from fi
 
 **Basic usage**: `thepipe <source> [-f md|text|json]`
 
-See `.agent/workflows/thepipe.md` for detailed documentation.
+See `.antigravity/workflows/thepipe.md` for detailed documentation.
 """
-        agents_md.write_text(agents_md_content)
+        agents_md.write_text(agents_md_content, encoding="utf-8")
         agents_md_updated = agents_md
     
     # Update auto-execute allowlist
     _add_to_allowlist(base_dir)
     
-    # Add AGENTS.md to gitignore (user-local summary, not committed)
-    # Note: .agent/workflows/ should be committed so agents can read it
-    _add_to_gitignore(base_dir, "AGENTS.md")
-    
     return workflow_file, agents_md_updated
 
 
 def register_codex(target_dir: Optional[str] = None) -> Path:
-    """Register thepipe for Codex by writing AGENTS.md instructions."""
-    import sys
+    """
+    Register thepipe for Codex by writing AGENTS.md instructions.
 
+    Creates or updates a marked block in AGENTS.md with absolute invocation paths.
+    """
     base_dir = Path(target_dir or os.getcwd())
     agents_file = base_dir / "AGENTS.md"
 

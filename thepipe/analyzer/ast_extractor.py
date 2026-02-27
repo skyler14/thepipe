@@ -4,12 +4,22 @@ AST Extractor using tree-sitter
 Language-agnostic AST extraction with support for 165+ languages via tree-sitter-language-pack.
 """
 
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
 
 from .types import ASTNode, FileAnalysis
+from .plugins import register_builtin_plugins
+from .plugins.base import LanguagePlugin
 
 logger = logging.getLogger(__name__)
+
+NodeKey = Tuple[int, int, int, int, int, int, str, bool]
+
+try:
+    from tree_sitter import QueryCursor
+except Exception:  # pragma: no cover - optional dependency shape
+    QueryCursor = None
 
 # Try to import tree-sitter-language-pack, fall back gracefully
 try:
@@ -89,6 +99,10 @@ EXTENSION_TO_LANGUAGE = {
 
 # Query patterns for extracting imports (language-specific)
 IMPORT_QUERIES = {
+    'dart': """
+        (import_directive) @import
+        (export_directive) @import
+    """,
     'python': """
         (import_statement) @import
         (import_from_statement) @import
@@ -119,6 +133,9 @@ IMPORT_QUERIES = {
     'cpp': """
         (preproc_include) @import
     """,
+    'swift': """
+        (import_declaration) @import
+    """,
 }
 
 # Query patterns for function definitions
@@ -138,6 +155,16 @@ FUNCTION_QUERIES = {
     'rust': '(function_item name: (identifier) @name) @func',
     'c': '(function_definition declarator: (function_declarator declarator: (identifier) @name)) @func',
     'cpp': '(function_definition declarator: (function_declarator declarator: (identifier) @name)) @func',
+    'swift': """
+        (function_declaration name: (simple_identifier) @name) @func
+        (init_declaration) @func
+        (deinit_declaration) @func
+    """,
+    'dart': """
+        (function_signature name: (identifier) @name) @func
+        (method_declaration name: (identifier) @name) @func
+        (constructor_declaration name: (identifier) @name) @func
+    """,
 }
 
 # Query patterns for class definitions
@@ -148,6 +175,20 @@ CLASS_QUERIES = {
     'go': '(type_declaration (type_spec name: (type_identifier) @name)) @class',
     'rust': '(struct_item name: (type_identifier) @name) @class',
     'java': '(class_declaration name: (identifier) @name) @class',
+    'swift': """
+        (class_declaration name: (type_identifier) @name) @class
+        (struct_declaration name: (type_identifier) @name) @class
+        (enum_declaration name: (type_identifier) @name) @class
+        (protocol_declaration name: (type_identifier) @name) @class
+        (actor_declaration name: (type_identifier) @name) @class
+        (extension_declaration type: (type_identifier) @name) @class
+    """,
+    'dart': """
+        (class_definition name: (identifier) @name) @class
+        (mixin_declaration name: (identifier) @name) @class
+        (extension_declaration name: (identifier) @name) @class
+        (enum_declaration name: (identifier) @name) @class
+    """,
 }
 
 
@@ -218,6 +259,12 @@ class ASTExtractor:
     def __init__(self):
         self._parsers: Dict[str, any] = {}
         self._languages: Dict[str, any] = {}
+        try:
+            # Idempotent singleton registration; safe even if DependencyMapper does this too.
+            self._plugin_manager = register_builtin_plugins()
+        except Exception as e:
+            logger.warning("Plugin initialization failed in ASTExtractor", exc_info=True)
+            self._plugin_manager = None
     
     def _get_parser(self, language: str):
         """Lazy-load parser for a language"""
@@ -231,16 +278,26 @@ class ASTExtractor:
                 self._parsers[language] = get_parser(language)
                 self._languages[language] = get_language(language)
             except Exception as e:
-                logger.warning(f"Failed to load parser for {language}: {e}")
+                logger.warning(f"Failed to load parser for {language}", exc_info=True)
                 return None, None
         
         return self._parsers.get(language), self._languages.get(language)
     
     def detect_language(self, filepath: str) -> Optional[str]:
         """Detect language from file extension"""
-        from pathlib import Path
         ext = Path(filepath).suffix.lower()
         return EXTENSION_TO_LANGUAGE.get(ext)
+    
+    def _get_plugin_for_file(self, filepath: str) -> Optional[LanguagePlugin]:
+        """Get a registered plugin for a file path based on extension."""
+        if not filepath or not self._plugin_manager:
+            return None
+        
+        ext = Path(filepath).suffix.lower()
+        if not ext:
+            return None
+        
+        return self._plugin_manager.get_plugin_for_extension(ext)
     
     def extract(self, source_code: str, language: str, filepath: str = "") -> Optional[FileAnalysis]:
         """
@@ -271,14 +328,22 @@ class ASTExtractor:
             line_count=source_code.count('\n') + 1,
         )
         
+        plugin = self._get_plugin_for_file(filepath)
+        
         # Extract imports
-        analysis.imports = self._extract_imports(tree, source_code, language, lang)
+        analysis.imports = self._extract_imports(
+            tree, source_code, language, lang, plugin=plugin
+        )
         
         # Extract functions
-        analysis.functions = self._extract_functions(tree, source_code, language, lang)
+        analysis.functions = self._extract_functions(
+            tree, source_code, language, lang, plugin=plugin
+        )
         
         # Extract classes
-        analysis.classes = self._extract_classes(tree, source_code, language, lang)
+        analysis.classes = self._extract_classes(
+            tree, source_code, language, lang, plugin=plugin
+        )
         
         # Detect cross-language bridges
         analysis.is_cross_language = self._detect_cross_language(source_code, filepath)
@@ -286,26 +351,39 @@ class ASTExtractor:
         return analysis
     
     def _extract_imports(
-        self, tree, source: str, language: str, lang
+        self,
+        tree,
+        source: str,
+        language: str,
+        lang,
+        plugin: Optional[LanguagePlugin] = None,
     ) -> List[str]:
         """Extract import statements from AST"""
         imports = []
         
-        query_str = IMPORT_QUERIES.get(language)
+        query_str = ""
+        if plugin and plugin.import_queries.strip():
+            query_str = plugin.import_queries
+        else:
+            query_str = IMPORT_QUERIES.get(language, "")
+        
         if not query_str or lang is None:
             # Fallback: walk tree manually for common patterns
             return self._extract_imports_fallback(tree, source, language)
         
         try:
             query = lang.query(query_str)
-            captures = query.captures(tree.root_node)
+            captures = self._query_captures(query, tree.root_node)
             
             for node, name in captures:
                 if name == 'import':
                     import_text = source[node.start_byte:node.end_byte]
                     imports.append(import_text.strip())
         except Exception as e:
-            logger.debug(f"Query failed for {language}, using fallback: {e}")
+            logger.warning(
+                f"Query failed for {language} imports; using fallback",
+                exc_info=True,
+            )
             return self._extract_imports_fallback(tree, source, language)
         
         return imports
@@ -326,27 +404,204 @@ class ASTExtractor:
         
         walk(tree.root_node)
         return imports
-    
-    def _extract_functions(
-        self, tree, source: str, language: str, lang
-    ) -> List[ASTNode]:
-        """Universal function extraction using pattern matching.
-        
-        Works for all 165 tree-sitter languages by detecting function-related node types.
+
+    @staticmethod
+    def _node_key(node) -> NodeKey:
         """
+        Deterministic parse-local node key without relying on tree-sitter internals.
+
+        We include both byte offsets and point coordinates to reduce the chance of
+        accidental collisions in parser-recovery trees while keeping the key stable
+        across repeated wrapper objects for the same underlying node.
+        """
+        start_row, start_col = node.start_point
+        end_row, end_col = node.end_point
+        return (
+            node.start_byte,
+            node.end_byte,
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            node.type,
+            getattr(node, "is_named", True),
+        )
+
+    @staticmethod
+    def _build_name_capture_maps(
+        captures,
+        source: str,
+    ) -> Tuple[Dict[NodeKey, str], Dict[NodeKey, str]]:
+        """
+        Index @name captures by parent/grandparent node key for O(1) lookup.
+
+        Some grammars attach the name node directly to the function/class node,
+        while others nest it one level deeper (e.g., C declarators).
+        """
+        direct_meta: Dict[NodeKey, Tuple[int, int, str]] = {}
+        nested_meta: Dict[NodeKey, Tuple[int, int, str]] = {}
+
+        for node, capture_name in captures:
+            if capture_name != 'name':
+                continue
+
+            name_text = source[node.start_byte:node.end_byte]
+            # Prefer identifier-like captures over larger declarator spans:
+            # shorter capture span usually corresponds to the actual symbol token
+            # (e.g., `foo`) rather than a wrapped declarator or qualified path.
+            # Known limitation: this may favor short C++ member names over fully
+            # qualified captures (e.g., `doSomething` vs `Ns::Type::doSomething`).
+            rank = (node.end_byte - node.start_byte, node.start_byte)
+            parent = getattr(node, "parent", None)
+            if parent is not None:
+                parent_key = ASTExtractor._node_key(parent)
+                existing = direct_meta.get(parent_key)
+                if existing is None or rank < existing[:2]:
+                    direct_meta[parent_key] = (rank[0], rank[1], name_text)
+
+            grandparent = getattr(parent, "parent", None) if parent is not None else None
+            if grandparent is not None:
+                grandparent_key = ASTExtractor._node_key(grandparent)
+                existing = nested_meta.get(grandparent_key)
+                if existing is None or rank < existing[:2]:
+                    nested_meta[grandparent_key] = (rank[0], rank[1], name_text)
+
+        direct_by_parent = {key: value[2] for key, value in direct_meta.items()}
+        nested_by_grandparent = {key: value[2] for key, value in nested_meta.items()}
+        return direct_by_parent, nested_by_grandparent
+
+    @staticmethod
+    def _normalize_capture_dict(capture_dict) -> List[Tuple[object, str]]:
+        """Normalize capture dicts into [(node, capture_name)] tuples."""
+        captures: List[Tuple[object, str]] = []
+        for capture_name, nodes in capture_dict.items():
+            for item in nodes:
+                # Some APIs return Node objects directly; others wrap in tuples.
+                node = item[0] if isinstance(item, tuple) and item else item
+                if hasattr(node, "start_byte"):
+                    captures.append((node, capture_name))
+        return captures
+
+    @staticmethod
+    def _query_captures(query, root_node) -> List[Tuple[object, str]]:
+        """
+        Version-tolerant query capture adapter.
+
+        Supports:
+        - legacy Query.captures(root_node) -> [(node, "capture"), ...]
+        - QueryCursor.captures(root_node) -> {"capture": [node, ...], ...}
+        - QueryCursor.matches(root_node)  -> [(pattern_idx, {"capture": [node]})]
+        """
+        raw_captures = None
+
+        if hasattr(query, "captures"):
+            raw_captures = query.captures(root_node)
+        elif QueryCursor is not None:
+            cursor = QueryCursor(query)
+            if hasattr(cursor, "captures"):
+                raw_captures = cursor.captures(root_node)
+            elif hasattr(cursor, "matches"):
+                matches = cursor.matches(root_node)
+                captures: List[Tuple[object, str]] = []
+                for match in matches:
+                    if isinstance(match, tuple) and len(match) == 2 and isinstance(match[1], dict):
+                        captures.extend(ASTExtractor._normalize_capture_dict(match[1]))
+                captures.sort(key=lambda c: (c[0].start_byte, c[0].end_byte, c[1]))
+                return captures
+        else:
+            raise AttributeError("No compatible tree-sitter query capture API found")
+
+        captures: List[Tuple[object, str]] = []
+        if isinstance(raw_captures, dict):
+            captures = ASTExtractor._normalize_capture_dict(raw_captures)
+        else:
+            # Legacy APIs usually return list[(node, capture_name)].
+            for item in raw_captures or []:
+                if (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                    and hasattr(item[0], "start_byte")
+                    and isinstance(item[1], str)
+                ):
+                    captures.append((item[0], item[1]))
+                elif (
+                    isinstance(item, tuple)
+                    and len(item) == 2
+                    and isinstance(item[1], dict)
+                ):
+                    captures.extend(ASTExtractor._normalize_capture_dict(item[1]))
+
+        captures.sort(key=lambda c: (c[0].start_byte, c[0].end_byte, c[1]))
+        return captures
+
+    def _extract_functions(
+        self,
+        tree,
+        source: str,
+        language: str,
+        lang,
+        plugin: Optional[LanguagePlugin] = None,
+    ) -> List[ASTNode]:
+        """Universal function extraction with query priority."""
         functions = []
         
+        # Try specific query first
+        query_str = ""
+        if plugin and plugin.function_queries.strip():
+            query_str = plugin.function_queries
+        else:
+            query_str = FUNCTION_QUERIES.get(language, "")
+        
+        if query_str and lang:
+            try:
+                query = lang.query(query_str)
+                captures = self._query_captures(query, tree.root_node)
+                direct_name_map, nested_name_map = self._build_name_capture_maps(
+                    captures, source
+                )
+                
+                # Deduplicate by node ID to handle multiple captures per node
+                processed_nodes = set()
+                
+                for node, capture_name in captures:
+                    node_key = self._node_key(node)
+                    if capture_name == 'func' and node_key not in processed_nodes:
+                        name = direct_name_map.get(node_key)
+                        if not name:
+                            name = nested_name_map.get(node_key)
+                        if not name:
+                            name = _extract_identifier_from_node(node, source)
+                        
+                        functions.append(ASTNode(
+                            type='function',
+                            name=name,
+                            start_line=node.start_point[0] + 1,
+                            end_line=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
+                        ))
+                        processed_nodes.add(node_key)
+                
+                return functions
+            except Exception as e:
+                logger.warning(
+                    f"Query failed for {language} functions; using fallback",
+                    exc_info=True,
+                )
+        
+        # Original fallback logic
         def walk(node):
             if _is_function_node(node):
                 name = _extract_identifier_from_node(node, source)
-                functions.append(ASTNode(
-                    type='function',
-                    name=name,
-                    start_line=node.start_point[0] + 1,
-                    end_line=node.end_point[0] + 1,
-                    start_byte=node.start_byte,
-                    end_byte=node.end_byte,
-                ))
+                if name:
+                    functions.append(ASTNode(
+                        type='function',
+                        name=name,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
+                    ))
             
             for child in node.children:
                 walk(child)
@@ -355,25 +610,71 @@ class ASTExtractor:
         return functions
 
     def _extract_classes(
-        self, tree, source: str, language: str, lang
+        self,
+        tree,
+        source: str,
+        language: str,
+        lang,
+        plugin: Optional[LanguagePlugin] = None,
     ) -> List[ASTNode]:
-        """Universal class extraction using pattern matching.
-        
-        Works for all 165 tree-sitter languages by detecting class/struct/interface node types.
-        """
+        """Universal class extraction with query priority."""
         classes = []
         
+        # Try specific query first
+        query_str = ""
+        if plugin and plugin.class_queries.strip():
+            query_str = plugin.class_queries
+        else:
+            query_str = CLASS_QUERIES.get(language, "")
+        
+        if query_str and lang:
+            try:
+                query = lang.query(query_str)
+                captures = self._query_captures(query, tree.root_node)
+                direct_name_map, nested_name_map = self._build_name_capture_maps(
+                    captures, source
+                )
+                
+                processed_nodes = set()
+                
+                for node, capture_name in captures:
+                    node_key = self._node_key(node)
+                    if capture_name == 'class' and node_key not in processed_nodes:
+                        name = direct_name_map.get(node_key)
+                        if not name:
+                            name = nested_name_map.get(node_key)
+                        if not name:
+                            name = _extract_identifier_from_node(node, source)
+                            
+                        classes.append(ASTNode(
+                            type='class',
+                            name=name,
+                            start_line=node.start_point[0] + 1,
+                            end_line=node.end_point[0] + 1,
+                            start_byte=node.start_byte,
+                            end_byte=node.end_byte,
+                        ))
+                        processed_nodes.add(node_key)
+                return classes
+            except Exception as e:
+                logger.warning(
+                    f"Query failed for {language} classes; using fallback",
+                    exc_info=True,
+                )
+        
+        # Original fallback logic
         def walk(node):
             if _is_class_node(node):
                 name = _extract_identifier_from_node(node, source)
-                classes.append(ASTNode(
-                    type='class',
-                    name=name,
-                    start_line=node.start_point[0] + 1,
-                    end_line=node.end_point[0] + 1,
-                    start_byte=node.start_byte,
-                    end_byte=node.end_byte,
-                ))
+                if name:  # Filter unnamed classes
+                    classes.append(ASTNode(
+                        type='class',
+                        name=name,
+                        start_line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
+                        start_byte=node.start_byte,
+                        end_byte=node.end_byte,
+                    ))
             
             for child in node.children:
                 walk(child)
