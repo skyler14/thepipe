@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 import requests
 from PIL import Image
 from llama_index.core.schema import Document, ImageDocument
@@ -50,6 +50,7 @@ class Chunk:
         images: Optional[Iterable[Image.Image]] = None,
         audios: Optional[Iterable] = None,
         videos: Optional[Iterable] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ):
         self.path = path
 
@@ -65,6 +66,7 @@ class Chunk:
         self.images = [prepare_image(image) for image in images] if images else []
         self.audios = list(audios) if audios else []
         self.videos = list(videos) if videos else []
+        self.meta = dict(meta) if meta is not None else None
 
     # Backward compatibility property
     @property
@@ -98,7 +100,9 @@ class Chunk:
 
     def to_llamaindex(self) -> Union[List[Document], List[ImageDocument]]:
         document_text = self.text if self.text else ""
-        metadata = {"filepath": self.path} if self.path else {}
+        metadata = dict(self.meta) if self.meta else {}
+        if self.path:
+            metadata["filepath"] = self.path
 
         # If we have PIL Image objects in self.images, convert them to base64 strings
         if self.images:
@@ -174,7 +178,12 @@ class Chunk:
 
         return message
 
-    def to_json(self, host_images: bool = False, text_only: bool = False) -> Dict:
+    def to_json(
+        self,
+        host_images: bool = False,
+        text_only: bool = False,
+        verbose: bool = False,
+    ) -> Dict:
         data = {
             "path": self.path,
             "text": self.text.strip() if self.text else "",
@@ -190,6 +199,8 @@ class Chunk:
             "audios": self.audios,
             "videos": self.videos,
         }
+        if verbose and isinstance(self.meta, dict):
+            data["meta"] = self.meta
         return data
 
     @staticmethod
@@ -211,6 +222,7 @@ class Chunk:
             path=data["path"],
             text=text,
             images=images,
+            meta=data.get("meta"),
         )
 
 def make_image_url(
@@ -315,5 +327,3 @@ def save_outputs(
         file.write(text)
     if verbose:
         print(f"[thepipe] {calculate_tokens(chunks)} tokens saved to {output_folder}")
-
-

@@ -8,9 +8,18 @@ Uses the thepipe codebase itself as a test fixture since it has:
 """
 
 import os
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import List
+from thepipe.analyzer.ast_extractor import TREE_SITTER_AVAILABLE
+
+REQUIRES_TREE_SITTER = unittest.skipUnless(
+    TREE_SITTER_AVAILABLE,
+    "requires tree-sitter-language-pack",
+)
 
 # Get the repo root (parent of tests/)
 REPO_ROOT = Path(__file__).parent.parent
@@ -32,8 +41,10 @@ class TestASTExtractor(unittest.TestCase):
     def test_detect_language_javascript(self):
         """Test JavaScript/TypeScript detection"""
         self.assertEqual(self.extractor.detect_language("app.js"), "javascript")
+        self.assertEqual(self.extractor.detect_language("app.mjs"), "javascript")
+        self.assertEqual(self.extractor.detect_language("app.cjs"), "javascript")
         self.assertEqual(self.extractor.detect_language("app.ts"), "typescript")
-        self.assertEqual(self.extractor.detect_language("app.tsx"), "typescript")
+        self.assertEqual(self.extractor.detect_language("app.tsx"), "tsx")
     
     def test_detect_language_others(self):
         """Test other language detection"""
@@ -47,6 +58,7 @@ class TestASTExtractor(unittest.TestCase):
         self.assertIsNone(self.extractor.detect_language("readme.txt"))
         self.assertIsNone(self.extractor.detect_language("data.json"))
     
+    @REQUIRES_TREE_SITTER
     def test_extract_python_file(self):
         """Test extraction from a real Python file (core.py)"""
         from thepipe.analyzer import extract_file
@@ -64,6 +76,7 @@ class TestASTExtractor(unittest.TestCase):
         class_names = [c.name for c in analysis.classes]
         self.assertIn("Chunk", class_names)
     
+    @REQUIRES_TREE_SITTER
     def test_extract_functions(self):
         """Test function extraction from scraper.py"""
         from thepipe.analyzer import extract_file
@@ -79,6 +92,7 @@ class TestASTExtractor(unittest.TestCase):
         self.assertIn("scrape_directory", func_names)
         # Note: some function names may have parsing artifacts
     
+    @REQUIRES_TREE_SITTER
     def test_extract_imports(self):
         """Test import extraction"""
         from thepipe.analyzer import extract_file
@@ -90,6 +104,138 @@ class TestASTExtractor(unittest.TestCase):
         # core.py imports things like argparse, base64, etc.
         import_text = " ".join(analysis.imports)
         self.assertIn("import", import_text)
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_imports_from_require_and_dynamic_import(self):
+        """Test web plugin captures literal paths for require() and import()."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = 'const foo = require("./foo");\nconst bar = import("./bar");\n'
+        analysis = ASTExtractor().extract(code, "javascript", "x.mjs")
+
+        self.assertIsNotNone(analysis)
+        imports = " ".join(analysis.imports)
+        self.assertIn("./foo", imports)
+        self.assertIn("./bar", imports)
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_call_graph_python(self):
+        """Test call graph extraction for Python"""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = "def foo():\n    bar()\n\ndef bar():\n    pass\n"
+        analysis = ASTExtractor().extract(code, "python", "x.py")
+
+        self.assertIsNotNone(analysis)
+        self.assertGreaterEqual(len(analysis.call_graph), 1)
+        calls = {(e.caller, e.callee) for e in analysis.call_graph}
+        self.assertIn(("foo", "bar"), calls)
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_call_graph_javascript(self):
+        """Test call graph extraction for JavaScript"""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = "function foo(){ bar(); }\\nconst baz=()=>{ qux(); }\\n"
+        analysis = ASTExtractor().extract(code, "javascript", "x.js")
+
+        self.assertIsNotNone(analysis)
+        calls = {(e.caller, e.callee) for e in analysis.call_graph}
+        self.assertIn(("foo", "bar"), calls)
+        self.assertIn(("baz", "qux"), calls)
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_named_arrow_function(self):
+        """Arrow functions assigned to vars should keep the assigned name."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = "const Home = () => { return 1; };\n"
+        analysis = ASTExtractor().extract(code, "javascript", "x.js")
+
+        self.assertIsNotNone(analysis)
+        self.assertEqual([f.name for f in analysis.functions if f.name], ["Home"])
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_call_graph_skips_ambiguous_chained_callee(self):
+        """Do not emit arbitrary raw AST subtree text as a callee."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = (
+            "async function processRequest(url){\n"
+            "  await fetch(url).then(cb);\n"
+            "  greeter.greet();\n"
+            "}\n"
+        )
+        analysis = ASTExtractor().extract(code, "javascript", "x.js")
+
+        self.assertIsNotNone(analysis)
+        callees = {e.callee for e in analysis.call_graph}
+        self.assertIn("greeter.greet", callees)
+        self.assertFalse(any("(" in callee or "await" in callee for callee in callees))
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_swift_protocol_and_extension_types(self):
+        """Swift extraction should keep protocol and extension surfaces."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = (
+            "import Foundation\n"
+            "protocol Greeter { func greet() }\n"
+            "extension String { func x() {} }\n"
+            "enum Mode { case a }\n"
+            "actor Worker {}\n"
+            "struct User {}\n"
+            "class VC {}\n"
+        )
+        analysis = ASTExtractor().extract(code, "swift", "x.swift")
+
+        self.assertIsNotNone(analysis)
+        class_names = {c.name for c in analysis.classes if c.name}
+        self.assertEqual(
+            class_names,
+            {"Greeter", "String", "Mode", "Worker", "User", "VC"},
+        )
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_dart_constructor_signature(self):
+        """Dart constructors should still be surfaced as function-like entries."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = (
+            "class A {\n"
+            "  A();\n"
+            "  void m() {}\n"
+            "}\n"
+        )
+        analysis = ASTExtractor().extract(code, "dart", "x.dart")
+
+        self.assertIsNotNone(analysis)
+        func_names = {f.name for f in analysis.functions if f.name}
+        self.assertIn("A", func_names)
+        self.assertIn("m", func_names)
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_python_names_after_unicode_bytes(self):
+        """Byte offsets should stay correct after earlier Unicode content."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+        from thepipe.analyzer.digest import generate_file_digest
+
+        code = (
+            'banner = "📊"\n'
+            "\n"
+            "def first():\n"
+            "    return 1\n"
+            "\n"
+            "def second(value: int) -> int:\n"
+            "    return value\n"
+        )
+        analysis = ASTExtractor().extract(code, "python", "x.py")
+
+        self.assertIsNotNone(analysis)
+        names = [f.name for f in analysis.functions if f.name]
+        self.assertEqual(names, ["first", "second"])
+        digest = generate_file_digest(code, analysis)
+        self.assertIn("second :: value:int -> int", digest)
     
     def test_extract_cross_language_detection(self):
         """Test detection of cross-language bridges"""
@@ -109,7 +255,75 @@ class TestASTExtractor(unittest.TestCase):
         normal_code = "import os\nprint('hello')"
         self.assertFalse(extractor._detect_cross_language(normal_code, "test.py"))
 
+    def test_haskell_regex_fallback_filters_plain_bindings(self):
+        """Haskell fallback should not treat every value binding as a function."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
 
+        code = (
+            "add :: Int -> Int -> Int\n"
+            "add x y = x + y\n"
+            "x = 5\n"
+            "config = defaultConfig { port = 8080 }\n"
+        )
+        functions = ASTExtractor()._regex_fallback_functions("haskell", code)
+        names = [f.name for f in functions]
+
+        self.assertIn("add", names)
+        self.assertNotIn("x", names)
+        self.assertNotIn("config", names)
+
+    def test_ruby_regex_fallback_uses_declaration_boundaries(self):
+        """Ruby fallback should not be confused by block keywords inside strings."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = (
+            "class Parser\n"
+            "  def process\n"
+            "    query = \"BEGIN transaction; end of story\"\n"
+            "    puts \"defend the base\"\n"
+            "  end\n"
+            "end\n"
+            "\n"
+            "module Later\n"
+            "end\n"
+        )
+        extractor = ASTExtractor()
+        classes = extractor._regex_fallback_classes("ruby", code)
+        functions = extractor._regex_fallback_functions("ruby", code)
+
+        parser = next(c for c in classes if c.name == "Parser")
+        process = next(f for f in functions if f.name == "process")
+        self.assertEqual(parser.end_line, 7)
+        self.assertEqual(process.end_line, 7)
+
+    def test_php_regex_fallback_uses_declaration_boundaries(self):
+        """PHP fallback should ignore braces inside strings."""
+        from thepipe.analyzer.ast_extractor import ASTExtractor
+
+        code = (
+            "class Parser {\n"
+            "    public function getPattern() {\n"
+            "        return \"{ not a real brace }\";\n"
+            "    }\n"
+            "}\n"
+            "\n"
+            "function main() {\n"
+            "    return 1;\n"
+            "}\n"
+        )
+        extractor = ASTExtractor()
+        classes = extractor._regex_fallback_classes("php", code)
+        functions = extractor._regex_fallback_functions("php", code)
+
+        parser = next(c for c in classes if c.name == "Parser")
+        get_pattern = next(f for f in functions if f.name == "getPattern")
+        main = next(f for f in functions if f.name == "main")
+        self.assertEqual(parser.end_line, 6)
+        self.assertEqual(get_pattern.end_line, 6)
+        self.assertEqual(main.start_line, 7)
+
+
+@REQUIRES_TREE_SITTER
 class TestDependencyGraph(unittest.TestCase):
     """Test dependency graph building"""
     
@@ -204,6 +418,118 @@ class TestDependencyGraph(unittest.TestCase):
         self.assertNotIn("os", imports)
 
 
+class TestIntegrationHelpers(unittest.TestCase):
+    """Test mapnew helpers and chunk metadata wiring."""
+
+    def test_remove_worktree_recursively_cleans_directory(self):
+        from thepipe.analyzer.integration import _remove_worktree
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nested_dir = Path(temp_dir) / "repo"
+            nested_dir.mkdir()
+            (nested_dir / "artifact.txt").write_text("x", encoding="utf-8")
+
+            with mock.patch("thepipe.analyzer.integration.subprocess.run", side_effect=RuntimeError("locked")):
+                _remove_worktree("/tmp/repo", str(nested_dir))
+
+            self.assertFalse(nested_dir.exists())
+
+    def test_create_worktree_cleans_temp_dir_on_failure(self):
+        from thepipe.analyzer.integration import _create_worktree
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree_dir = Path(temp_dir) / "thepipe_mapnew_fixed"
+            worktree_dir.mkdir()
+            (worktree_dir / "placeholder.txt").write_text("x", encoding="utf-8")
+
+            with mock.patch("thepipe.analyzer.integration.tempfile.mkdtemp", return_value=str(worktree_dir)):
+                with mock.patch("thepipe.analyzer.integration.subprocess.run", side_effect=RuntimeError("bad ref")):
+                    with self.assertRaises(RuntimeError):
+                        _create_worktree("/tmp/repo", "HEAD~999")
+
+            self.assertFalse(worktree_dir.exists())
+
+    def test_diff_chunk_outputs_uses_labels(self):
+        from thepipe.analyzer.integration import _diff_chunk_outputs
+        from thepipe.core import Chunk
+
+        old_chunks = [Chunk(path="a.py", text="# a.py\nold")]
+        new_chunks = [Chunk(path="a.py", text="# a.py\nnew")]
+
+        diff_text = _diff_chunk_outputs(old_chunks, new_chunks, "HEAD", "working-tree")
+
+        self.assertIn("--- old:HEAD", diff_text)
+        self.assertIn("+++ new:working-tree", diff_text)
+        self.assertIn("-old", diff_text)
+        self.assertIn("+new", diff_text)
+
+    def test_mapnew_fallback_chunk_uses_virtual_artifact_name(self):
+        from thepipe.analyzer.integration import _mapnew_fallback_chunk
+
+        chunk = _mapnew_fallback_chunk(
+            error="boom",
+            dir_path="/repo",
+            include_patterns=["src/**/*.py"],
+            code_old="HEAD",
+            code_new=None,
+        )
+
+        self.assertEqual(chunk.path, "mapnew-fallback.md")
+        self.assertEqual(chunk.meta["artifact"], "mapnew_fallback")
+        self.assertIn('--include_patterns "src/**/*.py"', chunk.text)
+
+    def test_analysis_to_meta_includes_import_strings(self):
+        from thepipe.analyzer.integration import _analysis_to_meta
+        from thepipe.analyzer.types import FileAnalysis, ASTNode, CallGraphEntry
+
+        analysis = FileAnalysis(
+            path="x.py",
+            language="python",
+            imports=[" import os ", "from app import run", "import os"],
+            functions=[ASTNode(type="function", name="foo", start_line=1, end_line=2)],
+            call_graph=[CallGraphEntry(caller="foo", callee="bar", line=2)],
+            line_count=2,
+        )
+
+        meta = _analysis_to_meta(analysis)
+
+        self.assertEqual(meta["imports"], ["from app import run", "import os"])
+        self.assertEqual(meta["imports_count"], 3)
+
+    def test_process_mapnew_end_to_end(self):
+        from thepipe.analyzer.integration import process_code_relations
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            with mock.patch("thepipe.analyzer.integration.logger"):
+                subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+                subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+
+                (repo / "a.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
+                subprocess.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+                subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+                (repo / "a.py").write_text(
+                    "import os\n\n"
+                    "def foo(value: int) -> int:\n"
+                    "    return value\n",
+                    encoding="utf-8",
+                )
+
+                chunks = process_code_relations(str(repo), mode="mapnew")
+
+            self.assertEqual(len(chunks), 1)
+            chunk = chunks[0]
+            self.assertEqual(chunk.path, "mapnew.diff")
+            self.assertEqual(chunk.meta["artifact"], "mapnew_diff")
+            self.assertIn("--- old:HEAD", chunk.text)
+            self.assertIn("+++ new:working-tree", chunk.text)
+            self.assertIn('"import os"', chunk.text)
+            self.assertIn("-foo :: () -> None", chunk.text)
+            self.assertIn("+foo :: value:int -> int", chunk.text)
+
+
 class TestDigestGenerator(unittest.TestCase):
     """Test digest generation (Haskell-style signatures, S-expressions)"""
     
@@ -271,10 +597,120 @@ class TestDigestGenerator(unittest.TestCase):
         
         self.assertEqual(digest.type, "module_index")
         self.assertIn("(module", digest.content)
+        self.assertIn("\"import os\"", digest.content)
+        self.assertIn("\"import sys\"", digest.content)
         self.assertIn("foo", digest.content)
         self.assertIn("bar", digest.content)
         self.assertIn("MyClass", digest.content)
+
+    def test_call_graph_dedup_and_filter(self):
+        """Test call graph de-duplication and noisy filtering"""
+        from thepipe.analyzer.digest import DigestGenerator
+        from thepipe.analyzer.types import CallGraphEntry
+
+        calls = [
+            CallGraphEntry(caller="foo", callee="console.log", line=1),
+            CallGraphEntry(caller="foo", callee="console.log", line=2),  # duplicate
+            CallGraphEntry(caller="foo", callee="doThing", line=3),
+            CallGraphEntry(caller="foo", callee="doThing", line=4),  # duplicate
+            CallGraphEntry(caller="bar", callee="print", line=5),
+        ]
+
+        digest = DigestGenerator("", "javascript").call_graph(calls)
+        self.assertIsNotNone(digest)
+        self.assertIn("(foo -> doThing)", digest.content)
+        self.assertNotIn("console.log", digest.content)
+        self.assertNotIn("print", digest.content)
+
+    def test_digest_stable_ordering(self):
+        """Test deterministic ordering for module index, class methods, and call graph."""
+        from thepipe.analyzer.digest import DigestGenerator
+        from thepipe.analyzer.types import CallGraphEntry
+        from thepipe.analyzer import FileAnalysis, ASTNode
+
+        analysis = FileAnalysis(
+            path="test/module.py",
+            language="python",
+            functions=[
+                ASTNode(type="function", name="beta"),
+                ASTNode(type="function", name="alpha"),
+            ],
+            classes=[
+                ASTNode(type="class", name="Zebra"),
+                ASTNode(type="class", name="Apple"),
+            ],
+            line_count=10,
+        )
+
+        generator = DigestGenerator("", "python")
+        module_digest = generator.module_index(analysis)
+        self.assertIn("(functions alpha beta)", module_digest.content)
+        self.assertIn("(classes Apple Zebra)", module_digest.content)
+
+        cls_node = ASTNode(type="class", name="Foo", start_line=1, end_line=5)
+        methods = [
+            ASTNode(type="function", name="_beta", start_line=2, end_line=2),
+            ASTNode(type="function", name="_alpha", start_line=3, end_line=3),
+            ASTNode(type="function", name="beta", start_line=4, end_line=4),
+            ASTNode(type="function", name="alpha", start_line=5, end_line=5),
+        ]
+        class_digest = generator.class_structure(cls_node, methods)
+        self.assertIn("(public-methods alpha beta)", class_digest.content)
+        self.assertIn("(private-methods _alpha _beta)", class_digest.content)
+
+        calls = [
+            CallGraphEntry(caller="b", callee="z", line=2),
+            CallGraphEntry(caller="a", callee="m", line=1),
+        ]
+        call_digest = generator.call_graph(calls)
+        self.assertIsNotNone(call_digest)
+        self.assertLess(
+            call_digest.content.find("(a -> m)"),
+            call_digest.content.find("(b -> z)"),
+        )
+
+    def test_digest_escapes_non_atom_symbol_names(self):
+        """S-expression surfaces should quote names like Ruby predicates."""
+        from thepipe.analyzer.digest import DigestGenerator
+        from thepipe.analyzer import FileAnalysis, ASTNode
+
+        analysis = FileAnalysis(
+            path="x.rb",
+            language="ruby",
+            functions=[ASTNode(type="function", name="valid?")],
+            classes=[ASTNode(type="class", name="User")],
+            line_count=2,
+        )
+        generator = DigestGenerator("", "ruby")
+        module_digest = generator.module_index(analysis)
+        class_digest = generator.class_structure(
+            ASTNode(type="class", name="User", start_line=1, end_line=2),
+            [ASTNode(type="function", name="valid?", start_line=2, end_line=2)],
+        )
+
+        self.assertIn('(functions "valid?")', module_digest.content)
+        self.assertIn('(public-methods "valid?")', class_digest.content)
+
+    def test_tsx_digest_uses_js_signature_parser(self):
+        """TSX should keep typed JS/TS signature extraction."""
+        from thepipe.analyzer.digest import DigestGenerator
+        from thepipe.analyzer.types import ASTNode
+
+        source = "function Button(props: Props): JSX.Element {}"
+        digest = DigestGenerator(source, "tsx").function_signature(
+            ASTNode(
+                type="function",
+                name="Button",
+                start_line=1,
+                end_line=1,
+                start_byte=0,
+                end_byte=len(source),
+            )
+        )
+
+        self.assertEqual(digest.content, "Button :: props:Props -> JSX")
     
+    @REQUIRES_TREE_SITTER
     def test_generate_file_digest(self):
         """Test full file digest generation"""
         from thepipe.analyzer import extract_file
@@ -290,6 +726,8 @@ class TestDigestGenerator(unittest.TestCase):
         
         # Should contain module index
         self.assertIn("(module", digest)
+        # Should contain call graph block (core.py has call sites)
+        self.assertIn("(calls", digest)
         # Should contain Chunk class
         self.assertIn("Chunk", digest)
 
@@ -358,6 +796,7 @@ class TestSemanticTagger(unittest.TestCase):
         self.assertTrue(any(t in tag_names for t in ["file_io", "parsing", "networking"]))
 
 
+@REQUIRES_TREE_SITTER
 class TestCodeRelationsIntegration(unittest.TestCase):
     """Test the code_relations integration with scrape_directory"""
     
@@ -377,7 +816,7 @@ class TestCodeRelationsIntegration(unittest.TestCase):
         self.assertEqual(len([p for p in paths if p != "__summary__"]), 1)
     
     def test_mode_map(self):
-        """Test 'map' mode - all files, primary as full, rest as digest"""
+        """Test 'map' mode - all files as digests"""
         from thepipe.scraper import scrape_directory
         
         chunks = scrape_directory(
@@ -386,13 +825,15 @@ class TestCodeRelationsIntegration(unittest.TestCase):
             options={"code_relations": "map"}
         )
         
-        # Should have many files
-        self.assertGreater(len(chunks), 10)
+        # Should only have core.py + summary
+        paths = [c.path for c in chunks]
+        self.assertIn("thepipe/core.py", paths)
+        self.assertEqual(len([p for p in paths if p != "__summary__"]), 1)
         
-        # core.py should be full (no digest marker)
+        # core.py should be digest
         core_chunk = next((c for c in chunks if c.path == "thepipe/core.py"), None)
         self.assertIsNotNone(core_chunk)
-        self.assertNotIn("(digest)", core_chunk.text[:100])
+        self.assertIn("(digest)", core_chunk.text[:200])
     
     def test_mode_mapnn(self):
         """Test 'mapnn' mode - N_1/N_2 neighbor die-off"""
@@ -550,6 +991,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@REQUIRES_TREE_SITTER
 class TestUniversalLanguageSupport(unittest.TestCase):
     """Test universal language support for Dart, Swift, Kotlin, Ruby"""
     
@@ -572,17 +1014,20 @@ class TestUniversalLanguageSupport(unittest.TestCase):
         self.assertGreater(len(analysis.imports), 0, "Should find Dart imports")
         import_text = " ".join(analysis.imports)
         self.assertIn("import", import_text.lower())
+        self.assertEqual(len(analysis.imports), 2)
         
         # Check classes (MyApp, HomePage, _HomePageState)
         self.assertGreater(len(analysis.classes), 0, "Should find Dart classes")
         class_names = [c.name for c in analysis.classes if c.name]
-        self.assertIn("MyApp", class_names)
+        self.assertEqual(set(class_names), {"MyApp", "HomePage", "_HomePageState"})
         
         # Check functions (main, build, loadData, initState)
         self.assertGreater(len(analysis.functions), 0, "Should find Dart functions")
         func_names = [f.name for f in analysis.functions if f.name]
-        # Swift function extraction may have parsing artifacts
-        self.assertTrue(len(func_names) > 0)
+        self.assertEqual(
+            set(func_names),
+            {"build", "createState", "initState", "loadData", "main"},
+        )
     
     def test_swift_extraction(self):
         """Test Swift file extraction with imports, classes, structs, functions"""
@@ -596,17 +1041,20 @@ class TestUniversalLanguageSupport(unittest.TestCase):
         
         # Check imports
         self.assertGreater(len(analysis.imports), 0, "Should find Swift imports")
+        self.assertEqual(len(analysis.imports), 2)
         
         # Check classes (ViewController) and structs (User)
         self.assertGreater(len(analysis.classes), 0, "Should find Swift classes/structs")
         class_names = [c.name for c in analysis.classes if c.name]
-        self.assertTrue(any(name in class_names for name in ["ViewController", "User"]))
+        self.assertEqual(set(class_names), {"ViewController", "User"})
         
         # Check functions
         self.assertGreater(len(analysis.functions), 0, "Should find Swift functions")
         func_names = [f.name for f in analysis.functions if f.name]
-        # Swift function extraction may have parsing artifacts
-        self.assertTrue(len(func_names) > 0)
+        self.assertEqual(
+            set(func_names),
+            {"viewDidLoad", "setupUI", "handleTap", "greet", "main"},
+        )
     
     def test_kotlin_extraction(self):
         """Test Kotlin file extraction with imports, classes, objects, functions"""
@@ -635,6 +1083,7 @@ class TestUniversalLanguageSupport(unittest.TestCase):
     def test_ruby_extraction(self):
         """Test Ruby file extraction with requires, classes, modules, functions"""
         from thepipe.analyzer import extract_file
+        from thepipe.analyzer.digest import generate_file_digest
         
         ruby_file = str(self.fixtures_dir / "test.rb")
         analysis = extract_file(ruby_file)
@@ -659,11 +1108,18 @@ class TestUniversalLanguageSupport(unittest.TestCase):
         # Swift function extraction may have parsing artifacts
         self.assertTrue(len(func_names) > 0)
 
+        digest = generate_file_digest(Path(ruby_file).read_text(), analysis)
+        self.assertIn("(User", digest)
+        self.assertIn("initialize", digest)
+        self.assertIn("greet", digest)
+        self.assertNotIn("initialize ::", digest)
+
 
 if __name__ == "__main__":
     unittest.main()
 
 
+@REQUIRES_TREE_SITTER
 class TestTop20Languages(unittest.TestCase):
     """Test top 20 most popular programming languages"""
     
@@ -694,11 +1150,17 @@ class TestTop20Languages(unittest.TestCase):
     def test_php_extraction(self):
         """Test PHP extraction"""
         from thepipe.analyzer import extract_file
+        from thepipe.analyzer.digest import generate_file_digest
         analysis = extract_file(str(self.fixtures_dir / "test.php"))
         self.assertIsNotNone(analysis)
         self.assertEqual(analysis.language, "php")
         self.assertGreater(len(analysis.classes), 0, "Should find PHP classes")
         self.assertGreater(len(analysis.functions), 0, "Should find PHP functions")
+        digest = generate_file_digest((self.fixtures_dir / "test.php").read_text(), analysis)
+        self.assertIn("(User", digest)
+        self.assertIn("__construct", digest)
+        self.assertIn("greet", digest)
+        self.assertNotIn("__construct ::", digest)
     
     def test_scala_extraction(self):
         """Test Scala extraction"""
@@ -733,8 +1195,18 @@ class TestTop20Languages(unittest.TestCase):
         analysis = extract_file(str(self.fixtures_dir / "test.hs"))
         self.assertIsNotNone(analysis)
         self.assertEqual(analysis.language, "haskell")
-        self.assertGreater(len(analysis.imports), 0, "Should find Haskell imports")
-        self.assertGreater(len(analysis.functions), 0, "Should find Haskell functions")
+        self.assertEqual(
+            analysis.imports,
+            ["import Data.List", "import Control.Monad"],
+        )
+        self.assertEqual(
+            [f.name for f in analysis.functions if f.name],
+            ["greet", "processData", "main"],
+        )
+        self.assertEqual(
+            [c.name for c in analysis.classes if c.name],
+            ["User"],
+        )
     
     def test_lua_extraction(self):
         """Test Lua extraction"""
@@ -767,6 +1239,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@REQUIRES_TREE_SITTER
 class TestEmbeddedLanguages(unittest.TestCase):
     """Test files with embedded/multiple languages (HTML+CSS+JS, PHP+jQuery)"""
     

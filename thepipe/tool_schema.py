@@ -130,13 +130,14 @@ TOOLS = [
                     "properties": {
                         "code_relations": {
                             "type": "string",
-                            "enum": ["limited", "map", "mapnn", "mapall"],
+                            "enum": ["limited", "map", "mapnn", "mapall", "mapnew"],
                             "description": (
                                 "Code analysis mode: "
                                 "'limited' = only requested files, "
-                                "'map' = all files with digests, "
+                                "'map' = all files with digests (or only include_patterns if provided), "
                                 "'mapnn' = digests with N1/N2 neighbor cutoff (recommended), "
-                                "'mapall' = full for patterns, digest for rest"
+                                "'mapall' = full for patterns, digest for rest, "
+                                "'mapnew' = diff map (old vs new git revisions)"
                             )
                         },
                         "code_n1": {
@@ -146,6 +147,18 @@ TOOLS = [
                         "code_n2": {
                             "type": "integer",
                             "description": "N2 cutoff depth - files beyond N2 hops excluded (default: 5)"
+                        },
+                        "code_old": {
+                            "type": "string",
+                            "description": "Old git commit-ish for mapnew (default: HEAD)"
+                        },
+                        "code_new": {
+                            "type": "string",
+                            "description": "New git commit-ish for mapnew (default: working tree)"
+                        },
+                        "json_verbose": {
+                            "type": "boolean",
+                            "description": "Include line-level metadata in JSON output (-f json)"
                         }
                     }
                 }

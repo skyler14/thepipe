@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 import json
 import re
 from .base import LanguagePlugin, PluginConfig
@@ -8,13 +8,20 @@ from ..types import DependencyEdge
 class WebStackPlugin(LanguagePlugin):
     _MODULE_EXTENSIONS = (
         ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
-        ".vue", ".svelte", ".css", ".scss", ".sass",
+        ".vue", ".svelte", ".html", ".htm", ".css", ".scss", ".sass",
         ".json",
     )
     
     @property
     def extensions(self) -> List[str]:
-        return ['.js', '.jsx', '.ts', '.tsx', '.html', '.css', '.vue', '.svelte']
+        # Include web surface formats; AST queries are gated per language.
+        return ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.vue', '.svelte', '.html', '.htm']
+
+    @property
+    def import_query_languages(self) -> Optional[Set[str]]:
+        # JS/TS queries only; Vue/Svelte/HTML require language injection.
+        # TODO: Add Vue/Svelte language injection so we can extract script imports.
+        return {"javascript", "typescript", "tsx"}
     
     @property
     def context_keys(self) -> List[str]:
@@ -26,11 +33,19 @@ class WebStackPlugin(LanguagePlugin):
 
     @property
     def import_queries(self) -> str:
-        # Combined queries for TS/JS
+        # Prefer capturing the literal import path directly when tree-sitter can
+        # see it. Resolver regex remains as a fallback for more complex forms.
         return """
         (import_statement source: (string) @import)
         (export_statement source: (string) @import)
-        (require_call arguments: (arguments (string) @import))
+        (call_expression
+          function: (identifier) @func (#eq? @func "require")
+          arguments: (arguments (string) @import)
+        )
+        (call_expression
+          function: (import)
+          arguments: (arguments (string) @import)
+        )
         """
 
     def parse_manifest(self, manifest_path: Path) -> Dict[str, Any]:
@@ -256,11 +271,22 @@ class WebStackPlugin(LanguagePlugin):
         from_file: Path, 
         config: PluginConfig
     ) -> Optional[DependencyEdge]:
-        match = re.search(r'["\']([^"\']+)["\']', import_stmt)
+        import_stmt = import_stmt.strip()
+        match = None
+        if import_stmt and import_stmt[0] in {"'", '"', "`"}:
+            match = re.search(r'^([\"\'`])([^\"\'`]+)\1', import_stmt)
+        else:
+            # Handle ES module import/export statements.
+            match = re.search(r'\bfrom\s+([\"\'`])([^\"\'`]+)\1', import_stmt)
+            if not match:
+                match = re.search(r'\bimport\s+([\"\'`])([^\"\'`]+)\1', import_stmt)
+            if not match:
+                # Handle require()/dynamic import() calls.
+                match = re.search(r'^(?:require|import)\s*\(\s*([\"\'`])([^\"\'`]+)\1', import_stmt)
         if not match:
             return None
         
-        import_path = match.group(1).strip()
+        import_path = match.group(2).strip()
         if not import_path:
             return None
         

@@ -14,6 +14,7 @@ import thepipe.core as core
 import thepipe.scraper as scraper
 
 
+@unittest.skipUnless(os.environ.get("THEPIPE_SCRAPER_TESTS"), "requires scraper integration deps")
 class test_scraper(unittest.TestCase):
     def setUp(self):
         self.files_directory = os.path.join(os.path.dirname(__file__), "files")
@@ -106,6 +107,9 @@ class test_scraper(unittest.TestCase):
         self.assertTrue(any(c.images for c in chunks))
 
     def test_scrape_spreadsheet(self):
+        # Depends on pandas + openpyxl; keep optional to avoid binary import crashes.
+        if not os.environ.get("THEPIPE_SPREADSHEET_TESTS"):
+            self.skipTest("requires openpyxl/pandas")
         with tempfile.TemporaryDirectory() as tmp:
             df = pd.DataFrame({"a": [1, 2]})
             csvp = os.path.join(tmp, "t.csv")
@@ -193,6 +197,7 @@ class test_scraper(unittest.TestCase):
             any(chunk.images and len(chunk.images or []) > 0 for chunk in chunks)
         )
 
+    @unittest.skipUnless(os.environ.get("THEPIPE_MEDIA_TESTS"), "requires whisper/ffmpeg")
     def test_scrape_audio(self):
         chunks = scraper.scrape_file(
             os.path.join(self.files_directory, "example.mp3"), verbose=True
@@ -210,6 +215,7 @@ class test_scraper(unittest.TestCase):
             any(chunk.text and "citizens" in chunk.text.lower() for chunk in chunks)
         )
 
+    @unittest.skipUnless(os.environ.get("THEPIPE_MEDIA_TESTS"), "requires whisper/ffmpeg")
     def test_scrape_video(self):
         chunks = scraper.scrape_file(
             os.path.join(self.files_directory, "example.mp4"), verbose=True
@@ -248,6 +254,7 @@ class test_scraper(unittest.TestCase):
             any(chunk.images and len(chunk.images or []) > 0 for chunk in chunks)
         )
 
+    @unittest.skipUnless(os.environ.get("THEPIPE_NETWORK_TESTS"), "requires network access")
     def test_scrape_tweet(self):
         tweet_url = "https://x.com/ylecun/status/1796734866156843480"
         chunks = scraper.scrape_url(tweet_url)
@@ -259,6 +266,7 @@ class test_scraper(unittest.TestCase):
         self.assertTrue(chunks[0].text and len(chunks[0].text or "") > 0)
         self.assertTrue(chunks[0].images and len(chunks[0].images or []) > 0)
 
+    @unittest.skipUnless(os.environ.get("THEPIPE_NETWORK_TESTS"), "requires network access")
     def test_scrape_url(self):
         # verify web page scrape result
         chunks = scraper.scrape_url("https://en.wikipedia.org/wiki/Piping")

@@ -2,12 +2,16 @@
 Code Relations Integration
 
 Integrates the analyzer with scrape_directory, outputting standard Chunks.
-Supports code_relations modes: limited, map, mapnn, mapall
+Supports code_relations modes: limited, map, mapnn, mapall, mapnew
 """
 
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 
 from ..core import Chunk
 from .types import FileAnalysis, DependencyGraph, AnalysisResult
@@ -27,6 +31,7 @@ CODE_RELATIONS_MODES = {
     "map",       # Digests for everything
     "mapnn",     # Digests + N_1/N_2 neighbor die-off
     "mapall",    # Full files for include_patterns, digests for rest
+    "mapnew",    # Diff map (old vs new)
 }
 
 # Default thresholds for auto mode
@@ -41,11 +46,13 @@ DEFAULT_N2 = 5  # Don't include beyond this (code_n2)
 def process_code_relations(
     dir_path: str,
     include_patterns: Optional[List[str]] = None,
-    mode: str = "mapnn",
+    mode: str = "auto",
     code_n1: int = DEFAULT_N1,
     code_n2: int = DEFAULT_N2,
     code_nf: int = DEFAULT_NF,
     code_nt: int = DEFAULT_NT,
+    code_old: Optional[str] = None,
+    code_new: Optional[str] = None,
     verbose: bool = False,
     options: Optional[Dict[str, Any]] = None,
 ) -> List[Chunk]:
@@ -65,6 +72,8 @@ def process_code_relations(
         code_n2: N_2 distance - cutoff, don't include (default: 5)
         code_nf: File count threshold for auto mode (default: 100)
         code_nt: Token count threshold for auto mode (default: 150000)
+        code_old: Old git commit-ish for mapnew (default: HEAD)
+        code_new: New git commit-ish for mapnew (default: working tree)
         verbose: Print progress
         options: Additional options
         
@@ -74,16 +83,28 @@ def process_code_relations(
     if mode not in CODE_RELATIONS_MODES:
         logger.warning(f"Unknown mode '{mode}', defaulting to 'auto'")
         mode = "auto"
+
+    if mode == "mapnew":
+        return _process_mapnew(
+            dir_path=dir_path,
+            include_patterns=include_patterns,
+            code_old=code_old,
+            code_new=code_new,
+            verbose=verbose,
+            options=options or {},
+        )
     
     dir_path = str(Path(dir_path).resolve())
     
     # UNIFIED FILE DISCOVERY: Use same logic as normal scraper
     from ..file_utils import get_filtered_files
     
-    # Get all files using the same logic as scrape_directory
+    # Get all files using the same logic as scrape_directory.
+    # Only restrict discovery for "limited" mode; other modes need full context.
+    discover_patterns = include_patterns if mode == "limited" else None
     all_discovered_files = get_filtered_files(
         dir_path=dir_path,
-        include_patterns=include_patterns,
+        include_patterns=discover_patterns,
         verbose=verbose
     )
     
@@ -125,7 +146,7 @@ def process_code_relations(
         print(f"Found {result.total_files} files, {len(result.dependency_graph.edges)} dependencies")
     
     # Step 2: Sanity check - if files don't interact, just return them as-is
-    if _files_dont_interact(result, include_patterns):
+    if _files_dont_interact(result, include_patterns, mode):
         if verbose:
             print("Files don't interact - returning as standalone scripts")
         return _return_standalone_files(dir_path, result, include_patterns)
@@ -151,7 +172,7 @@ def process_code_relations(
     tokens_actual = 0  # What we're actually sending
     
     # Primary files: full code
-    for filepath in primary_files:
+    for filepath in sorted(primary_files):
         chunk = _file_to_chunk(dir_path, filepath, result, analyzer, as_digest=False)
         if chunk:
             chunks.append(chunk)
@@ -160,7 +181,7 @@ def process_code_relations(
             tokens_actual += chunk_tokens
     
     # N_1 files: digests
-    for filepath in n1_files:
+    for filepath in sorted(n1_files):
         # Track what full code would have cost
         full_path = Path(dir_path) / filepath
         try:
@@ -176,7 +197,7 @@ def process_code_relations(
             tokens_actual += _estimate_tokens(chunk.text)
     
     # Add excluded files to the "full" count for comparison
-    for filepath in n2_excluded:
+    for filepath in sorted(n2_excluded):
         full_path = Path(dir_path) / filepath
         try:
             with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -208,9 +229,268 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+# TODO(mapnew-regions): Extend mapnew with region-aware implementation diffs.
+# Current behavior compares old/new map text, which is intentionally structural:
+# imports, class/type surfaces, signatures, and lightweight call edges. This is
+# excellent for stable relation diffs, but it intentionally hides body-only
+# edits. The next step is to preserve that token-efficient structural diff while
+# also surfacing "implementation-only changes" for downstream review UIs and
+# agents.
+#
+# Proposed data model (verbose JSON / internal metadata):
+# - file imports: exact normalized import strings (internal + external context)
+# - regions: stable logical units with explicit line spans
+#   * module:top          -> top-level / import region
+#   * class:<name>        -> class, struct, enum, protocol, extension, etc.
+#   * func:<qualified>    -> function or method region
+# - each region carries:
+#   * id
+#   * kind
+#   * name / container
+#   * start_line / end_line
+#   * map_hash      -> normalized structural digest fingerprint
+#   * content_hash  -> normalized source fingerprint
+#
+# Proposed mapnew algorithm:
+# 1. Use `git diff --unified=0 <old> <new>` (or HEAD vs working tree) to get
+#    changed hunk ranges cheaply without materializing raw full-repo diffs.
+# 2. Join changed hunks against region spans from old/new analyses.
+# 3. For each touched region:
+#    - if map_hash changed: include in structural map diff as today
+#    - if content_hash changed but map_hash did not: append a bottom section
+#      such as "implementation-only changes" so agents know where to zoom in
+# 4. Keep the current unified map diff as the primary artifact.
+#
+# Notes:
+# - External library changes are reliably tracked at the import/dependency
+#   level today. Body-level external API usage is only partially visible via
+#   the lightweight per-file call graph, so region metadata should document
+#   that limitation until we add resolved external-call tracking.
+# - This same schema should be sufficient for downstream gradual diff previews:
+#   chunked hunk application can target exact regions without reparsing raw map
+#   text.
+def _process_mapnew(
+    dir_path: str,
+    include_patterns: Optional[List[str]],
+    code_old: Optional[str],
+    code_new: Optional[str],
+    verbose: bool,
+    options: Dict[str, Any],
+) -> List[Chunk]:
+    """
+    Build a unified diff between map outputs for two versions of the repo.
+
+    Defaults:
+      - old: HEAD
+      - new: working tree
+    """
+    repo_root = _git_root(dir_path)
+    if not repo_root:
+        return [_mapnew_fallback_chunk("Not a git repo", dir_path, include_patterns, code_old, code_new)]
+
+    old_ref = code_old or "HEAD"
+    new_ref = code_new or None
+
+    worktrees: List[str] = []
+    try:
+        old_dir = _create_worktree(repo_root, old_ref)
+        worktrees.append(old_dir)
+
+        if new_ref:
+            new_dir = _create_worktree(repo_root, new_ref)
+            worktrees.append(new_dir)
+            new_label = new_ref
+        else:
+            new_dir = dir_path
+            new_label = "working-tree"
+
+        old_chunks = process_code_relations(
+            dir_path=old_dir,
+            include_patterns=include_patterns,
+            mode="map",
+            code_n1=options.get("code_n1", DEFAULT_N1),
+            code_n2=options.get("code_n2", DEFAULT_N2),
+            code_nf=options.get("code_nf", DEFAULT_NF),
+            code_nt=options.get("code_nt", DEFAULT_NT),
+            verbose=False,
+        )
+        new_chunks = process_code_relations(
+            dir_path=new_dir,
+            include_patterns=include_patterns,
+            mode="map",
+            code_n1=options.get("code_n1", DEFAULT_N1),
+            code_n2=options.get("code_n2", DEFAULT_N2),
+            code_nf=options.get("code_nf", DEFAULT_NF),
+            code_nt=options.get("code_nt", DEFAULT_NT),
+            verbose=False,
+        )
+
+        diff_text = _diff_chunk_outputs(
+            old_chunks=old_chunks,
+            new_chunks=new_chunks,
+            old_label=old_ref,
+            new_label=new_label,
+        )
+        header = [
+            "# Code Relations Diff (mapnew)",
+            f"# old: {old_ref}",
+            f"# new: {new_label}",
+            "",
+        ]
+        text = "\n".join(header + [diff_text])
+        return [Chunk(
+            path="mapnew.diff",
+            text=text,
+            meta={
+                "artifact": "mapnew_diff",
+                "virtual": True,
+                "old_ref": old_ref,
+                "new_ref": new_label,
+            },
+        )]
+    except Exception as e:
+        return [_mapnew_fallback_chunk(str(e), dir_path, include_patterns, code_old, code_new)]
+    finally:
+        for wt in worktrees:
+            _remove_worktree(repo_root, wt)
+
+
+def _git_root(dir_path: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", dir_path, "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return None
+
+
+def _create_worktree(repo_root: str, ref: str) -> str:
+    worktree_dir = tempfile.mkdtemp(prefix="thepipe_mapnew_")
+    try:
+        subprocess.run(
+            ["git", "-C", repo_root, "worktree", "add", "--detach", worktree_dir, ref],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+        raise
+    return worktree_dir
+
+
+def _remove_worktree(repo_root: str, worktree_dir: str) -> None:
+    try:
+        subprocess.run(
+            ["git", "-C", repo_root, "worktree", "remove", "--force", worktree_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        pass
+    if os.path.isdir(worktree_dir):
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+
+
+def _write_chunks_to_file(chunks: List[Chunk], output_path: Path) -> None:
+    with output_path.open("w", encoding="utf-8") as handle:
+        wrote_any = False
+        for chunk in chunks:
+            if not chunk.text:
+                continue
+            if wrote_any:
+                handle.write("\n\n")
+            handle.write(chunk.text)
+            if not chunk.text.endswith("\n"):
+                handle.write("\n")
+            wrote_any = True
+
+
+def _diff_chunk_outputs(
+    old_chunks: List[Chunk],
+    new_chunks: List[Chunk],
+    old_label: str,
+    new_label: str,
+) -> str:
+    with tempfile.TemporaryDirectory(prefix="thepipe_mapnew_diff_") as temp_dir:
+        temp_path = Path(temp_dir)
+        old_file = temp_path / "old.txt"
+        new_file = temp_path / "new.txt"
+        _write_chunks_to_file(old_chunks, old_file)
+        _write_chunks_to_file(new_chunks, new_file)
+
+        result = subprocess.run(
+            ["diff", "-u", str(old_file), str(new_file)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode not in (0, 1):
+            detail = result.stderr.strip() or result.stdout.strip() or "diff failed"
+            raise RuntimeError(detail)
+
+        if not result.stdout.strip():
+            return "(no changes)"
+
+        diff_lines = result.stdout.splitlines()
+        if diff_lines and diff_lines[0].startswith("--- "):
+            diff_lines[0] = f"--- old:{old_label}"
+        if len(diff_lines) > 1 and diff_lines[1].startswith("+++ "):
+            diff_lines[1] = f"+++ new:{new_label}"
+        return "\n".join(diff_lines)
+
+
+def _mapnew_fallback_chunk(
+    error: str,
+    dir_path: str,
+    include_patterns: Optional[List[str]],
+    code_old: Optional[str],
+    code_new: Optional[str],
+) -> Chunk:
+    old_ref = code_old or "HEAD"
+    new_ref = code_new or "(working tree)"
+    include_args = ""
+    if include_patterns:
+        quoted_patterns = " ".join(f'"{pattern}"' for pattern in include_patterns)
+        include_args = f" --include_patterns {quoted_patterns}"
+    lines = [
+        "# mapnew failed",
+        f"Error: {error}",
+        "",
+        "## Manual fallback (git worktree)",
+        "Use git worktrees to compare map outputs:",
+        "",
+        "```bash",
+        f"git worktree add --detach /tmp/thepipe-old {old_ref}",
+        f"# new: {new_ref}",
+        f"git worktree add --detach /tmp/thepipe-new {code_new}" if code_new else f"# use current repo at {dir_path}",
+        f"/opt/anaconda3/envs/thepipe/bin/thepipe /tmp/thepipe-old{include_args} --options '{{\"code_relations\":\"map\"}}' -f > /tmp/thepipe-old-map.txt",
+        f"/opt/anaconda3/envs/thepipe/bin/thepipe /tmp/thepipe-new{include_args} --options '{{\"code_relations\":\"map\"}}' -f > /tmp/thepipe-new-map.txt" if code_new else f"/opt/anaconda3/envs/thepipe/bin/thepipe {dir_path}{include_args} --options '{{\"code_relations\":\"map\"}}' -f > /tmp/thepipe-new-map.txt",
+        "diff -u /tmp/thepipe-old-map.txt /tmp/thepipe-new-map.txt",
+        "```",
+    ]
+    return Chunk(
+        path="mapnew-fallback.md",
+        text="\n".join(lines),
+        meta={
+            "artifact": "mapnew_fallback",
+            "virtual": True,
+            "error": error,
+            "old_ref": old_ref,
+            "new_ref": new_ref,
+        },
+    )
+
+
 def _files_dont_interact(
     result: AnalysisResult,
     include_patterns: Optional[List[str]],
+    mode: str,
 ) -> bool:
     """
     Sanity check: do the selected files have any internal dependencies?
@@ -218,6 +498,8 @@ def _files_dont_interact(
     If include_patterns files don't import each other or share dependencies,
     skip the relationship mapping entirely.
     """
+    if mode in {"map", "mapnn", "mapall"}:
+        return False
     if not include_patterns:
         return False
     
@@ -378,8 +660,51 @@ def _file_to_chunk(
     else:
         # Full code
         text = f"# {filepath}\n{content}"
-    
-    return Chunk(path=filepath, text=text)
+
+    analysis = result.files.get(filepath)
+    return Chunk(
+        path=filepath,
+        text=text,
+        meta=_analysis_to_meta(analysis) if analysis else None,
+    )
+
+
+def _analysis_to_meta(analysis: FileAnalysis) -> Dict[str, Any]:
+    """Build verbose JSON metadata with line info for functions/classes/calls."""
+    imports = []
+    for imp in analysis.imports:
+        if not imp:
+            continue
+        cleaned = " ".join(imp.strip().split())
+        if cleaned:
+            imports.append(cleaned)
+    functions = [
+        {"name": f.name, "start_line": f.start_line, "end_line": f.end_line}
+        for f in analysis.functions
+        if f.name
+    ]
+    classes = [
+        {"name": c.name, "start_line": c.start_line, "end_line": c.end_line}
+        for c in analysis.classes
+        if c.name
+    ]
+    call_graph = [
+        {"caller": e.caller, "callee": e.callee, "line": e.line}
+        for e in analysis.call_graph
+    ]
+    imports = sorted(set(imports))
+    functions.sort(key=lambda f: (f["name"], f["start_line"], f["end_line"]))
+    classes.sort(key=lambda c: (c["name"], c["start_line"], c["end_line"]))
+    call_graph.sort(key=lambda e: (e["caller"], e["callee"], e["line"]))
+    return {
+        "language": analysis.language,
+        "line_count": analysis.line_count,
+        "imports": imports,
+        "imports_count": len(analysis.imports),
+        "functions": functions,
+        "classes": classes,
+        "call_graph": call_graph,
+    }
 
 
 def _build_summary_chunk(
@@ -420,12 +745,17 @@ def _build_summary_chunk(
 def get_code_relations_options() -> Dict[str, Any]:
     """
     Get default options for code_relations.
-    
+
+    This is the conservative programmatic default. Agent instructions may
+    recommend `map` as a first pass when full repo structure is desired.
+
     Use in scrape_directory options:
-        options = {"code_relations": "mapnn", "code_n1": 3, "code_n2": 5}
+        options = {"code_relations": "auto", "code_n1": 3, "code_n2": 5}
     """
     return {
-        "code_relations": None,  # None, "limited", "map", "mapnn", "mapall"
+        "code_relations": "auto",  # None, "limited", "map", "mapnn", "mapall"
         "code_n1": DEFAULT_N1,
         "code_n2": DEFAULT_N2,
+        "code_old": None,
+        "code_new": None,
     }

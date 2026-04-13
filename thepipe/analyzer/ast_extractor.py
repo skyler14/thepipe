@@ -7,8 +7,9 @@ Language-agnostic AST extraction with support for 165+ languages via tree-sitter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
+import re
 
-from .types import ASTNode, FileAnalysis
+from .types import ASTNode, FileAnalysis, CallGraphEntry
 from .plugins import register_builtin_plugins
 from .plugins.base import LanguagePlugin
 
@@ -50,7 +51,7 @@ EXTENSION_TO_LANGUAGE = {
     '.cjs': 'javascript',
     '.jsx': 'javascript',
     '.ts': 'typescript',
-    '.tsx': 'typescript',
+    '.tsx': 'tsx',
     '.go': 'go',
     '.rs': 'rust',
     '.c': 'c',
@@ -92,6 +93,8 @@ EXTENSION_TO_LANGUAGE = {
     '.S': 'asm',
     '.html': 'html',
     '.htm': 'html',
+    '.vue': 'vue',
+    '.svelte': 'svelte',
     '.m': 'objective_c',
     '.pl': 'perl',
     '.pm': 'perl',
@@ -100,8 +103,7 @@ EXTENSION_TO_LANGUAGE = {
 # Query patterns for extracting imports (language-specific)
 IMPORT_QUERIES = {
     'dart': """
-        (import_directive) @import
-        (export_directive) @import
+        (import_or_export) @import
     """,
     'python': """
         (import_statement) @import
@@ -119,9 +121,18 @@ IMPORT_QUERIES = {
             function: (identifier) @func (#eq? @func "require")
         ) @import
     """,
+    'tsx': """
+        (import_statement) @import
+        (call_expression
+            function: (identifier) @func (#eq? @func "require")
+        ) @import
+    """,
     'go': """
         (import_declaration) @import
         (import_spec) @import  
+    """,
+    'haskell': """
+        (import) @import
     """,
     'rust': """
         (use_declaration) @import
@@ -151,7 +162,16 @@ FUNCTION_QUERIES = {
         (arrow_function) @func
         (method_definition name: (property_identifier) @name) @func
     """,
+    'tsx': """
+        (function_declaration name: (identifier) @name) @func
+        (arrow_function) @func
+        (method_definition name: (property_identifier) @name) @func
+    """,
     'go': '(function_declaration name: (identifier) @name) @func',
+    'haskell': """
+        (signature name: (variable) @name) @func
+        (function name: (variable) @name) @func
+    """,
     'rust': '(function_item name: (identifier) @name) @func',
     'c': '(function_definition declarator: (function_declarator declarator: (identifier) @name)) @func',
     'cpp': '(function_definition declarator: (function_declarator declarator: (identifier) @name)) @func',
@@ -162,8 +182,7 @@ FUNCTION_QUERIES = {
     """,
     'dart': """
         (function_signature name: (identifier) @name) @func
-        (method_declaration name: (identifier) @name) @func
-        (constructor_declaration name: (identifier) @name) @func
+        (constructor_signature name: (identifier) @name) @func
     """,
 }
 
@@ -171,17 +190,25 @@ FUNCTION_QUERIES = {
 CLASS_QUERIES = {
     'python': '(class_definition name: (identifier) @name) @class',
     'javascript': '(class_declaration name: (identifier) @name) @class',
-    'typescript': '(class_declaration name: (identifier) @name) @class',
+    'typescript': """
+        (class_declaration) @class
+        (interface_declaration) @class
+        (type_alias_declaration) @class
+        (enum_declaration) @class
+    """,
+    'tsx': """
+        (class_declaration) @class
+        (interface_declaration) @class
+        (type_alias_declaration) @class
+        (enum_declaration) @class
+    """,
     'go': '(type_declaration (type_spec name: (type_identifier) @name)) @class',
+    'haskell': '(data_type name: (name) @name) @class',
     'rust': '(struct_item name: (type_identifier) @name) @class',
     'java': '(class_declaration name: (identifier) @name) @class',
     'swift': """
-        (class_declaration name: (type_identifier) @name) @class
-        (struct_declaration name: (type_identifier) @name) @class
-        (enum_declaration name: (type_identifier) @name) @class
+        (class_declaration) @class
         (protocol_declaration name: (type_identifier) @name) @class
-        (actor_declaration name: (type_identifier) @name) @class
-        (extension_declaration type: (type_identifier) @name) @class
     """,
     'dart': """
         (class_definition name: (identifier) @name) @class
@@ -189,6 +216,21 @@ CLASS_QUERIES = {
         (extension_declaration name: (identifier) @name) @class
         (enum_declaration name: (identifier) @name) @class
     """,
+}
+
+# Node types for lightweight call graph extraction (per language)
+FUNCTION_NODE_TYPES = {
+    'javascript': {'function_declaration', 'method_definition', 'arrow_function', 'function_expression'},
+    'typescript': {'function_declaration', 'method_definition', 'arrow_function', 'function_expression'},
+    'tsx': {'function_declaration', 'method_definition', 'arrow_function', 'function_expression'},
+    'python': {'function_definition'},
+}
+
+CALL_NODE_TYPES = {
+    'javascript': {'call_expression'},
+    'typescript': {'call_expression'},
+    'tsx': {'call_expression'},
+    'python': {'call'},
 }
 
 
@@ -232,7 +274,11 @@ def _is_class_node(node) -> bool:
     return any(kw in node_type for kw in class_keywords)
 
 
-def _extract_identifier_from_node(node, source: str) -> Optional[str]:
+def _slice_source(source_bytes: bytes, start_byte: int, end_byte: int) -> str:
+    return source_bytes[start_byte:end_byte].decode("utf-8", errors="ignore")
+
+
+def _extract_identifier_from_node(node, source_bytes: bytes) -> Optional[str]:
     """Extract identifier/name from a node by looking for identifier children.
     
     Universal helper that searches for common identifier node types.
@@ -242,15 +288,62 @@ def _extract_identifier_from_node(node, source: str) -> Optional[str]:
     # Direct identifier child
     for child in node.children:
         if child.type in identifier_types:
-            return source[child.start_byte:child.end_byte]
+            return _slice_source(source_bytes, child.start_byte, child.end_byte)
     
     # Nested identifier (e.g., in type_spec or declarators)
     for child in node.children:
         for subchild in child.children:
             if subchild.type in identifier_types:
-                return source[subchild.start_byte:subchild.end_byte]
+                return _slice_source(source_bytes, subchild.start_byte, subchild.end_byte)
     
     return None
+
+
+def _extract_function_like_name(node, source_bytes: bytes) -> Optional[str]:
+    """Best-effort function name extraction, including assigned lambdas."""
+    name = _extract_identifier_from_node(node, source_bytes)
+    if name:
+        return name
+
+    parent = getattr(node, "parent", None)
+    if parent is not None and parent.type == "variable_declarator":
+        for child in parent.children:
+            if child.type in {"identifier", "property_identifier", "type_identifier"}:
+                return _slice_source(source_bytes, child.start_byte, child.end_byte)
+
+    return None
+
+def _iter_tree(root_node):
+    """Iterative depth-first traversal with enter/exit events."""
+    stack = [(root_node, False)]
+    while stack:
+        node, exiting = stack.pop()
+        yield node, exiting
+        if exiting:
+            continue
+        children = getattr(node, "children", None)
+        if not children:
+            continue
+        stack.append((node, True))
+        for child in reversed(children):
+            stack.append((child, False))
+
+
+def _indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _infer_fallback_end_line(
+    current: Dict[str, int],
+    boundary_points: List[Dict[str, int]],
+    total_lines: int,
+) -> int:
+    for later in boundary_points:
+        if later["start_line"] <= current["start_line"]:
+            continue
+        if later["indent"] <= current["indent"]:
+            return max(current["start_line"], later["start_line"] - 1)
+    return max(current["start_line"], total_lines)
 
 
 class ASTExtractor:
@@ -314,9 +407,10 @@ class ASTExtractor:
         parser, lang = self._get_parser(language)
         if parser is None:
             return None
-        
+
+        source_bytes = source_code.encode('utf-8', errors='replace')
         try:
-            tree = parser.parse(source_code.encode('utf-8'))
+            tree = parser.parse(source_bytes)
         except Exception as e:
             logger.error(f"Failed to parse {filepath}: {e}")
             return None
@@ -324,7 +418,7 @@ class ASTExtractor:
         analysis = FileAnalysis(
             path=filepath,
             language=language,
-            size_bytes=len(source_code.encode('utf-8')),
+            size_bytes=len(source_bytes),
             line_count=source_code.count('\n') + 1,
         )
         
@@ -332,17 +426,22 @@ class ASTExtractor:
         
         # Extract imports
         analysis.imports = self._extract_imports(
-            tree, source_code, language, lang, plugin=plugin
+            tree, source_code, source_bytes, language, lang, plugin=plugin
         )
         
         # Extract functions
         analysis.functions = self._extract_functions(
-            tree, source_code, language, lang, plugin=plugin
+            tree, source_code, source_bytes, language, lang, plugin=plugin
         )
         
         # Extract classes
         analysis.classes = self._extract_classes(
-            tree, source_code, language, lang, plugin=plugin
+            tree, source_code, source_bytes, language, lang, plugin=plugin
+        )
+
+        # Extract lightweight call graph (best-effort)
+        analysis.call_graph = self._extract_call_graph(
+            tree, source_bytes, language
         )
         
         # Detect cross-language bridges
@@ -354,6 +453,7 @@ class ASTExtractor:
         self,
         tree,
         source: str,
+        source_bytes: bytes,
         language: str,
         lang,
         plugin: Optional[LanguagePlugin] = None,
@@ -363,13 +463,17 @@ class ASTExtractor:
         
         query_str = ""
         if plugin and plugin.import_queries.strip():
-            query_str = plugin.import_queries
+            allowed_languages = plugin.import_query_languages
+            if allowed_languages is None or language in allowed_languages:
+                query_str = plugin.import_queries
+            else:
+                query_str = IMPORT_QUERIES.get(language, "")
         else:
             query_str = IMPORT_QUERIES.get(language, "")
         
         if not query_str or lang is None:
             # Fallback: walk tree manually for common patterns
-            return self._extract_imports_fallback(tree, source, language)
+            return self._extract_imports_fallback(tree, source_bytes, language)
         
         try:
             query = lang.query(query_str)
@@ -377,32 +481,29 @@ class ASTExtractor:
             
             for node, name in captures:
                 if name == 'import':
-                    import_text = source[node.start_byte:node.end_byte]
+                    import_text = _slice_source(source_bytes, node.start_byte, node.end_byte)
                     imports.append(import_text.strip())
         except Exception as e:
             logger.warning(
                 f"Query failed for {language} imports; using fallback",
                 exc_info=True,
             )
-            return self._extract_imports_fallback(tree, source, language)
+            return self._extract_imports_fallback(tree, source_bytes, language)
         
         return imports
     
-    def _extract_imports_fallback(self, tree, source: str, language: str) -> List[str]:
+    def _extract_imports_fallback(self, tree, source_bytes: bytes, language: str) -> List[str]:
         """Universal fallback import extraction using pattern matching.
         
         Works for all 165 tree-sitter languages by detecting import-related node types.
         """
         imports = []
-        
-        def walk(node):
+
+        for node, exiting in _iter_tree(tree.root_node):
+            if exiting:
+                continue
             if _is_import_node(node):
-                imports.append(source[node.start_byte:node.end_byte].strip())
-            
-            for child in node.children:
-                walk(child)
-        
-        walk(tree.root_node)
+                imports.append(_slice_source(source_bytes, node.start_byte, node.end_byte).strip())
         return imports
 
     @staticmethod
@@ -430,7 +531,7 @@ class ASTExtractor:
     @staticmethod
     def _build_name_capture_maps(
         captures,
-        source: str,
+        source_bytes: bytes,
     ) -> Tuple[Dict[NodeKey, str], Dict[NodeKey, str]]:
         """
         Index @name captures by parent/grandparent node key for O(1) lookup.
@@ -445,7 +546,7 @@ class ASTExtractor:
             if capture_name != 'name':
                 continue
 
-            name_text = source[node.start_byte:node.end_byte]
+            name_text = _slice_source(source_bytes, node.start_byte, node.end_byte)
             # Prefer identifier-like captures over larger declarator spans:
             # shorter capture span usually corresponds to the actual symbol token
             # (e.g., `foo`) rather than a wrapped declarator or qualified path.
@@ -538,6 +639,7 @@ class ASTExtractor:
         self,
         tree,
         source: str,
+        source_bytes: bytes,
         language: str,
         lang,
         plugin: Optional[LanguagePlugin] = None,
@@ -557,7 +659,7 @@ class ASTExtractor:
                 query = lang.query(query_str)
                 captures = self._query_captures(query, tree.root_node)
                 direct_name_map, nested_name_map = self._build_name_capture_maps(
-                    captures, source
+                    captures, source_bytes
                 )
                 
                 # Deduplicate by node ID to handle multiple captures per node
@@ -570,7 +672,7 @@ class ASTExtractor:
                         if not name:
                             name = nested_name_map.get(node_key)
                         if not name:
-                            name = _extract_identifier_from_node(node, source)
+                            name = _extract_function_like_name(node, source_bytes)
                         
                         functions.append(ASTNode(
                             type='function',
@@ -581,7 +683,23 @@ class ASTExtractor:
                             end_byte=node.end_byte,
                         ))
                         processed_nodes.add(node_key)
-                
+
+                if language == "haskell":
+                    by_name: Dict[str, ASTNode] = {}
+                    for func in functions:
+                        if not func.name:
+                            continue
+                        existing = by_name.get(func.name)
+                        if existing is None or (
+                            func.start_line,
+                            func.end_line,
+                        ) < (
+                            existing.start_line,
+                            existing.end_line,
+                        ):
+                            by_name[func.name] = func
+                    functions = list(by_name.values())
+
                 return functions
             except Exception as e:
                 logger.warning(
@@ -589,30 +707,30 @@ class ASTExtractor:
                     exc_info=True,
                 )
         
-        # Original fallback logic
-        def walk(node):
-            if _is_function_node(node):
-                name = _extract_identifier_from_node(node, source)
-                if name:
-                    functions.append(ASTNode(
-                        type='function',
-                        name=name,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
-                        start_byte=node.start_byte,
-                        end_byte=node.end_byte,
-                    ))
-            
-            for child in node.children:
-                walk(child)
-        
-        walk(tree.root_node)
+        for node, exiting in _iter_tree(tree.root_node):
+            if exiting:
+                continue
+            if not _is_function_node(node):
+                continue
+            name = _extract_function_like_name(node, source_bytes)
+            if name:
+                functions.append(ASTNode(
+                    type='function',
+                    name=name,
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                ))
+        if not functions:
+            functions = self._regex_fallback_functions(language, source)
         return functions
 
     def _extract_classes(
         self,
         tree,
         source: str,
+        source_bytes: bytes,
         language: str,
         lang,
         plugin: Optional[LanguagePlugin] = None,
@@ -632,7 +750,7 @@ class ASTExtractor:
                 query = lang.query(query_str)
                 captures = self._query_captures(query, tree.root_node)
                 direct_name_map, nested_name_map = self._build_name_capture_maps(
-                    captures, source
+                    captures, source_bytes
                 )
                 
                 processed_nodes = set()
@@ -644,7 +762,7 @@ class ASTExtractor:
                         if not name:
                             name = nested_name_map.get(node_key)
                         if not name:
-                            name = _extract_identifier_from_node(node, source)
+                            name = _extract_identifier_from_node(node, source_bytes)
                             
                         classes.append(ASTNode(
                             type='class',
@@ -662,25 +780,146 @@ class ASTExtractor:
                     exc_info=True,
                 )
         
-        # Original fallback logic
-        def walk(node):
-            if _is_class_node(node):
-                name = _extract_identifier_from_node(node, source)
-                if name:  # Filter unnamed classes
-                    classes.append(ASTNode(
-                        type='class',
-                        name=name,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
-                        start_byte=node.start_byte,
-                        end_byte=node.end_byte,
-                    ))
-            
-            for child in node.children:
-                walk(child)
-        
-        walk(tree.root_node)
+        for node, exiting in _iter_tree(tree.root_node):
+            if exiting:
+                continue
+            if not _is_class_node(node):
+                continue
+            name = _extract_identifier_from_node(node, source_bytes)
+            if name:
+                classes.append(ASTNode(
+                    type='class',
+                    name=name,
+                    start_line=node.start_point[0] + 1,
+                    end_line=node.end_point[0] + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                ))
+        if not classes:
+            classes = self._regex_fallback_classes(language, source)
         return classes
+
+    def _regex_fallback_functions(self, language: str, source: str) -> List[ASTNode]:
+        return self._regex_fallback_nodes(language, source, node_type="function")
+
+    def _regex_fallback_classes(self, language: str, source: str) -> List[ASTNode]:
+        return self._regex_fallback_nodes(language, source, node_type="class")
+
+    def _regex_fallback_nodes(
+        self,
+        language: str,
+        source: str,
+        node_type: str,
+    ) -> List[ASTNode]:
+        patterns: List[str] = []
+        haskell_typed_names = set()
+        haskell_keywords = {
+            "case", "class", "data", "default", "deriving", "do", "else", "foreign",
+            "if", "import", "in", "infix", "infixl", "infixr", "instance", "let",
+            "module", "newtype", "of", "then", "type", "where",
+        }
+        if node_type == "function":
+            if language == "ruby":
+                patterns = [r"^\s*def\s+(?:self\.)?([A-Za-z_]\w*[!?=]?)"]
+            elif language == "haskell":
+                patterns = [r"^\s*([a-z][\w']*)\s*::"]
+            elif language == "php":
+                patterns = [r"^\s*(?:public|protected|private|static|\s)*function\s+([A-Za-z_]\w*)"]
+            elif language == "r":
+                patterns = [r"^\s*([A-Za-z.][\w.]*)\s*(?:<-|=)\s*function\b"]
+        elif node_type == "class":
+            if language == "ruby":
+                patterns = [
+                    r"^\s*class\s+([A-Za-z_]\w*)",
+                    r"^\s*module\s+([A-Za-z_]\w*)",
+                ]
+            elif language == "php":
+                patterns = [r"^\s*class\s+([A-Za-z_]\w*)"]
+        if not patterns:
+            return []
+
+        lines = source.splitlines()
+        total_lines = len(lines)
+        raw_nodes = []
+        seen = set()
+        byte_offset = 0
+        boundary_patterns = patterns[:]
+
+        if language == "haskell" and node_type == "function":
+            for line in lines:
+                match = re.search(r"^\s*([a-z][\w']*)\s*::", line)
+                if match:
+                    haskell_typed_names.add(match.group(1))
+        elif language == "ruby":
+            boundary_patterns = [
+                r"^\s*def\s+(?:self\.)?[A-Za-z_]\w*[!?=]?",
+                r"^\s*class\s+[A-Za-z_]\w*",
+                r"^\s*module\s+[A-Za-z_]\w*",
+            ]
+        elif language == "php":
+            boundary_patterns = [
+                r"^\s*(?:public|protected|private|static|\s)*function\s+[A-Za-z_]\w*",
+                r"^\s*class\s+[A-Za-z_]\w*",
+            ]
+
+        boundary_points = []
+        for line_no, line in enumerate(lines, start=1):
+            for pattern in boundary_patterns:
+                if re.search(pattern, line):
+                    boundary_points.append({
+                        "start_line": line_no,
+                        "indent": _indent_width(line),
+                    })
+                    break
+
+        for line_no, line in enumerate(lines, start=1):
+            matches = []
+            if language == "haskell" and node_type == "function":
+                match = re.search(r"^\s*([a-z][\w']*)\s*::", line)
+                if not match:
+                    match = re.search(r"^\s*([a-z][\w']*)\s+[^=]+=", line)
+                if not match:
+                    simple_binding = re.search(r"^\s*([a-z][\w']*)\s*=", line)
+                    if simple_binding and simple_binding.group(1) in haskell_typed_names:
+                        match = simple_binding
+                if match:
+                    matches.append(match)
+            else:
+                for pattern in patterns:
+                    match = re.search(pattern, line)
+                    if match:
+                        matches.append(match)
+
+            for match in matches:
+                name = match.group(1)
+                if language == "haskell" and name in haskell_keywords:
+                    continue
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                raw_nodes.append({
+                    "name": name,
+                    "start_line": line_no,
+                    "start_byte": byte_offset + match.start(1),
+                    "end_byte": byte_offset + match.end(1),
+                    "indent": _indent_width(line),
+                })
+            byte_offset += len(line.encode("utf-8")) + 1
+
+        results: List[ASTNode] = []
+        for raw in raw_nodes:
+            end_line = _infer_fallback_end_line(raw, boundary_points, total_lines)
+
+            results.append(ASTNode(
+                type=node_type,
+                name=raw["name"],
+                start_line=raw["start_line"],
+                end_line=end_line,
+                start_byte=raw["start_byte"],
+                end_byte=raw["end_byte"],
+            ))
+
+        return results
     
     def _detect_cross_language(self, source: str, filepath: str) -> bool:
         """Detect if file uses cross-language bridges"""
@@ -705,6 +944,61 @@ class ASTExtractor:
             return True
         
         return False
+
+    def _extract_call_graph(
+        self,
+        tree,
+        source_bytes: bytes,
+        language: str,
+    ) -> List[CallGraphEntry]:
+        """Best-effort per-file call graph extraction for supported languages."""
+        if language not in FUNCTION_NODE_TYPES or language not in CALL_NODE_TYPES:
+            return []
+
+        func_types = FUNCTION_NODE_TYPES[language]
+        call_types = CALL_NODE_TYPES[language]
+        entries: List[CallGraphEntry] = []
+        function_stack: List[Tuple[NodeKey, str]] = []
+
+        def _callee_text(node) -> Optional[str]:
+            for child in node.children:
+                if child.type in {
+                    "identifier",
+                    "member_expression",
+                    "property_identifier",
+                    "scoped_identifier",
+                    "attribute",
+                }:
+                    candidate = _slice_source(source_bytes, child.start_byte, child.end_byte)
+                    if "(" in candidate or "\n" in candidate or "\r" in candidate:
+                        return None
+                    return candidate
+            return None
+
+        for node, exiting in _iter_tree(tree.root_node):
+            node_key = self._node_key(node)
+            if exiting:
+                if function_stack and function_stack[-1][0] == node_key:
+                    function_stack.pop()
+                continue
+
+            if node.type in func_types:
+                name = _extract_function_like_name(node, source_bytes)
+                if name:
+                    function_stack.append((node_key, name))
+
+            if node.type in call_types and function_stack:
+                callee = _callee_text(node)
+                if callee:
+                    entries.append(
+                        CallGraphEntry(
+                            caller=function_stack[-1][1],
+                            callee=callee,
+                            line=node.start_point[0] + 1,
+                        )
+                    )
+
+        return entries
 
 
 # Singleton instance for convenience

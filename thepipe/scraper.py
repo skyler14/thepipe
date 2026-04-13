@@ -506,6 +506,8 @@ def scrape_directory(
             code_n2=options.get('code_n2', 5),
             code_nf=options.get('code_nf', 100),
             code_nt=options.get('code_nt', 150000),
+            code_old=options.get('code_old'),
+            code_new=options.get('code_new'),
             verbose=verbose,
             options=options,
         )

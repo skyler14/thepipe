@@ -6,8 +6,11 @@ import os
 import sys
 import tempfile
 import unittest
+import importlib.util
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+JUPYSQL_AVAILABLE = importlib.util.find_spec("jupysql") is not None
 
 
 class TestDatabaseFormats(unittest.TestCase):
@@ -99,6 +102,7 @@ class TestDatabaseFormats(unittest.TestCase):
             self.assertEqual(result, expected, f"Failed for {path}")
 
 
+@unittest.skipUnless(JUPYSQL_AVAILABLE, "requires jupysql")
 class TestJSONLHandling(unittest.TestCase):
     """Tests for JSONL file handling."""
     

@@ -50,7 +50,7 @@ def test_build_name_capture_maps_prefers_shorter_name_capture():
 
     direct, _ = ASTExtractor._build_name_capture_maps(
         captures=[(qualified, "name"), (short, "name")],
-        source=source,
+        source_bytes=source.encode("utf-8"),
     )
 
     assert direct[ASTExtractor._node_key(func)] == "doSomething"

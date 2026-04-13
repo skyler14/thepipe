@@ -250,7 +250,13 @@ def main() -> None:
     elif output_format == 'json':
         # JSON array to stdout
         import json as json_module
-        output = [c.to_json(text_only=args.text_only) for c in chunks]
+        json_verbose = False
+        if isinstance(args.options, dict):
+            json_verbose = bool(args.options.get("json_verbose"))
+        output = [
+            c.to_json(text_only=args.text_only, verbose=json_verbose)
+            for c in chunks
+        ]
         print(json_module.dumps(output, indent=2))
 
 # Entry-point shim

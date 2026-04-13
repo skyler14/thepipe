@@ -23,6 +23,14 @@ class ASTNode:
 
 
 @dataclass
+class CallGraphEntry:
+    """Represents a function-level call edge within a file."""
+    caller: str
+    callee: str
+    line: int
+
+
+@dataclass
 class FileAnalysis:
     """Complete analysis of a single source file"""
     path: str  # Canonical path relative to repo root
@@ -31,6 +39,7 @@ class FileAnalysis:
     exports: List[str] = field(default_factory=list)  # Exported symbols
     functions: List[ASTNode] = field(default_factory=list)
     classes: List[ASTNode] = field(default_factory=list)
+    call_graph: List[CallGraphEntry] = field(default_factory=list)
     
     # Metadata
     size_bytes: int = 0

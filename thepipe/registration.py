@@ -55,12 +55,19 @@ INSTRUCTION_TEMPLATE = """# thepipe
 
 Data extraction for files, URLs, databases. 165+ language AST support.
 
-## Code Analysis (use for any programming task)
+## Default Repo Mapping (important)
+
+Start by scanning the entire repo to map structure and dependencies.
+Use `code_relations: "map"` for first touch (digest-everything, ~95%+ token savings).
+Do NOT use `mapnn` as a default first pass unless the user explicitly requests a scoped map
+or prior context already reveals most of the file structure.
 
 ```bash
-{thepipe_cmd} ./repo --options '{"code_relations": "auto"}' -f
-# 90%+ token savings via intelligent digests
+{thepipe_cmd} ./repo --options '{"code_relations": "map"}' -f
+# Digest-everything pass for maximum token reduction
 ```
+
+## Code Analysis (use for any programming task)
 
 ## Common Commands
 
@@ -74,8 +81,8 @@ Data extraction for files, URLs, databases. 165+ language AST support.
 # URL
 {thepipe_cmd} https://example.com -f
 
-# GitHub repo with code analysis
-{thepipe_cmd} https://github.com/user/repo --options '{"code_relations": "auto"}' -f
+# GitHub repo with code analysis + patterns
+{thepipe_cmd} https://github.com/user/repo --include_patterns "src/**/*.py" "src/**/*.ts" --options '{"code_relations": "map"}' -f
 
 # Video/audio text extraction
 {thepipe_cmd} video.mp4 --text_only -f
@@ -84,35 +91,40 @@ Data extraction for files, URLs, databases. 165+ language AST support.
 ## Output Formats
 
 ```bash
-{thepipe_cmd} source -f        # markdown to stdout
+{thepipe_cmd} source -f        # markdown to stdout (default for humans)
 {thepipe_cmd} source -f text   # raw text
-{thepipe_cmd} source -f json   # JSON array
+{thepipe_cmd} source -f json   # JSON array (only if explicitly requested)
 {thepipe_cmd} source           # writes to outputs/prompt.txt
 ```
 
 ## Code Analysis Modes
 
 ```bash
-# auto (default) - picks strategy based on repo size
-{thepipe_cmd} ./repo --options '{"code_relations": "auto"}' -f
-
-# map - all files as digests (large repos)
+# map (default first pass) - all files as digests
 {thepipe_cmd} ./repo --options '{"code_relations": "map"}' -f
 
-# mapnn - primary files full, neighbors as digests
+# auto - use only if you explicitly want size-based heuristics
+{thepipe_cmd} ./repo --options '{"code_relations": "auto"}' -f
+
+# mapnn (use sparingly) - primary files full, neighbors as digests
 {thepipe_cmd} ./repo --include_patterns "src/*.py" --options '{"code_relations": "mapnn"}' -f
 
 # limited - only matched files, no digests
 {thepipe_cmd} ./repo --include_patterns "*.py" --options '{"code_relations": "limited"}' -f
+
+# mapnew - diff map (old vs new git revisions)
+{thepipe_cmd} ./repo --options '{"code_relations": "mapnew"}' -f
 ```
 
 ## Code Analysis Parameters (`--options`)
 
 ```json
 {
-  "code_relations": "mapnn",
+  "code_relations": "map",
   "code_n1": 3,
   "code_n2": 5,
+  "code_old": "HEAD~1",
+  "code_new": "",
   "code_nf": 100,
   "code_nt": 150000
 }
@@ -120,6 +132,9 @@ Data extraction for files, URLs, databases. 165+ language AST support.
 
 - `code_n1`: Neighbor depth to include as digests in `mapnn`
 - `code_n2`: Cutoff depth in `mapnn`
+- `code_old`: Old git commit-ish for `mapnew` (default: HEAD)
+- `code_new`: New git commit-ish for `mapnew` (default: working tree)
+- `json_verbose`: Include line-level metadata in JSON output (`-f json`)
 - `code_nf`: File-count threshold used by `auto`
 - `code_nt`: Token threshold used by `auto`
 
@@ -165,6 +180,11 @@ Data extraction for files, URLs, databases. 165+ language AST support.
 
 # Parquet file as database
 {thepipe_cmd} data.parquet --db "SELECT * FROM parquet_data WHERE col > 10" -f
+
+# Parquet (recommended for local files)
+# Parquet is the most native file-backed format for --db. Point thepipe directly
+# at the .parquet file and query parquet_data, without wrapping in DuckDB.
+{thepipe_cmd} /path/to/data.parquet --db "SELECT * FROM parquet_data LIMIT 10" -f
 
 # CSV file as database  
 {thepipe_cmd} data.csv --db "SELECT * FROM csv_data LIMIT 100" -f
@@ -219,7 +239,8 @@ Data extraction for files, URLs, databases. 165+ language AST support.
 
 ## Agent Mode (LLM Delegation)
 
-When thepipe needs LLM inference inside an agent, use `--llm-provider agent`:
+When thepipe needs LLM inference inside an agent, use `--llm-provider agent`.
+Default to FIFO pipes for agentic runs unless a complex workflow truly needs CLI output:
 
 ```bash
 {thepipe_cmd} data.pdf --extract '{"title": "str"}' --llm-provider agent
@@ -414,7 +435,7 @@ Data extraction and document processing tool. Use for extracting content from fi
 
 **Installation**: `pip install thepipe-api`
 
-**Basic usage**: `thepipe <source> [-f md|text|json]`
+**Basic usage**: `thepipe <source> [-f md|text|json]` (default markdown; use `-f json` only if explicitly requested)
 
 See `.antigravity/workflows/thepipe.md` for detailed documentation.
 """
@@ -432,7 +453,7 @@ Data extraction and document processing tool. Use for extracting content from fi
 
 **Installation**: `pip install thepipe-api`
 
-**Basic usage**: `thepipe <source> [-f md|text|json]`
+**Basic usage**: `thepipe <source> [-f md|text|json]` (default markdown; use `-f json` only if explicitly requested)
 
 See `.antigravity/workflows/thepipe.md` for detailed documentation.
 """
@@ -472,12 +493,14 @@ Use thepipe for file/URL/database extraction and codebase mapping.
 ### Recommended Commands
 ```bash
 {thepipe_cmd} ./repo --options '{{"code_relations": "auto"}}' -f
-{thepipe_cmd} ./repo --include_patterns "src/*.py" --options '{{"code_relations": "mapnn"}}' -f
+{thepipe_cmd} ./repo --options '{{"code_relations": "map"}}' -f
 ```
 
 ### Notes
 - Use the absolute `thepipe` path above instead of relying on shell PATH.
 - Prefer `code_relations` modes for programming/repo analysis tasks.
+- Default output is markdown; use `-f json` only if explicitly requested.
+- For agentic runs, prefer `--llm-provider agent` (FIFO pipes) unless a complex workflow needs CLI output.
 {end_marker}
 """
 

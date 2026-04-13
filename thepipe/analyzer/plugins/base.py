@@ -53,6 +53,15 @@ class LanguagePlugin(ABC):
     def import_queries(self) -> str:
         """Tree-sitter query for imports"""
         return ""
+
+    @property
+    def import_query_languages(self) -> Optional[Set[str]]:
+        """
+        Optional language whitelist for import_queries.
+
+        Return None to allow import_queries for all languages handled by this plugin.
+        """
+        return None
         
     @property
     def function_queries(self) -> str:

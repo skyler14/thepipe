@@ -47,12 +47,8 @@ class SwiftPlugin(LanguagePlugin):
     @property
     def class_queries(self) -> str:
         return """
-        (class_declaration name: (type_identifier) @name) @class
-        (struct_declaration name: (type_identifier) @name) @class
-        (enum_declaration name: (type_identifier) @name) @class
+        (class_declaration) @class
         (protocol_declaration name: (type_identifier) @name) @class
-        (actor_declaration name: (type_identifier) @name) @class
-        (extension_declaration type: (type_identifier) @name) @class
         """
 
     def parse_manifest(self, manifest_path: Path) -> Dict[str, Any]:

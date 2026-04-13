@@ -10,7 +10,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
-from .types import ASTNode, FileAnalysis
+from .types import ASTNode, FileAnalysis, CallGraphEntry
 
 
 @dataclass
@@ -39,8 +39,30 @@ class DigestGenerator:
     
     def __init__(self, source_code: str, language: str = "python"):
         self.source = source_code
+        self.source_bytes = source_code.encode("utf-8")
         self.language = language
         self.lines = source_code.split('\n')
+        self._sexp_safe = re.compile(r"^[A-Za-z0-9_./:@+$-]+$")
+
+    def _sexp_atom(self, value: str) -> str:
+        if not value:
+            return "unknown"
+        text = value.strip()
+        if not text:
+            return "unknown"
+        if self._sexp_safe.match(text):
+            return text
+        escaped = (
+            text.replace("\\", "\\\\")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+            .replace('"', '\\"')
+        )
+        return f"\"{escaped}\""
+
+    def _slice_source(self, start_byte: int, end_byte: int) -> str:
+        return self.source_bytes[start_byte:end_byte].decode("utf-8", errors="ignore")
     
     def function_signature(self, node: ASTNode) -> Digest:
         """
@@ -51,7 +73,7 @@ class DigestGenerator:
         """
         if self.language == "python":
             return self._python_function_signature(node)
-        elif self.language in ("javascript", "typescript"):
+        elif self.language in ("javascript", "typescript", "tsx"):
             return self._js_function_signature(node)
         else:
             return self._generic_function_signature(node)
@@ -59,7 +81,7 @@ class DigestGenerator:
     def _python_function_signature(self, node: ASTNode) -> Digest:
         """Extract Python function signature with type hints"""
         # Get the source text for this function
-        func_text = self.source[node.start_byte:node.end_byte]
+        func_text = self._slice_source(node.start_byte, node.end_byte)
         
         # Parse def line
         def_match = re.match(
@@ -123,7 +145,7 @@ class DigestGenerator:
     
     def _js_function_signature(self, node: ASTNode) -> Digest:
         """Extract JS/TS function signature"""
-        func_text = self.source[node.start_byte:node.end_byte]
+        func_text = self._slice_source(node.start_byte, node.end_byte)
         
         # Try to parse function declaration
         match = re.match(
@@ -187,7 +209,7 @@ class DigestGenerator:
           (public-methods method1 method2)
           (private-methods _method1 _method2))
         """
-        class_name = node.name or "UnknownClass"
+        class_name = self._sexp_atom(node.name or "UnknownClass")
         
         public_methods = []
         private_methods = []
@@ -199,13 +221,19 @@ class DigestGenerator:
                 else:
                     public_methods.append(method.name)
         
+        # Sort method names for deterministic output
+        public_methods.sort()
+        private_methods.sort()
+
         # Build S-expression
         lines = [f"({class_name}"]
         
         if public_methods:
-            lines.append(f"  (public-methods {' '.join(public_methods)})")
+            rendered = " ".join(self._sexp_atom(name) for name in public_methods)
+            lines.append(f"  (public-methods {rendered})")
         if private_methods:
-            lines.append(f"  (private-methods {' '.join(private_methods)})")
+            rendered = " ".join(self._sexp_atom(name) for name in private_methods)
+            lines.append(f"  (private-methods {rendered})")
         
         lines.append(")")
         content = "\n".join(lines)
@@ -230,19 +258,33 @@ class DigestGenerator:
         """
         lines = [f"(module {analysis.path}"]
         
-        # Imports (just count)
+        # Imports (full list, deterministic order)
         if analysis.imports:
-            lines.append(f"  (imports {len(analysis.imports)})")
+            normalized_imports = []
+            for imp in analysis.imports:
+                if not imp:
+                    continue
+                cleaned = " ".join(imp.strip().split())
+                if cleaned:
+                    normalized_imports.append(cleaned)
+            unique_imports = sorted(set(normalized_imports))
+            if unique_imports:
+                lines.append("  (imports")
+                for imp in unique_imports:
+                    lines.append(f"    {self._sexp_atom(imp)}")
+                lines.append("  )")
         
-        # Functions
-        func_names = [f.name for f in analysis.functions if f.name]
+        # Functions (sorted for deterministic output)
+        func_names = sorted([f.name for f in analysis.functions if f.name])
         if func_names:
-            lines.append(f"  (functions {' '.join(func_names)})")
+            rendered = " ".join(self._sexp_atom(name) for name in func_names)
+            lines.append(f"  (functions {rendered})")
         
-        # Classes
-        class_names = [c.name for c in analysis.classes if c.name]
+        # Classes (sorted for deterministic output)
+        class_names = sorted([c.name for c in analysis.classes if c.name])
         if class_names:
-            lines.append(f"  (classes {' '.join(class_names)})")
+            rendered = " ".join(self._sexp_atom(name) for name in class_names)
+            lines.append(f"  (classes {rendered})")
         
         lines.append(")")
         content = "\n".join(lines)
@@ -252,6 +294,66 @@ class DigestGenerator:
             content=content,
             original_lines=analysis.line_count,
             digest_lines=len(lines)
+        )
+
+    def call_graph(
+        self,
+        call_graph: List[CallGraphEntry],
+        max_entries: int = 20,
+    ) -> Optional[Digest]:
+        """Generate a compact per-file call graph section."""
+        if not call_graph:
+            return None
+
+        def is_noisy_callee(name: str) -> bool:
+            lowered = name.strip().lower()
+            noisy_exact = {
+                "print", "len", "str", "int", "float", "bool",
+                "list", "dict", "set", "tuple", "enumerate", "range",
+                "zip", "map", "filter", "sorted", "sum", "min", "max",
+                "open", "isinstance", "getattr", "setattr", "hasattr",
+            }
+            if lowered in noisy_exact:
+                return True
+
+            noisy_prefixes = (
+                "console.",
+                "logger.",
+                "logging.",
+                "json.",
+            )
+            return lowered.startswith(noisy_prefixes)
+
+        # De-duplicate calls and sort for deterministic output.
+        unique_pairs = {(entry.caller, entry.callee) for entry in call_graph}
+        primary_pairs = sorted(
+            [pair for pair in unique_pairs if not is_noisy_callee(pair[1])]
+        )
+        noisy_pairs = sorted(
+            [pair for pair in unique_pairs if is_noisy_callee(pair[1])]
+        )
+
+        filtered_pairs = primary_pairs
+        if not filtered_pairs:
+            # If everything is noisy, keep a minimal sample.
+            filtered_pairs = noisy_pairs
+
+        selected_pairs = filtered_pairs[:max_entries]
+
+        lines = ["(calls"]
+        for caller_name, callee_name in selected_pairs:
+            caller = self._sexp_atom(caller_name)
+            callee = self._sexp_atom(callee_name)
+            lines.append(f"  ({caller} -> {callee})")
+        if len(filtered_pairs) > max_entries:
+            lines.append(f"  (truncated {len(filtered_pairs) - max_entries} more)")
+        lines.append(")")
+
+        return Digest(
+            type="call_graph",
+            content="\n".join(lines),
+            original_lines=len(call_graph),
+            digest_lines=len(lines),
         )
 
 
@@ -270,13 +372,44 @@ def generate_file_digest(
     generator = DigestGenerator(source_code, analysis.language)
     parts = []
     
+    # TODO: Add a separate global graph artifact (NOT in per-file digests).
+    # Goals:
+    # - Persist cross-file edges (imports/calls/dataflow/semantic).
+    # - Support layered views (e.g., API/Data/UI) and guided tours.
+    # - Enable incremental updates and stable IDs for diffing.
+    #
+    # Proposed format (graph.json):
+    # {
+    #   "version": "1.0",
+    #   "project": {"name": "...", "git_commit": "...", "languages": [...]},
+    #   "nodes": [{"id":"file:src/a.ts","type":"file","name":"a.ts","path":"src/a.ts"}, ...],
+    #   "edges": [{"src":"file:src/a.ts","dst":"file:src/b.ts","type":"imports","weight":0.7}, ...],
+    #   "layers": [{"id":"layer:api","name":"API","node_ids":[...]}],
+    #   "tours": [{"id":"tour:onboarding","steps":[{"title":"Entry","node_ids":[...]}]}]
+    # }
+    #
+    # Pseudocode:
+    # result = analyze_repo(...)
+    # nodes = build_nodes_from_files(result.files) + build_nodes_from_symbols(result)
+    # edges = build_edges_from_imports(result.dependency_graph)
+    # edges += build_edges_from_calls(result.files[*].call_graph)
+    # edges += build_edges_from_semantic_tags(result.semantic_tags)
+    # layers = infer_layers(nodes, edges, file_patterns, llm_optional=False)
+    # tours = build_tours(nodes, edges, layers)
+    # write_json("outputs/graph.json", {version, project, nodes, edges, layers, tours})
+
     # Module index
     module_digest = generator.module_index(analysis)
     parts.append(module_digest.content)
+
+    # Call graph (per-file)
+    call_digest = generator.call_graph(analysis.call_graph)
+    if call_digest:
+        parts.append(call_digest.content)
     
-    # Class structures
+    # Class structures (sorted for deterministic output)
     if include_classes:
-        for cls in analysis.classes:
+        for cls in sorted(analysis.classes, key=lambda c: (c.name or "", c.start_line, c.end_line)):
             # Find methods within this class (simplified - just by line range)
             class_methods = [
                 f for f in analysis.functions
@@ -288,7 +421,7 @@ def generate_file_digest(
     # Function signatures (excluding class methods already shown)
     if include_signatures:
         class_ranges = [(c.start_line, c.end_line) for c in analysis.classes]
-        for func in analysis.functions:
+        for func in sorted(analysis.functions, key=lambda f: (f.name or "", f.start_line, f.end_line)):
             # Skip if inside a class
             in_class = any(
                 start <= func.start_line <= end

@@ -1,12 +1,35 @@
 import unittest
 import os
 import sys
+import subprocess
 from typing import List, cast
 from openai import OpenAI
 
 sys.path.append("..")
 import thepipe.chunker as chunker
 from thepipe.core import Chunk, calculate_tokens
+
+
+def _can_import_sentence_transformers() -> bool:
+    """Check sentence_transformers import in a subprocess to avoid hard crashes."""
+    if not os.environ.get("THEPIPE_ENABLE_SEMANTIC_TESTS"):
+        return False
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sentence_transformers, torch; print('ok')",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+CAN_IMPORT_SENTENCE_TRANSFORMERS = _can_import_sentence_transformers()
 
 
 class test_chunker(unittest.TestCase):
@@ -78,6 +101,10 @@ class test_chunker(unittest.TestCase):
                     calculate_tokens([chunk]), self.max_tokens_per_chunk
                 )
 
+    @unittest.skipUnless(
+        CAN_IMPORT_SENTENCE_TRANSFORMERS,
+        "requires sentence-transformers/torch",
+    )
     def test_chunk_semantic(self):
         test_sentence = "Computational astrophysics. Numerical astronomy. Bananas."
         chunks = [Chunk(text=test_sentence)]

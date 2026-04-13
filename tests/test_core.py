@@ -100,6 +100,17 @@ class test_core(unittest.TestCase):
         self.assertIsInstance(images, list)
         self.assertEqual(len(images), 1)
 
+    def test_json_verbose_preserves_meta(self):
+        chunk = core.Chunk(path="p", text="T", meta={"language": "python", "line_count": 12})
+
+        compact = chunk.to_json(verbose=False)
+        verbose = chunk.to_json(verbose=True)
+        roundtrip = core.Chunk.from_json(verbose)
+
+        self.assertNotIn("meta", compact)
+        self.assertEqual(verbose["meta"]["language"], "python")
+        self.assertEqual(roundtrip.meta, {"language": "python", "line_count": 12})
+
     def test_chunk_to_llamaindex(self):
         chunk = core.Chunk(
             path="example.md",
@@ -110,6 +121,12 @@ class test_core(unittest.TestCase):
         self.assertEqual(type(llama_index_document), list)
         self.assertEqual(len(llama_index_document), 1)
         self.assertEqual(type(llama_index_document[0]), core.ImageDocument)
+
+    def test_chunk_to_llamaindex_includes_meta(self):
+        chunk = core.Chunk(path="example.md", text="hello", meta={"language": "python"})
+        documents = chunk.to_llamaindex()
+        self.assertEqual(documents[0].extra_info["language"], "python")
+        self.assertEqual(documents[0].extra_info["filepath"], "example.md")
 
     def test_chunks_to_messages(self):
         chunks = scraper.scrape_file(filepath=self.files_directory + "/example.md")

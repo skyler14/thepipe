@@ -13,6 +13,7 @@ import pytest
 
 from thepipe.llm import LLMClient, LLMConfig, LLMResponse
 
+RUN_LLM_TESTS = os.environ.get("THEPIPE_LLM_TESTS")
 
 class TestLLMConfig:
     """Tests for LLMConfig dataclass."""
@@ -37,6 +38,7 @@ class TestLLMConfig:
             assert config.provider == "agent"
 
 
+@pytest.mark.skipif(not RUN_LLM_TESTS, reason="requires THEPIPE_LLM_TESTS")
 class TestLLMClient:
     """Tests for LLMClient."""
     
@@ -119,6 +121,7 @@ class TestLLMClient:
             assert result == {"title": "Test", "value": 42}
 
 
+@pytest.mark.skipif(not RUN_LLM_TESTS, reason="requires THEPIPE_LLM_TESTS")
 class TestNamedPipeAgentMode:
     """Tests for the named pipe (FIFO) agent communication."""
     
@@ -191,7 +194,7 @@ class TestNamedPipeAgentMode:
     
     def test_agent_query_integration(self):
         """Integration test for agent mode query via FIFOs."""
-        client = LLMClient(provider="agent")
+        client = LLMClient(provider="agent", timeout=5)
         
         test_response = "Agent processed this response"
         

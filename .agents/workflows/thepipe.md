@@ -133,7 +133,7 @@ Data extraction for files, URLs, databases. 165+ language AST support.
 # at the .parquet file and query parquet_data, without wrapping in DuckDB.
 /opt/anaconda3/envs/thepipe/bin/thepipe /path/to/data.parquet --db "SELECT * FROM parquet_data LIMIT 10" -f
 
-# CSV file as database
+# CSV file as database  
 /opt/anaconda3/envs/thepipe/bin/thepipe data.csv --db "SELECT * FROM csv_data LIMIT 100" -f
 
 # Excel file as database
@@ -236,3 +236,4 @@ Install thepipe capability into AI agents:
 ```
 
 After registration, agents can invoke thepipe using the absolute paths shown in the generated files.
+
