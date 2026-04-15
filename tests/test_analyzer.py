@@ -8,6 +8,7 @@ Uses the thepipe codebase itself as a test fixture since it has:
 """
 
 import os
+import json
 import subprocess
 import tempfile
 import unittest
@@ -482,19 +483,28 @@ class TestIntegrationHelpers(unittest.TestCase):
         from thepipe.analyzer.integration import _analysis_to_meta
         from thepipe.analyzer.types import FileAnalysis, ASTNode, CallGraphEntry
 
+        content = "import os\nfrom app import run\n\ndef foo():\n    bar()\n"
+        start_byte = content.encode("utf-8").index(b"def foo")
+        end_byte = len(content.encode("utf-8"))
         analysis = FileAnalysis(
             path="x.py",
             language="python",
             imports=[" import os ", "from app import run", "import os"],
-            functions=[ASTNode(type="function", name="foo", start_line=1, end_line=2)],
+            functions=[ASTNode(type="function", name="foo", start_line=4, end_line=5, start_byte=start_byte, end_byte=end_byte)],
             call_graph=[CallGraphEntry(caller="foo", callee="bar", line=2)],
-            line_count=2,
+            line_count=5,
         )
 
-        meta = _analysis_to_meta(analysis)
+        meta = _analysis_to_meta(analysis, content)
 
         self.assertEqual(meta["imports"], ["from app import run", "import os"])
         self.assertEqual(meta["imports_count"], 3)
+        region_ids = [region["id"] for region in meta["regions"]]
+        self.assertIn("module:top", region_ids)
+        self.assertIn("func:foo", region_ids)
+        foo_region = next(region for region in meta["regions"] if region["id"] == "func:foo")
+        self.assertIn("map_hash", foo_region)
+        self.assertIn("content_hash", foo_region)
 
     def test_process_mapnew_end_to_end(self):
         from thepipe.analyzer.integration import process_code_relations
@@ -523,11 +533,236 @@ class TestIntegrationHelpers(unittest.TestCase):
             chunk = chunks[0]
             self.assertEqual(chunk.path, "mapnew.diff")
             self.assertEqual(chunk.meta["artifact"], "mapnew_diff")
+            self.assertEqual(chunk.meta["changed_files_count"], 1)
             self.assertIn("--- old:HEAD", chunk.text)
             self.assertIn("+++ new:working-tree", chunk.text)
             self.assertIn('"import os"', chunk.text)
             self.assertIn("-foo :: () -> None", chunk.text)
             self.assertIn("+foo :: value:int -> int", chunk.text)
+            self.assertEqual(chunk.meta["implementation_only_regions"], 0)
+            self.assertEqual(len(chunk.meta["files"]), 1)
+            file_meta = chunk.meta["files"][0]
+            self.assertEqual(file_meta["path"], "a.py")
+            self.assertEqual(file_meta["status"], "modified")
+            self.assertTrue(file_meta["map_changed"])
+            self.assertEqual(file_meta["hunks"][0]["old_start"], 1)
+            self.assertEqual(file_meta["hunks"][0]["new_start"], 1)
+            self.assertEqual(file_meta["old"]["path"], "a.py")
+            self.assertEqual(file_meta["new"]["path"], "a.py")
+            self.assertIn("meta", file_meta["old"])
+            self.assertIn("meta", file_meta["new"])
+            self.assertTrue(any(
+                region["change"] == "structural" and region["id"] == "func:foo"
+                for region in file_meta["region_changes"]
+            ))
+            self.assertTrue(any(
+                region["change"] == "structural" and region["id"] == "module:top"
+                for region in file_meta["region_changes"]
+            ))
+
+    def test_process_mapnew_reports_implementation_only_changes(self):
+        from thepipe.analyzer.integration import process_code_relations
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+
+            (repo / "a.py").write_text(
+                "def foo():\n"
+                "    return 1\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+            (repo / "a.py").write_text(
+                "def foo():\n"
+                "    return 2\n",
+                encoding="utf-8",
+            )
+
+            chunk = process_code_relations(str(repo), mode="mapnew")[0]
+
+        self.assertIn("## Implementation-Only Changes", chunk.text)
+        self.assertIn("function `foo`", chunk.text)
+        self.assertIn("map unchanged", chunk.text)
+        self.assertEqual(chunk.meta["implementation_only_regions"], 1)
+        self.assertEqual(chunk.meta["changed_files_count"], 1)
+        file_meta = chunk.meta["files"][0]
+        self.assertEqual(file_meta["path"], "a.py")
+        self.assertFalse(file_meta["map_changed"])
+        self.assertEqual(len(file_meta["implementation_only_regions"]), 1)
+        region = file_meta["implementation_only_regions"][0]
+        self.assertEqual(region["id"], "func:foo")
+        self.assertEqual(region["change"], "implementation_only")
+        self.assertEqual(region["changed_ranges"]["old"], [{"start": 2, "end": 2}])
+        self.assertEqual(region["changed_ranges"]["new"], [{"start": 2, "end": 2}])
+        self.assertIn("map unchanged", region["note"])
+
+    def test_process_mapnew_tracks_renames_for_preview_metadata(self):
+        from thepipe.analyzer.integration import process_code_relations
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+
+            (repo / "a.py").write_text(
+                "def foo():\n"
+                "    return 1\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+            subprocess.run(["git", "mv", "a.py", "b.py"], cwd=repo, check=True, capture_output=True)
+
+            chunk = process_code_relations(str(repo), mode="mapnew")[0]
+
+        self.assertEqual(chunk.meta["changed_files_count"], 1)
+        file_meta = chunk.meta["files"][0]
+        self.assertEqual(file_meta["status"], "renamed")
+        self.assertEqual(file_meta["old_path"], "a.py")
+        self.assertEqual(file_meta["new_path"], "b.py")
+        self.assertEqual(file_meta["path"], "b.py")
+        self.assertEqual(file_meta["old"]["path"], "a.py")
+        self.assertEqual(file_meta["new"]["path"], "b.py")
+        self.assertFalse(file_meta["map_changed"])
+
+    def test_process_mapnew_includes_untracked_added_files_in_preview_metadata(self):
+        from thepipe.analyzer.integration import process_code_relations
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+
+            (repo / "a.py").write_text(
+                "def base():\n"
+                "    return 1\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+            (repo / "b.py").write_text(
+                "def new_feature():\n"
+                "    return 2\n",
+                encoding="utf-8",
+            )
+
+            chunk = process_code_relations(str(repo), mode="mapnew")[0]
+
+        self.assertEqual(chunk.meta["changed_files_count"], 1)
+        file_meta = chunk.meta["files"][0]
+        self.assertEqual(file_meta["path"], "b.py")
+        self.assertEqual(file_meta["status"], "added")
+        self.assertTrue(file_meta["untracked"])
+        self.assertIsNone(file_meta["old"])
+        self.assertEqual(file_meta["new"]["path"], "b.py")
+        self.assertEqual(file_meta["hunks"], [{
+            "old_start": 0,
+            "old_end": None,
+            "new_start": 1,
+            "new_end": 2,
+        }])
+        self.assertTrue(any(
+            region["change"] == "added" and region["id"] == "func:new_feature"
+            for region in file_meta["region_changes"]
+        ))
+
+    def test_process_mapnew_supports_explicit_refs_and_json_preview_payload(self):
+        from thepipe.analyzer.integration import process_code_relations
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+
+            (repo / "a.py").write_text(
+                "def foo():\n"
+                "    return 1\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "first"], cwd=repo, check=True, capture_output=True)
+            old_ref = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            (repo / "a.py").unlink()
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "remove"], cwd=repo, check=True, capture_output=True)
+            new_ref = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            chunk = process_code_relations(str(repo), mode="mapnew", code_old=old_ref, code_new=new_ref)[0]
+            payload = chunk.to_json(verbose=True)
+
+        self.assertEqual(chunk.meta["old_ref"], old_ref)
+        self.assertEqual(chunk.meta["new_ref"], new_ref)
+        self.assertEqual(chunk.meta["changed_files_count"], 1)
+        file_meta = chunk.meta["files"][0]
+        self.assertEqual(file_meta["path"], "a.py")
+        self.assertEqual(file_meta["status"], "deleted")
+        self.assertFalse(file_meta["untracked"])
+        self.assertEqual(file_meta["old"]["path"], "a.py")
+        self.assertIsNone(file_meta["new"])
+        self.assertTrue(any(
+            region["change"] == "removed" and region["id"] == "func:foo"
+            for region in file_meta["region_changes"]
+        ))
+        self.assertEqual(payload["meta"]["files"][0]["status"], "deleted")
+        json.dumps(payload)
+
+    def test_process_mapnew_handles_paths_with_spaces(self):
+        from thepipe.analyzer.integration import process_code_relations
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+
+            file_path = repo / "a b.py"
+            file_path.write_text(
+                "def foo():\n"
+                "    return 1\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "a b.py"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+
+            file_path.write_text(
+                "def foo():\n"
+                "    return 2\n",
+                encoding="utf-8",
+            )
+
+            chunk = process_code_relations(str(repo), mode="mapnew")[0]
+
+        self.assertEqual(chunk.meta["changed_files_count"], 1)
+        file_meta = chunk.meta["files"][0]
+        self.assertEqual(file_meta["path"], "a b.py")
+        self.assertEqual(file_meta["status"], "modified")
+        self.assertFalse(file_meta["map_changed"])
+        self.assertEqual(file_meta["old"]["path"], "a b.py")
+        self.assertEqual(file_meta["new"]["path"], "a b.py")
+        self.assertEqual(file_meta["implementation_only_regions"][0]["id"], "func:foo")
 
 
 class TestDigestGenerator(unittest.TestCase):

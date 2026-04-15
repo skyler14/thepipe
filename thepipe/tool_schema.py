@@ -158,7 +158,7 @@ TOOLS = [
                         },
                         "json_verbose": {
                             "type": "boolean",
-                            "description": "Include line-level metadata in JSON output (-f json)"
+                            "description": "Include imports, line-level symbol spans, call graph, logical region hashes, and mapnew file/hunk preview metadata in JSON output (-f json)"
                         }
                     }
                 }

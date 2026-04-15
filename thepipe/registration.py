@@ -134,7 +134,7 @@ or prior context already reveals most of the file structure.
 - `code_n2`: Cutoff depth in `mapnn`
 - `code_old`: Old git commit-ish for `mapnew` (default: HEAD)
 - `code_new`: New git commit-ish for `mapnew` (default: working tree)
-- `json_verbose`: Include line-level metadata in JSON output (`-f json`)
+- `json_verbose`: Include imports, symbol spans, call graph, logical region hashes, and mapnew file/hunk preview metadata in JSON output (`-f json`)
 - `code_nf`: File-count threshold used by `auto`
 - `code_nt`: Token threshold used by `auto`
 

@@ -7,6 +7,7 @@ Supports code_relations modes: limited, map, mapnn, mapall, mapnew
 
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
+import hashlib
 import logging
 import os
 import shutil
@@ -16,7 +17,7 @@ import tempfile
 from ..core import Chunk
 from .types import FileAnalysis, DependencyGraph, AnalysisResult
 from .api import Analyzer, AnalyzerConfig, discover_files
-from .digest import generate_file_digest
+from .digest import DigestGenerator, generate_file_digest
 
 logger = logging.getLogger(__name__)
 
@@ -229,46 +230,9 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-# TODO(mapnew-regions): Extend mapnew with region-aware implementation diffs.
-# Current behavior compares old/new map text, which is intentionally structural:
-# imports, class/type surfaces, signatures, and lightweight call edges. This is
-# excellent for stable relation diffs, but it intentionally hides body-only
-# edits. The next step is to preserve that token-efficient structural diff while
-# also surfacing "implementation-only changes" for downstream review UIs and
-# agents.
-#
-# Proposed data model (verbose JSON / internal metadata):
-# - file imports: exact normalized import strings (internal + external context)
-# - regions: stable logical units with explicit line spans
-#   * module:top          -> top-level / import region
-#   * class:<name>        -> class, struct, enum, protocol, extension, etc.
-#   * func:<qualified>    -> function or method region
-# - each region carries:
-#   * id
-#   * kind
-#   * name / container
-#   * start_line / end_line
-#   * map_hash      -> normalized structural digest fingerprint
-#   * content_hash  -> normalized source fingerprint
-#
-# Proposed mapnew algorithm:
-# 1. Use `git diff --unified=0 <old> <new>` (or HEAD vs working tree) to get
-#    changed hunk ranges cheaply without materializing raw full-repo diffs.
-# 2. Join changed hunks against region spans from old/new analyses.
-# 3. For each touched region:
-#    - if map_hash changed: include in structural map diff as today
-#    - if content_hash changed but map_hash did not: append a bottom section
-#      such as "implementation-only changes" so agents know where to zoom in
-# 4. Keep the current unified map diff as the primary artifact.
-#
-# Notes:
-# - External library changes are reliably tracked at the import/dependency
-#   level today. Body-level external API usage is only partially visible via
-#   the lightweight per-file call graph, so region metadata should document
-#   that limitation until we add resolved external-call tracking.
-# - This same schema should be sufficient for downstream gradual diff previews:
-#   chunked hunk application can target exact regions without reparsing raw map
-#   text.
+# TODO(mapnew-regions): Remaining work after the first region-aware pass:
+# - make module regions discontiguous instead of using the whole-file fallback
+# - add resolved external API usage tracking beyond imports/lightweight calls
 def _process_mapnew(
     dir_path: str,
     include_patterns: Optional[List[str]],
@@ -331,13 +295,39 @@ def _process_mapnew(
             old_label=old_ref,
             new_label=new_label,
         )
+        changed_files = _git_diff_files(
+            repo_root=repo_root,
+            old_ref=old_ref,
+            new_ref=new_ref,
+        )
+        if new_ref is None:
+            _merge_untracked_files(
+                repo_root=repo_root,
+                changed_files=changed_files,
+                new_chunks=new_chunks,
+            )
+        diff_files = _build_mapnew_file_payloads(
+            old_chunks=old_chunks,
+            new_chunks=new_chunks,
+            changed_files=changed_files,
+        )
+        implementation_notes = _implementation_only_change_notes(
+            diff_files=diff_files,
+        )
         header = [
             "# Code Relations Diff (mapnew)",
             f"# old: {old_ref}",
             f"# new: {new_label}",
             "",
         ]
-        text = "\n".join(header + [diff_text])
+        body_parts = [diff_text]
+        if implementation_notes:
+            body_parts.extend([
+                "",
+                "## Implementation-Only Changes",
+                *[f"- {note}" for note in implementation_notes],
+            ])
+        text = "\n".join(header + body_parts)
         return [Chunk(
             path="mapnew.diff",
             text=text,
@@ -346,6 +336,9 @@ def _process_mapnew(
                 "virtual": True,
                 "old_ref": old_ref,
                 "new_ref": new_label,
+                "changed_files_count": len(diff_files),
+                "implementation_only_regions": len(implementation_notes),
+                "files": diff_files,
             },
         )]
     except Exception as e:
@@ -443,6 +436,538 @@ def _diff_chunk_outputs(
         if len(diff_lines) > 1 and diff_lines[1].startswith("+++ "):
             diff_lines[1] = f"+++ new:{new_label}"
         return "\n".join(diff_lines)
+
+
+def _git_diff_files(
+    repo_root: str,
+    old_ref: str,
+    new_ref: Optional[str],
+) -> Dict[str, Dict[str, Any]]:
+    cmd = [
+        "git", "-C", repo_root, "diff", "--unified=0", "--find-renames", "--no-ext-diff",
+        old_ref,
+    ]
+    if new_ref:
+        cmd.append(new_ref)
+    cmd.append("--")
+    result = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode not in (0, 1):
+        detail = result.stderr.strip() or result.stdout.strip() or "git diff failed"
+        raise RuntimeError(detail)
+
+    files: Dict[str, Dict[str, Any]] = {}
+    current: Optional[Dict[str, Any]] = None
+
+    def flush_current() -> None:
+        nonlocal current
+        if not current:
+            return
+        current["path"] = current.get("new_path") or current.get("old_path")
+        if current["path"]:
+            files[current["path"]] = current
+        current = None
+
+    for line in result.stdout.splitlines():
+        if line.startswith("diff --git "):
+            flush_current()
+            current = {
+                "path": None,
+                "old_path": None,
+                "new_path": None,
+                "status": "modified",
+                "hunks": [],
+            }
+            continue
+
+        if current is None:
+            continue
+
+        if line.startswith("new file mode "):
+            current["status"] = "added"
+            current["old_path"] = None
+            continue
+        if line.startswith("deleted file mode "):
+            current["status"] = "deleted"
+            current["new_path"] = None
+            continue
+        if line.startswith("rename from "):
+            current["status"] = "renamed"
+            current["old_path"] = line[len("rename from "):].strip() or current.get("old_path")
+            continue
+        if line.startswith("rename to "):
+            current["new_path"] = line[len("rename to "):].strip() or current.get("new_path")
+            continue
+        if line.startswith("--- "):
+            current["old_path"] = _parse_patch_header_path(line, marker="--- ", prefix="a/")
+            continue
+        if line.startswith("+++ "):
+            current["new_path"] = _parse_patch_header_path(line, marker="+++ ", prefix="b/")
+            continue
+        if not line.startswith("@@"):
+            continue
+
+        header = line.split("@@")[1].strip()
+        old_part, new_part = header.split()
+        old_start, old_count = _parse_unified_range(old_part)
+        new_start, new_count = _parse_unified_range(new_part)
+        current["hunks"].append({
+            "old_start": old_start,
+            "old_end": None if old_count == 0 else old_start + old_count - 1,
+            "new_start": new_start,
+            "new_end": None if new_count == 0 else new_start + new_count - 1,
+        })
+    flush_current()
+    return files
+
+
+def _parse_patch_header_path(line: str, marker: str, prefix: str) -> Optional[str]:
+    path = line[len(marker):].split("\t", 1)[0].strip()
+    if path == "/dev/null":
+        return None
+    if path.startswith(prefix):
+        path = path[len(prefix):]
+    return path
+
+
+def _merge_untracked_files(
+    repo_root: str,
+    changed_files: Dict[str, Dict[str, Any]],
+    new_chunks: List[Chunk],
+) -> None:
+    new_map = _chunk_map(new_chunks)
+    for path in _git_untracked_files(repo_root):
+        if path in changed_files:
+            continue
+        chunk = new_map.get(path)
+        if chunk is None:
+            continue
+        line_count = _source_line_count(Path(repo_root) / path)
+        if line_count == 0:
+            line_count = _chunk_line_count(chunk)
+        changed_files[path] = {
+            "path": path,
+            "old_path": None,
+            "new_path": path,
+            "status": "added",
+            "untracked": True,
+            "hunks": [{
+                "old_start": 0,
+                "old_end": None,
+                "new_start": 1 if line_count else 0,
+                "new_end": line_count if line_count else None,
+            }],
+        }
+
+
+def _git_untracked_files(repo_root: str) -> List[str]:
+    result = subprocess.run(
+        ["git", "-C", repo_root, "ls-files", "--others", "--exclude-standard"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _chunk_line_count(chunk: Chunk) -> int:
+    if isinstance(chunk.meta, dict) and isinstance(chunk.meta.get("line_count"), int):
+        return chunk.meta["line_count"]
+    if not chunk.text:
+        return 0
+    return len(chunk.text.splitlines())
+
+
+def _source_line_count(path: Path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
+    except Exception:
+        return 0
+
+
+def _parse_unified_range(token: str) -> Tuple[int, int]:
+    token = token[1:]  # drop leading +/- marker
+    if "," in token:
+        start_str, count_str = token.split(",", 1)
+        return int(start_str), int(count_str)
+    return int(token), 1
+
+
+def _chunk_map(chunks: List[Chunk]) -> Dict[str, Chunk]:
+    return {
+        chunk.path: chunk
+        for chunk in chunks
+        if chunk.path and chunk.path != "__summary__"
+    }
+
+
+def _build_mapnew_file_payloads(
+    old_chunks: List[Chunk],
+    new_chunks: List[Chunk],
+    changed_files: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    old_map = _chunk_map(old_chunks)
+    new_map = _chunk_map(new_chunks)
+    diff_files: List[Dict[str, Any]] = []
+
+    for filepath in sorted(changed_files):
+        file_diff = changed_files[filepath]
+        old_path = file_diff.get("old_path")
+        new_path = file_diff.get("new_path")
+        old_chunk = old_map.get(old_path or "")
+        new_chunk = new_map.get(new_path or "")
+        if old_chunk is None and new_chunk is None:
+            continue
+
+        region_changes = _collect_region_changes(
+            filepath=filepath,
+            hunks=file_diff.get("hunks", []),
+            old_chunk=old_chunk,
+            new_chunk=new_chunk,
+        )
+        implementation_only_regions = [
+            region for region in region_changes
+            if region["change"] == "implementation_only"
+        ]
+
+        diff_files.append({
+            "path": filepath,
+            "old_path": old_path,
+            "new_path": new_path,
+            "status": file_diff.get("status", "modified"),
+            "untracked": bool(file_diff.get("untracked", False)),
+            "hunks": file_diff.get("hunks", []),
+            "map_changed": _chunk_map_hash(old_chunk) != _chunk_map_hash(new_chunk),
+            "old": _chunk_snapshot(old_chunk),
+            "new": _chunk_snapshot(new_chunk),
+            "region_changes": region_changes,
+            "implementation_only_regions": implementation_only_regions,
+        })
+
+    return diff_files
+
+
+def _implementation_only_change_notes(diff_files: List[Dict[str, Any]]) -> List[str]:
+    notes: List[str] = []
+    for file_diff in diff_files:
+        for region in file_diff.get("implementation_only_regions", []):
+            note = region.get("note")
+            if isinstance(note, str) and note:
+                notes.append(f"{file_diff['path']}: {note}")
+    return notes
+
+
+def _chunk_map_hash(chunk: Optional[Chunk]) -> Optional[str]:
+    if chunk is None:
+        return None
+    if isinstance(chunk.meta, dict):
+        region_rows = []
+        for region in chunk.meta.get("regions", []):
+            if not isinstance(region, dict):
+                continue
+            region_kind = region.get("kind")
+            region_rows.append({
+                "id": region.get("id"),
+                "kind": region_kind,
+                "container": region.get("container"),
+                "map_hash": None if region_kind == "module" else region.get("map_hash"),
+            })
+        region_rows.sort(key=lambda row: (row["id"] or "", row["kind"] or ""))
+
+        call_rows = []
+        for entry in chunk.meta.get("call_graph", []):
+            if not isinstance(entry, dict):
+                continue
+            call_rows.append({
+                "caller": entry.get("caller"),
+                "callee": entry.get("callee"),
+            })
+        call_rows.sort(key=lambda row: (row["caller"] or "", row["callee"] or ""))
+
+        shape = {
+            "imports": chunk.meta.get("imports", []),
+            "regions": region_rows,
+            "calls": call_rows,
+        }
+        if region_rows or call_rows or shape["imports"]:
+            return _stable_hash(str(shape))
+    if not chunk.text:
+        return None
+    return _stable_hash(chunk.text)
+
+
+def _chunk_snapshot(chunk: Optional[Chunk]) -> Optional[Dict[str, Any]]:
+    if chunk is None:
+        return None
+    return {
+        "path": chunk.path,
+        "digest": chunk.text,
+        "map_hash": _chunk_map_hash(chunk),
+        "meta": dict(chunk.meta) if isinstance(chunk.meta, dict) else None,
+    }
+
+
+def _collect_region_changes(
+    filepath: str,
+    hunks: List[Dict[str, Optional[int]]],
+    old_chunk: Optional[Chunk],
+    new_chunk: Optional[Chunk],
+) -> List[Dict[str, Any]]:
+    old_regions = _region_map(old_chunk)
+    new_regions = _region_map(new_chunk)
+    touched_ids = _touched_region_ids(hunks, old_regions, new_regions)
+    changes: List[Dict[str, Any]] = []
+    for region_id in touched_ids:
+        old_region = old_regions.get(region_id)
+        new_region = new_regions.get(region_id)
+        change = _region_change_kind(old_region, new_region)
+        if change is None:
+            continue
+        changes.append(_region_change_payload(
+            filepath=filepath,
+            region_id=region_id,
+            change=change,
+            hunks=hunks,
+            old_region=old_region,
+            new_region=new_region,
+        ))
+    return changes
+
+
+def _region_change_kind(
+    old_region: Optional[Dict[str, Any]],
+    new_region: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    if old_region and new_region:
+        if old_region["map_hash"] != new_region["map_hash"]:
+            return "structural"
+        if old_region["content_hash"] != new_region["content_hash"]:
+            return "implementation_only"
+        return None
+    if new_region:
+        return "added"
+    if old_region:
+        return "removed"
+    return None
+
+
+def _region_change_payload(
+    filepath: str,
+    region_id: str,
+    change: str,
+    hunks: List[Dict[str, Optional[int]]],
+    old_region: Optional[Dict[str, Any]],
+    new_region: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    region = new_region or old_region or {}
+    changed_ranges = {
+        "old": _intersect_region_ranges(hunks, old_region, "old"),
+        "new": _intersect_region_ranges(hunks, new_region, "new"),
+    }
+    range_summary = _format_region_change_ranges(changed_ranges)
+    label = _region_label(region)
+    note = _region_change_note(change, label, range_summary)
+    return {
+        "id": region_id,
+        "path": filepath,
+        "change": change,
+        "kind": region.get("kind", "region"),
+        "name": region.get("name"),
+        "qualified_name": region.get("qualified_name"),
+        "container": region.get("container"),
+        "old_start_line": old_region.get("start_line") if old_region else None,
+        "old_end_line": old_region.get("end_line") if old_region else None,
+        "new_start_line": new_region.get("start_line") if new_region else None,
+        "new_end_line": new_region.get("end_line") if new_region else None,
+        "old_map_hash": old_region.get("map_hash") if old_region else None,
+        "new_map_hash": new_region.get("map_hash") if new_region else None,
+        "old_content_hash": old_region.get("content_hash") if old_region else None,
+        "new_content_hash": new_region.get("content_hash") if new_region else None,
+        "changed_ranges": changed_ranges,
+        "range_summary": range_summary,
+        "label": label,
+        "note": note,
+    }
+
+
+def _region_map(chunk: Optional[Chunk]) -> Dict[str, Dict[str, Any]]:
+    if chunk is None or not isinstance(chunk.meta, dict):
+        return {}
+    regions = chunk.meta.get("regions")
+    if not isinstance(regions, list):
+        return {}
+    return {
+        region["id"]: region
+        for region in regions
+        if isinstance(region, dict) and isinstance(region.get("id"), str)
+    }
+
+
+def _touched_region_ids(
+    hunks: List[Dict[str, Optional[int]]],
+    old_regions: Dict[str, Dict[str, Any]],
+    new_regions: Dict[str, Dict[str, Any]],
+) -> List[str]:
+    touched: List[str] = []
+    seen: Set[str] = set()
+    for hunk in hunks:
+        old_matches = _matching_regions(old_regions, hunk["old_start"], hunk["old_end"])
+        new_matches = _matching_regions(new_regions, hunk["new_start"], hunk["new_end"])
+        non_module_matches = [
+            region for region in (old_matches + new_matches)
+            if region.get("kind") != "module"
+        ]
+
+        matches = list(non_module_matches)
+        include_module = False
+        if non_module_matches:
+            include_module = (
+                _has_uncovered_hunk_lines(hunk["old_start"], hunk["old_end"], old_matches)
+                or _has_uncovered_hunk_lines(hunk["new_start"], hunk["new_end"], new_matches)
+            )
+        elif old_regions.get("module:top") or new_regions.get("module:top"):
+            include_module = True
+
+        if include_module:
+            module_region = old_regions.get("module:top") or new_regions.get("module:top")
+            if module_region:
+                matches.append(module_region)
+
+        for region in matches:
+            region_id = region["id"]
+            if region_id in seen:
+                continue
+            seen.add(region_id)
+            touched.append(region_id)
+    return touched
+
+
+def _has_uncovered_hunk_lines(
+    start_line: Optional[int],
+    end_line: Optional[int],
+    matches: List[Dict[str, Any]],
+) -> bool:
+    if start_line is None or end_line is None:
+        return False
+
+    non_module_matches = [region for region in matches if region.get("kind") != "module"]
+    if not non_module_matches:
+        return True
+
+    covered: List[Tuple[int, int]] = []
+    for region in non_module_matches:
+        region_start = region.get("start_line")
+        region_end = region.get("end_line")
+        if not isinstance(region_start, int) or not isinstance(region_end, int):
+            continue
+        overlap_start = max(start_line, region_start)
+        overlap_end = min(end_line, region_end)
+        if overlap_start <= overlap_end:
+            covered.append((overlap_start, overlap_end))
+
+    if not covered:
+        return True
+
+    covered.sort()
+    cursor = start_line
+    for covered_start, covered_end in covered:
+        if cursor < covered_start:
+            return True
+        cursor = max(cursor, covered_end + 1)
+        if cursor > end_line:
+            return False
+    return cursor <= end_line
+
+
+def _matching_regions(
+    regions: Dict[str, Dict[str, Any]],
+    start_line: Optional[int],
+    end_line: Optional[int],
+) -> List[Dict[str, Any]]:
+    if start_line is None or end_line is None:
+        return []
+    matches = []
+    for region in regions.values():
+        region_start = region.get("start_line")
+        region_end = region.get("end_line")
+        if not isinstance(region_start, int) or not isinstance(region_end, int):
+            continue
+        if region_start <= end_line and start_line <= region_end:
+            matches.append(region)
+    matches.sort(key=lambda region: (region["end_line"] - region["start_line"], region["start_line"]))
+    return matches
+
+
+def _region_label(region: Dict[str, Any]) -> str:
+    kind = region.get("kind", "region")
+    name = region.get("qualified_name") or region.get("name") or region.get("id")
+    if kind == "module":
+        return "module top-level"
+    return f"{kind} `{name}`"
+
+
+def _format_region_change_ranges(
+    changed_ranges: Dict[str, List[Dict[str, int]]],
+) -> str:
+    parts = []
+    old_ranges = changed_ranges.get("old", [])
+    new_ranges = changed_ranges.get("new", [])
+    if old_ranges:
+        parts.append(f"old lines {', '.join(_render_line_ranges(old_ranges))}")
+    if new_ranges:
+        parts.append(f"new lines {', '.join(_render_line_ranges(new_ranges))}")
+    return " / ".join(parts) if parts else "near touched lines"
+
+
+def _intersect_region_ranges(
+    hunks: List[Dict[str, Optional[int]]],
+    region: Optional[Dict[str, Any]],
+    side: str,
+) -> List[Dict[str, int]]:
+    if region is None:
+        return []
+    region_start = region.get("start_line")
+    region_end = region.get("end_line")
+    if not isinstance(region_start, int) or not isinstance(region_end, int):
+        return []
+
+    rendered: List[Dict[str, int]] = []
+    for hunk in hunks:
+        start = hunk.get(f"{side}_start")
+        end = hunk.get(f"{side}_end")
+        if start is None or end is None:
+            continue
+        overlap_start = max(region_start, start)
+        overlap_end = min(region_end, end)
+        if overlap_start > overlap_end:
+            continue
+        rendered.append({"start": overlap_start, "end": overlap_end})
+    return rendered
+
+
+def _render_line_ranges(ranges: List[Dict[str, int]]) -> List[str]:
+    rendered = []
+    for item in ranges:
+        start = item["start"]
+        end = item["end"]
+        rendered.append(str(start) if start == end else f"{start}-{end}")
+    return rendered
+
+
+def _region_change_note(change: str, label: str, range_summary: str) -> str:
+    if change == "implementation_only":
+        return f"{label} changed internally at {range_summary}; map unchanged"
+    if change == "structural":
+        return f"{label} changed structurally at {range_summary}"
+    if change == "added":
+        return f"{label} added"
+    if change == "removed":
+        return f"{label} removed"
+    return f"{label} changed"
 
 
 def _mapnew_fallback_chunk(
@@ -665,11 +1190,11 @@ def _file_to_chunk(
     return Chunk(
         path=filepath,
         text=text,
-        meta=_analysis_to_meta(analysis) if analysis else None,
+        meta=_analysis_to_meta(analysis, content) if analysis else None,
     )
 
 
-def _analysis_to_meta(analysis: FileAnalysis) -> Dict[str, Any]:
+def _analysis_to_meta(analysis: FileAnalysis, content: str) -> Dict[str, Any]:
     """Build verbose JSON metadata with line info for functions/classes/calls."""
     imports = []
     for imp in analysis.imports:
@@ -688,6 +1213,7 @@ def _analysis_to_meta(analysis: FileAnalysis) -> Dict[str, Any]:
         for c in analysis.classes
         if c.name
     ]
+    regions = _build_regions(analysis, content, imports)
     call_graph = [
         {"caller": e.caller, "callee": e.callee, "line": e.line}
         for e in analysis.call_graph
@@ -703,8 +1229,137 @@ def _analysis_to_meta(analysis: FileAnalysis) -> Dict[str, Any]:
         "imports_count": len(analysis.imports),
         "functions": functions,
         "classes": classes,
+        "regions": regions,
         "call_graph": call_graph,
     }
+
+
+def _build_regions(
+    analysis: FileAnalysis,
+    content: str,
+    imports: List[str],
+) -> List[Dict[str, Any]]:
+    generator = DigestGenerator(content, analysis.language)
+    source_bytes = content.encode("utf-8", errors="replace")
+    classes = sorted(
+        [cls for cls in analysis.classes if cls.name],
+        key=lambda cls: ((cls.name or ""), cls.start_line, cls.end_line),
+    )
+    functions = sorted(
+        [func for func in analysis.functions if func.name],
+        key=lambda func: ((func.name or ""), func.start_line, func.end_line),
+    )
+    class_counts: Dict[str, int] = {}
+    func_counts: Dict[str, int] = {}
+    regions: List[Dict[str, Any]] = []
+
+    module_map_text = generator.module_index(analysis).content
+    regions.append(_region_entry(
+        region_id="module:top",
+        kind="module",
+        name="top",
+        qualified_name="top",
+        container=None,
+        start_line=1,
+        end_line=max(1, analysis.line_count),
+        map_text=module_map_text,
+        content_text=content,
+    ))
+
+    class_ids: Dict[Tuple[int, int, str], str] = {}
+    for cls in classes:
+        base = f"class:{cls.name}"
+        class_counts[base] = class_counts.get(base, 0) + 1
+        region_id = base if class_counts[base] == 1 else f"{base}@{cls.start_line}"
+        methods = [
+            func for func in functions
+            if cls.start_line <= func.start_line <= cls.end_line
+        ]
+        class_ids[(cls.start_line, cls.end_line, cls.name or "")] = region_id
+        map_text = generator.class_structure(cls, methods).content
+        content_text = _slice_region_content(source_bytes, cls.start_byte, cls.end_byte)
+        regions.append(_region_entry(
+            region_id=region_id,
+            kind="class",
+            name=cls.name or "UnknownClass",
+            qualified_name=cls.name or "UnknownClass",
+            container=None,
+            start_line=cls.start_line,
+            end_line=cls.end_line,
+            map_text=map_text,
+            content_text=content_text,
+        ))
+
+    for func in functions:
+        container = _class_container_for_function(func, classes, class_ids)
+        qualified_name = f"{container.split(':', 1)[1]}.{func.name}" if container else func.name
+        base = f"func:{qualified_name}"
+        func_counts[base] = func_counts.get(base, 0) + 1
+        region_id = base if func_counts[base] == 1 else f"{base}@{func.start_line}"
+        map_text = generator.function_signature(func).content
+        content_text = _slice_region_content(source_bytes, func.start_byte, func.end_byte)
+        regions.append(_region_entry(
+            region_id=region_id,
+            kind="function",
+            name=func.name or "function",
+            qualified_name=qualified_name or (func.name or "function"),
+            container=container,
+            start_line=func.start_line,
+            end_line=func.end_line,
+            map_text=map_text,
+            content_text=content_text,
+        ))
+
+    regions.sort(key=lambda region: (region["start_line"], region["kind"], region["id"]))
+    return regions
+
+
+def _region_entry(
+    region_id: str,
+    kind: str,
+    name: str,
+    qualified_name: str,
+    container: Optional[str],
+    start_line: int,
+    end_line: int,
+    map_text: str,
+    content_text: str,
+) -> Dict[str, Any]:
+    return {
+        "id": region_id,
+        "kind": kind,
+        "name": name,
+        "qualified_name": qualified_name,
+        "container": container,
+        "start_line": start_line,
+        "end_line": end_line,
+        "map_hash": _stable_hash(map_text),
+        "content_hash": _stable_hash(content_text),
+    }
+
+
+def _stable_hash(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _slice_region_content(source_bytes: bytes, start_byte: int, end_byte: int) -> str:
+    return source_bytes[start_byte:end_byte].decode("utf-8", errors="ignore")
+
+
+def _class_container_for_function(
+    func,
+    classes,
+    class_ids: Dict[Tuple[int, int, str], str],
+) -> Optional[str]:
+    containing = [
+        cls for cls in classes
+        if cls.start_line <= func.start_line <= cls.end_line
+    ]
+    if not containing:
+        return None
+    cls = min(containing, key=lambda item: (item.end_line - item.start_line, item.start_line))
+    return class_ids.get((cls.start_line, cls.end_line, cls.name or ""))
 
 
 def _build_summary_chunk(
