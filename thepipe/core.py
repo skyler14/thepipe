@@ -201,7 +201,7 @@ class Chunk:
         }
         if verbose and isinstance(self.meta, dict):
             data["meta"] = self.meta
-        return data
+        return _prune_json_data(data)
 
     @staticmethod
     def from_json(data: Dict, host_images: bool = False) -> "Chunk":
@@ -219,11 +219,31 @@ class Chunk:
                     images.append(image)
         text = data["text"].strip() if "text" in data else None
         return Chunk(
-            path=data["path"],
+            path=data.get("path"),
             text=text,
             images=images,
+            audios=data.get("audios"),
+            videos=data.get("videos"),
             meta=data.get("meta"),
         )
+
+
+def _prune_json_data(value: Any) -> Any:
+    if isinstance(value, dict):
+        pruned = {}
+        for key, item in value.items():
+            pruned_item = _prune_json_data(item)
+            if pruned_item is None:
+                continue
+            if isinstance(pruned_item, (list, dict)) and len(pruned_item) == 0:
+                continue
+            pruned[key] = pruned_item
+        return pruned
+
+    if isinstance(value, list):
+        return [_prune_json_data(item) for item in value]
+
+    return value
 
 def make_image_url(
     image: Image.Image, host_images: bool = False, max_resolution: Optional[int] = None

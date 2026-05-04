@@ -54,6 +54,10 @@ class LanguagePlugin(ABC):
         """Tree-sitter query for imports"""
         return ""
 
+    def normalize_imports(self, imports: List[str]) -> List[str]:
+        """Normalize or expand raw import captures before dependency resolution."""
+        return imports
+
     @property
     def import_query_languages(self) -> Optional[Set[str]]:
         """

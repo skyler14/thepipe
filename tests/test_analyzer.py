@@ -58,6 +58,77 @@ class TestASTExtractor(unittest.TestCase):
         """Test unknown extensions return None"""
         self.assertIsNone(self.extractor.detect_language("readme.txt"))
         self.assertIsNone(self.extractor.detect_language("data.json"))
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_rust_world_class_surfaces(self):
+        """Rust extraction should include modules, grouped imports, types, traits, impls, and methods."""
+        source = """
+use crate::{utils::{helper, Thing}, api::Router};
+pub use serde::{Serialize, Deserialize};
+extern crate alloc;
+mod utils;
+pub mod api;
+
+pub trait Handler { fn handle(&self); }
+pub struct User { id: u64 }
+pub enum Mode { A, B }
+pub type UserId = u64;
+union Raw { bits: u32 }
+impl User { pub fn new() -> Self { Self { id: 0 } } }
+"""
+
+        analysis = self.extractor.extract(source, "rust", "src/main.rs")
+
+        self.assertIsNotNone(analysis)
+        self.assertIn("mod utils;", analysis.imports)
+        self.assertIn("pub mod api;", analysis.imports)
+        self.assertIn("use crate::utils::helper;", analysis.imports)
+        self.assertIn("use crate::utils::Thing;", analysis.imports)
+        self.assertIn("use crate::api::Router;", analysis.imports)
+        self.assertIn("use serde::Serialize;", analysis.imports)
+        self.assertIn("use serde::Deserialize;", analysis.imports)
+
+        class_names = {node.name for node in analysis.classes}
+        self.assertIn("Handler", class_names)
+        self.assertIn("User", class_names)
+        self.assertIn("Mode", class_names)
+        self.assertIn("UserId", class_names)
+        self.assertIn("Raw", class_names)
+        self.assertIn("impl User", class_names)
+
+        func_names = {node.name for node in analysis.functions}
+        self.assertIn("handle", func_names)
+        self.assertIn("new", func_names)
+
+    @REQUIRES_TREE_SITTER
+    def test_extract_tsx_react_and_type_surfaces(self):
+        """TSX extraction should keep React wrapper components and TS type surfaces."""
+        source = """
+import React, { memo, forwardRef } from 'react';
+import type { User } from '@/models/user';
+export { helper } from './helper';
+
+interface Props { user: User }
+type Mode = 'view' | 'edit';
+enum Status { Ready }
+class Store {}
+
+const Card = memo(function Card(props: Props) { return <div />; });
+const Link = React.forwardRef<HTMLAnchorElement, Props>((props, ref) => <a ref={ref} />);
+export const Plain = (props: Props) => <span>{props.user.name}</span>;
+"""
+
+        analysis = self.extractor.extract(source, "tsx", "src/Card.tsx")
+
+        self.assertIsNotNone(analysis)
+        self.assertEqual(
+            analysis.imports,
+            ["'react'", "'@/models/user'", "'./helper'"],
+        )
+        class_names = {node.name for node in analysis.classes}
+        self.assertTrue({"Props", "Mode", "Status", "Store"}.issubset(class_names))
+        func_names = {node.name for node in analysis.functions}
+        self.assertTrue({"Card", "Link", "Plain"}.issubset(func_names))
     
     @REQUIRES_TREE_SITTER
     def test_extract_python_file(self):
@@ -505,6 +576,87 @@ class TestIntegrationHelpers(unittest.TestCase):
         foo_region = next(region for region in meta["regions"] if region["id"] == "func:foo")
         self.assertIn("map_hash", foo_region)
         self.assertIn("content_hash", foo_region)
+        self.assertIn("map_git_oid", foo_region)
+        self.assertIn("content_git_oid", foo_region)
+
+    def test_build_code_relations_json_payload_emits_entities_and_edges(self):
+        from thepipe.analyzer.integration import build_code_relations_json_payload
+        from thepipe.core import Chunk
+
+        chunk = Chunk(
+            path="a.py",
+            text="# a.py (digest)\n(module a.py\n  (imports\n    \"import os\"\n  )\n  (functions foo)\n)",
+            meta={
+                "language": "python",
+                "line_count": 5,
+                "imports": ["import os"],
+                "imports_count": 1,
+                "functions": [{"name": "foo", "start_line": 3, "end_line": 4}],
+                "classes": [],
+                "regions": [
+                    {
+                        "id": "module:top",
+                        "kind": "module",
+                        "name": "top",
+                        "qualified_name": "top",
+                        "container": None,
+                        "start_line": 1,
+                        "end_line": 5,
+                        "map_hash": "aaaa",
+                        "content_hash": "bbbb",
+                        "map_git_oid": "git:blob:sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "content_git_oid": "git:blob:sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    },
+                    {
+                        "id": "func:foo",
+                        "kind": "function",
+                        "name": "foo",
+                        "qualified_name": "foo",
+                        "container": None,
+                        "start_line": 3,
+                        "end_line": 4,
+                        "map_hash": "cccc",
+                        "content_hash": "dddd",
+                        "map_git_oid": "git:blob:sha1:cccccccccccccccccccccccccccccccccccccccc",
+                        "content_git_oid": "git:blob:sha1:dddddddddddddddddddddddddddddddddddddddd",
+                    },
+                ],
+                "call_graph": [{"caller": "foo", "callee": "print", "line": 4}],
+                "dependencies": [
+                    {
+                        "target": "os",
+                        "import_statement": "import os",
+                        "import_type": "import",
+                        "is_external": True,
+                    }
+                ],
+            },
+        )
+
+        payload = build_code_relations_json_payload([chunk], mode="map", repo_root=".")
+
+        self.assertEqual(payload["schema_version"], "code-relations/v1")
+        self.assertEqual(payload["mode"], "map")
+        self.assertEqual(payload["files"][0]["file_id"], "file:a.py")
+        entity_ids = {entity["entity_id"] for entity in payload["entities"]}
+        self.assertIn("entity:file:a.py:module:top", entity_ids)
+        self.assertIn("entity:file:a.py:func:foo", entity_ids)
+        edge_kinds = {(edge["kind"], edge["from_entity_id"], edge["to_entity_id"]) for edge in payload["edges"]}
+        self.assertIn(
+            ("contains", "entity:file:a.py:module:top", "entity:file:a.py:func:foo"),
+            edge_kinds,
+        )
+        self.assertIn(
+            ("imports", "entity:file:a.py:module:top", "dep:os"),
+            edge_kinds,
+        )
+        self.assertIn(
+            ("calls", "entity:file:a.py:func:foo", "symbol:print"),
+            edge_kinds,
+        )
+        call_edge = next(edge for edge in payload["edges"] if edge["kind"] == "calls")
+        self.assertEqual(call_edge["location"]["start_line"], 4)
+        self.assertEqual(call_edge["location"]["end_line"], 4)
 
     def test_process_mapnew_end_to_end(self):
         from thepipe.analyzer.integration import process_code_relations

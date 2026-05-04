@@ -248,15 +248,27 @@ def main() -> None:
             if chunk.text:
                 print(chunk.text)
     elif output_format == 'json':
-        # JSON array to stdout
+        # JSON to stdout
         import json as json_module
         json_verbose = False
         if isinstance(args.options, dict):
             json_verbose = bool(args.options.get("json_verbose"))
-        output = [
-            c.to_json(text_only=args.text_only, verbose=json_verbose)
-            for c in chunks
-        ]
+        code_relations_mode = None
+        if isinstance(args.options, dict):
+            code_relations_mode = args.options.get("code_relations")
+        if code_relations_mode:
+            from .analyzer.integration import build_code_relations_json_payload
+
+            output = build_code_relations_json_payload(
+                chunks=chunks,
+                mode=str(code_relations_mode),
+                repo_root=str(args.source),
+            )
+        else:
+            output = [
+                c.to_json(text_only=args.text_only, verbose=json_verbose)
+                for c in chunks
+            ]
         print(json_module.dumps(output, indent=2))
 
 # Entry-point shim

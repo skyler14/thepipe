@@ -1190,11 +1190,19 @@ def _file_to_chunk(
     return Chunk(
         path=filepath,
         text=text,
-        meta=_analysis_to_meta(analysis, content) if analysis else None,
+        meta=_analysis_to_meta(
+            analysis,
+            content,
+            _dependencies_for_file(result, filepath),
+        ) if analysis else None,
     )
 
 
-def _analysis_to_meta(analysis: FileAnalysis, content: str) -> Dict[str, Any]:
+def _analysis_to_meta(
+    analysis: FileAnalysis,
+    content: str,
+    dependencies: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """Build verbose JSON metadata with line info for functions/classes/calls."""
     imports = []
     for imp in analysis.imports:
@@ -1231,6 +1239,7 @@ def _analysis_to_meta(analysis: FileAnalysis, content: str) -> Dict[str, Any]:
         "classes": classes,
         "regions": regions,
         "call_graph": call_graph,
+        "dependencies": dependencies or [],
     }
 
 
@@ -1335,12 +1344,21 @@ def _region_entry(
         "end_line": end_line,
         "map_hash": _stable_hash(map_text),
         "content_hash": _stable_hash(content_text),
+        "map_git_oid": _git_blob_oid(map_text),
+        "content_git_oid": _git_blob_oid(content_text),
     }
 
 
 def _stable_hash(text: str) -> str:
     normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _git_blob_oid(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    payload = normalized.encode("utf-8")
+    header = f"blob {len(payload)}\0".encode("utf-8")
+    return f"git:blob:sha1:{hashlib.sha1(header + payload).hexdigest()}"
 
 
 def _slice_region_content(source_bytes: bytes, start_byte: int, end_byte: int) -> str:
@@ -1360,6 +1378,351 @@ def _class_container_for_function(
         return None
     cls = min(containing, key=lambda item: (item.end_line - item.start_line, item.start_line))
     return class_ids.get((cls.start_line, cls.end_line, cls.name or ""))
+
+
+def _dependencies_for_file(result: AnalysisResult, filepath: str) -> List[Dict[str, Any]]:
+    dependencies = []
+    for edge in result.dependency_graph.edges:
+        if edge.from_file != filepath:
+            continue
+        dependencies.append({
+            "target": edge.to_file,
+            "import_statement": " ".join(edge.import_statement.strip().split()),
+            "import_type": edge.import_type,
+            "is_external": edge.is_external,
+        })
+    dependencies.sort(key=lambda dep: (
+        dep["target"],
+        dep["import_statement"],
+        dep["import_type"],
+        dep["is_external"],
+    ))
+    return dependencies
+
+
+def build_code_relations_json_payload(
+    chunks: List[Chunk],
+    mode: str,
+    repo_root: str,
+) -> Dict[str, Any]:
+    if mode == "mapnew":
+        return _build_mapnew_json_payload(chunks, repo_root)
+
+    file_chunks = [chunk for chunk in chunks if chunk.path and chunk.path != "__summary__"]
+    files: List[Dict[str, Any]] = []
+    entities: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    external_entities: Dict[str, Dict[str, Any]] = {}
+    external_symbol_entities: Dict[str, Dict[str, Any]] = {}
+
+    region_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    file_regions: Dict[str, List[Dict[str, Any]]] = {}
+
+    for chunk in file_chunks:
+        meta = chunk.meta if isinstance(chunk.meta, dict) else {}
+        file_id = _file_id(chunk.path)
+        role = _file_role_from_chunk_text(chunk.text or "")
+        file_record: Dict[str, Any] = {
+            "file_id": file_id,
+            "path": chunk.path,
+            "language": meta.get("language"),
+            "role": role,
+            "stats": {
+                "line_count": meta.get("line_count"),
+                "imports_count": meta.get("imports_count"),
+            },
+        }
+        display_key = "digest" if role.endswith("digest") or role == "digest" else "raw_text"
+        file_record["display"] = {display_key: chunk.text}
+        if chunk.images:
+            file_record["images"] = chunk.to_json().get("images")
+        if chunk.audios:
+            file_record["audios"] = list(chunk.audios)
+        if chunk.videos:
+            file_record["videos"] = list(chunk.videos)
+        files.append(file_record)
+
+        regions = meta.get("regions", [])
+        file_regions[chunk.path] = regions
+        for region in regions:
+            entity = _entity_from_region(chunk.path, region)
+            entities.append(entity)
+            region_index[(chunk.path, region["id"])] = entity
+
+    for chunk in file_chunks:
+        path = chunk.path
+        if not path:
+            continue
+        meta = chunk.meta if isinstance(chunk.meta, dict) else {}
+        module_entity_id = _entity_id(path, "module:top")
+
+        for region in file_regions.get(path, []):
+            if region["kind"] == "module":
+                continue
+            entity_id = _entity_id(path, region["id"])
+            container_region = region.get("container")
+            container_entity_id = _entity_id(path, container_region) if container_region else module_entity_id
+            edges.append(_edge_record(
+                kind="contains",
+                from_entity_id=container_entity_id,
+                to_entity_id=entity_id,
+                path=path,
+                start_line=region["start_line"],
+                end_line=region["end_line"],
+            ))
+
+        for dep in meta.get("dependencies", []):
+            to_entity_id = _dependency_target_entity_id(dep, external_entities)
+            edges.append(_edge_record(
+                kind="imports",
+                from_entity_id=module_entity_id,
+                to_entity_id=to_entity_id,
+                path=path,
+                start_line=_import_start_line(meta, dep["import_statement"]),
+                end_line=_import_start_line(meta, dep["import_statement"]),
+                attributes={
+                    "import_type": dep["import_type"],
+                    "import_statement": dep["import_statement"],
+                    "is_external": dep["is_external"],
+                },
+            ))
+
+        for call in meta.get("call_graph", []):
+            caller_entity_id = _resolve_caller_entity_id(path, file_regions.get(path, []), call)
+            callee_entity_id = _resolve_callee_entity_id(
+                path,
+                file_regions.get(path, []),
+                call["callee"],
+                external_symbol_entities,
+            )
+            edges.append(_edge_record(
+                kind="calls",
+                from_entity_id=caller_entity_id,
+                to_entity_id=callee_entity_id,
+                path=path,
+                start_line=call["line"],
+                end_line=call["line"],
+            ))
+
+    entities.extend(sorted(external_entities.values(), key=lambda entity: entity["entity_id"]))
+    entities.extend(sorted(external_symbol_entities.values(), key=lambda entity: entity["entity_id"]))
+    files.sort(key=lambda file: file["path"])
+    entities.sort(key=lambda entity: (entity["file_id"] or "", entity["entity_id"]))
+    edges.sort(key=lambda edge: (edge["kind"], edge["from_entity_id"], edge["to_entity_id"]))
+
+    entity_counts: Dict[str, int] = {}
+    for entity in entities:
+        entity_counts[entity["kind"]] = entity_counts.get(entity["kind"], 0) + 1
+
+    edge_counts: Dict[str, int] = {}
+    for edge in edges:
+        edge_counts[edge["kind"]] = edge_counts.get(edge["kind"], 0) + 1
+
+    omitted_files = []
+    for chunk in chunks:
+        if chunk.path == "__summary__":
+            continue
+        if not chunk.path:
+            continue
+    return {
+        "schema_version": "code-relations/v1",
+        "mode": mode,
+        "repo_root": repo_root,
+        "summary": {
+            "files_total": len(file_chunks),
+            "files_analyzed": len(file_chunks),
+            "files_omitted": len(omitted_files),
+            "entity_counts": entity_counts,
+            "edge_counts": edge_counts,
+        },
+        "files": files,
+        "entities": entities,
+        "edges": edges,
+        "omitted_files": omitted_files,
+    }
+
+
+def _build_mapnew_json_payload(chunks: List[Chunk], repo_root: str) -> Dict[str, Any]:
+    chunk = next((item for item in chunks if item.path == "mapnew.diff"), None)
+    meta = chunk.meta if chunk and isinstance(chunk.meta, dict) else {}
+    return {
+        "schema_version": "code-relations/v1",
+        "mode": "mapnew",
+        "repo_root": repo_root,
+        "summary": {
+            "files_total": meta.get("changed_files_count", 0),
+            "files_analyzed": meta.get("changed_files_count", 0),
+            "files_omitted": 0,
+            "entity_counts": {},
+            "edge_counts": {},
+        },
+        "files": [],
+        "entities": [],
+        "edges": [],
+        "omitted_files": [],
+        "diff": {
+            "old_ref": meta.get("old_ref"),
+            "new_ref": meta.get("new_ref"),
+            "files": meta.get("files", []),
+            "implementation_only_regions": meta.get("implementation_only_regions", 0),
+            "rendered_diff": chunk.text if chunk else "",
+        },
+    }
+
+
+def _file_id(path: str) -> str:
+    return f"file:{path}"
+
+
+def _entity_id(path: str, region_id: str) -> str:
+    return f"entity:{_file_id(path)}:{region_id}"
+
+
+def _dependency_entity_id(target: str) -> str:
+    return f"dep:{target}"
+
+
+def _symbol_entity_id(symbol: str) -> str:
+    return f"symbol:{symbol}"
+
+
+def _entity_from_region(path: str, region: Dict[str, Any]) -> Dict[str, Any]:
+    entity_id = _entity_id(path, region["id"])
+    container_region = region.get("container")
+    if region["kind"] == "module":
+        container_entity_id = None
+    elif container_region:
+        container_entity_id = _entity_id(path, container_region)
+    else:
+        container_entity_id = _entity_id(path, "module:top")
+    return {
+        "entity_id": entity_id,
+        "file_id": _file_id(path),
+        "kind": region["kind"],
+        "name": region["name"],
+        "qualified_name": region["qualified_name"],
+        "container_entity_id": container_entity_id,
+        "location": {
+            "path": path,
+            "start_line": region["start_line"],
+            "end_line": region["end_line"],
+        },
+        "hashes": {
+            "map_git_oid": region.get("map_git_oid"),
+            "content_git_oid": region.get("content_git_oid"),
+        },
+    }
+
+
+def _file_role_from_chunk_text(text: str) -> str:
+    first_line = text.splitlines()[0] if text else ""
+    return "digest" if "(digest)" in first_line else "raw"
+
+
+def _edge_record(
+    kind: str,
+    from_entity_id: str,
+    to_entity_id: str,
+    path: str,
+    start_line: Optional[int],
+    end_line: Optional[int],
+    attributes: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    edge_id = f"edge:{kind}:{from_entity_id}->{to_entity_id}:{path}:{start_line or 0}:{end_line or 0}"
+    edge = {
+        "edge_id": edge_id,
+        "kind": kind,
+        "from_entity_id": from_entity_id,
+        "to_entity_id": to_entity_id,
+        "location": {
+            "path": path,
+            "start_line": start_line,
+            "end_line": end_line,
+        },
+    }
+    if attributes:
+        edge["attributes"] = attributes
+    return edge
+
+
+def _dependency_target_entity_id(
+    dep: Dict[str, Any],
+    external_entities: Dict[str, Dict[str, Any]],
+) -> str:
+    if not dep["is_external"] and dep["target"]:
+        return _entity_id(dep["target"], "module:top")
+    entity_id = _dependency_entity_id(dep["target"])
+    if entity_id not in external_entities:
+        external_entities[entity_id] = {
+            "entity_id": entity_id,
+            "file_id": None,
+            "kind": "external_dependency",
+            "name": dep["target"],
+            "qualified_name": dep["target"],
+            "container_entity_id": None,
+            "hashes": {},
+        }
+    return entity_id
+
+
+def _resolve_caller_entity_id(
+    path: str,
+    regions: List[Dict[str, Any]],
+    call: Dict[str, Any],
+) -> str:
+    candidates = [
+        region for region in regions
+        if region["kind"] == "function"
+        and (region["name"] == call["caller"] or region["qualified_name"].endswith(f".{call['caller']}"))
+        and region["start_line"] <= call["line"] <= region["end_line"]
+    ]
+    if not candidates:
+        candidates = [
+            region for region in regions
+            if region["kind"] == "function"
+            and (region["name"] == call["caller"] or region["qualified_name"] == call["caller"])
+        ]
+    if candidates:
+        best = min(candidates, key=lambda region: (region["end_line"] - region["start_line"], region["start_line"]))
+        return _entity_id(path, best["id"])
+    return _symbol_entity_id(f"{path}:{call['caller']}")
+
+
+def _resolve_callee_entity_id(
+    path: str,
+    regions: List[Dict[str, Any]],
+    callee: str,
+    external_symbol_entities: Dict[str, Dict[str, Any]],
+) -> str:
+    candidates = [
+        region for region in regions
+        if region["kind"] == "function"
+        and (region["name"] == callee or region["qualified_name"] == callee or region["qualified_name"].endswith(f".{callee}"))
+    ]
+    if candidates:
+        best = min(candidates, key=lambda region: (region["end_line"] - region["start_line"], region["start_line"]))
+        return _entity_id(path, best["id"])
+    entity_id = _symbol_entity_id(callee)
+    if entity_id not in external_symbol_entities:
+        external_symbol_entities[entity_id] = {
+            "entity_id": entity_id,
+            "file_id": None,
+            "kind": "external_symbol",
+            "name": callee,
+            "qualified_name": callee,
+            "container_entity_id": None,
+            "hashes": {},
+        }
+    return entity_id
+
+
+def _import_start_line(meta: Dict[str, Any], import_statement: str) -> Optional[int]:
+    imports = meta.get("imports", [])
+    try:
+        index = imports.index(import_statement)
+        return index + 1
+    except ValueError:
+        return None
 
 
 def _build_summary_chunk(

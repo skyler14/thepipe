@@ -156,16 +156,49 @@ FUNCTION_QUERIES = {
         (function_declaration name: (identifier) @name) @func
         (arrow_function) @func
         (method_definition name: (property_identifier) @name) @func
+        (variable_declarator
+          name: (identifier) @name
+          value: (call_expression
+            function: (identifier) @callee
+            (#match? @callee "^(memo|forwardRef)$"))) @func
+        (variable_declarator
+          name: (identifier) @name
+          value: (call_expression
+            function: (member_expression
+              property: (property_identifier) @callee
+              (#match? @callee "^(memo|forwardRef)$")))) @func
     """,
     'typescript': """
         (function_declaration name: (identifier) @name) @func
         (arrow_function) @func
         (method_definition name: (property_identifier) @name) @func
+        (variable_declarator
+          name: (identifier) @name
+          value: (call_expression
+            function: (identifier) @callee
+            (#match? @callee "^(memo|forwardRef)$"))) @func
+        (variable_declarator
+          name: (identifier) @name
+          value: (call_expression
+            function: (member_expression
+              property: (property_identifier) @callee
+              (#match? @callee "^(memo|forwardRef)$")))) @func
     """,
     'tsx': """
         (function_declaration name: (identifier) @name) @func
         (arrow_function) @func
         (method_definition name: (property_identifier) @name) @func
+        (variable_declarator
+          name: (identifier) @name
+          value: (call_expression
+            function: (identifier) @callee
+            (#match? @callee "^(memo|forwardRef)$"))) @func
+        (variable_declarator
+          name: (identifier) @name
+          value: (call_expression
+            function: (member_expression
+              property: (property_identifier) @callee
+              (#match? @callee "^(memo|forwardRef)$")))) @func
     """,
     'go': '(function_declaration name: (identifier) @name) @func',
     'haskell': """
@@ -191,20 +224,27 @@ CLASS_QUERIES = {
     'python': '(class_definition name: (identifier) @name) @class',
     'javascript': '(class_declaration name: (identifier) @name) @class',
     'typescript': """
-        (class_declaration) @class
-        (interface_declaration) @class
-        (type_alias_declaration) @class
-        (enum_declaration) @class
+        (class_declaration name: (type_identifier) @name) @class
+        (interface_declaration name: (type_identifier) @name) @class
+        (type_alias_declaration name: (type_identifier) @name) @class
+        (enum_declaration name: (identifier) @name) @class
     """,
     'tsx': """
-        (class_declaration) @class
-        (interface_declaration) @class
-        (type_alias_declaration) @class
-        (enum_declaration) @class
+        (class_declaration name: (type_identifier) @name) @class
+        (interface_declaration name: (type_identifier) @name) @class
+        (type_alias_declaration name: (type_identifier) @name) @class
+        (enum_declaration name: (identifier) @name) @class
     """,
     'go': '(type_declaration (type_spec name: (type_identifier) @name)) @class',
     'haskell': '(data_type name: (name) @name) @class',
-    'rust': '(struct_item name: (type_identifier) @name) @class',
+    'rust': """
+        (struct_item name: (type_identifier) @name) @class
+        (enum_item name: (type_identifier) @name) @class
+        (trait_item name: (type_identifier) @name) @class
+        (type_item name: (type_identifier) @name) @class
+        (union_item name: (type_identifier) @name) @class
+        (impl_item type: (type_identifier) @name) @class
+    """,
     'java': '(class_declaration name: (identifier) @name) @class',
     'swift': """
         (class_declaration) @class
@@ -312,6 +352,14 @@ def _extract_function_like_name(node, source_bytes: bytes) -> Optional[str]:
                 return _slice_source(source_bytes, child.start_byte, child.end_byte)
 
     return None
+
+
+def _extract_rust_impl_name(node, source_bytes: bytes) -> Optional[str]:
+    header = _slice_source(source_bytes, node.start_byte, node.end_byte).split("{", 1)[0]
+    header = " ".join(header.split())
+    if not header.startswith("impl "):
+        return None
+    return header
 
 def _iter_tree(root_node):
     """Iterative depth-first traversal with enter/exit events."""
@@ -473,7 +521,8 @@ class ASTExtractor:
         
         if not query_str or lang is None:
             # Fallback: walk tree manually for common patterns
-            return self._extract_imports_fallback(tree, source_bytes, language)
+            imports = self._extract_imports_fallback(tree, source_bytes, language)
+            return plugin.normalize_imports(imports) if plugin else imports
         
         try:
             query = lang.query(query_str)
@@ -488,8 +537,11 @@ class ASTExtractor:
                 f"Query failed for {language} imports; using fallback",
                 exc_info=True,
             )
-            return self._extract_imports_fallback(tree, source_bytes, language)
+            imports = self._extract_imports_fallback(tree, source_bytes, language)
+            return plugin.normalize_imports(imports) if plugin else imports
         
+        if plugin:
+            return plugin.normalize_imports(imports)
         return imports
     
     def _extract_imports_fallback(self, tree, source_bytes: bytes, language: str) -> List[str]:
@@ -761,6 +813,8 @@ class ASTExtractor:
                         name = direct_name_map.get(node_key)
                         if not name:
                             name = nested_name_map.get(node_key)
+                        if language == "rust" and node.type == "impl_item":
+                            name = _extract_rust_impl_name(node, source_bytes) or name
                         if not name:
                             name = _extract_identifier_from_node(node, source_bytes)
                             

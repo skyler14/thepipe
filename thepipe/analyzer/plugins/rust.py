@@ -19,14 +19,40 @@ class RustPlugin(LanguagePlugin):
         return """
         (use_declaration) @import
         (extern_crate_declaration) @import
+        (mod_item) @import
+        """
+
+    @property
+    def function_queries(self) -> str:
+        return """
+        (function_item name: (identifier) @name) @func
+        (function_signature_item name: (identifier) @name) @func
+        """
+
+    @property
+    def class_queries(self) -> str:
+        return """
+        (struct_item name: (type_identifier) @name) @class
+        (enum_item name: (type_identifier) @name) @class
+        (trait_item name: (type_identifier) @name) @class
+        (type_item name: (type_identifier) @name) @class
+        (union_item name: (type_identifier) @name) @class
+        (impl_item type: (type_identifier) @name) @class
         """
 
     def parse_manifest(self, manifest_path: Path) -> Dict[str, Any]:
         """Parse Cargo.toml for workspace members and dependencies."""
         data: Dict[str, Any] = {
             "members": [],
+            "exclude": [],
+            "default_members": [],
             "dependencies": {},
+            "workspace_dependencies": {},
+            "features": {},
+            "targets": {},
             "package_name": None,
+            "lib": None,
+            "bins": [],
         }
         
         try:
@@ -37,6 +63,12 @@ class RustPlugin(LanguagePlugin):
             members = workspace.get("members", [])
             if isinstance(members, list):
                 data["members"] = [str(m) for m in members]
+            exclude = workspace.get("exclude", [])
+            if isinstance(exclude, list):
+                data["exclude"] = [str(m) for m in exclude]
+            default_members = workspace.get("default-members", [])
+            if isinstance(default_members, list):
+                data["default_members"] = [str(m) for m in default_members]
             
             package_name = package.get("name")
             if isinstance(package_name, str):
@@ -47,11 +79,121 @@ class RustPlugin(LanguagePlugin):
                 section_data = parsed.get(section, {})
                 if isinstance(section_data, dict):
                     deps.update(section_data)
+            target_data = parsed.get("target", {})
+            if isinstance(target_data, dict):
+                for target_cfg, target_sections in target_data.items():
+                    if not isinstance(target_sections, dict):
+                        continue
+                    for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+                        section_data = target_sections.get(section, {})
+                        if isinstance(section_data, dict):
+                            deps.update(section_data)
             data["dependencies"] = deps
+
+            workspace_deps = workspace.get("dependencies", {})
+            if isinstance(workspace_deps, dict):
+                data["workspace_dependencies"] = workspace_deps
+
+            features = parsed.get("features", {})
+            if isinstance(features, dict):
+                data["features"] = features
+
+            lib = parsed.get("lib")
+            if isinstance(lib, dict):
+                data["lib"] = lib
+            bins = parsed.get("bin", [])
+            if isinstance(bins, dict):
+                bins = [bins]
+            if isinstance(bins, list):
+                data["bins"] = [entry for entry in bins if isinstance(entry, dict)]
         except Exception:
             pass
         
         return data
+
+    def normalize_imports(self, imports: List[str]) -> List[str]:
+        normalized: List[str] = []
+        seen = set()
+        for import_stmt in imports:
+            expanded = self._expand_use_import(import_stmt)
+            for stmt in expanded or [import_stmt]:
+                stmt = stmt.strip()
+                if stmt and stmt not in seen:
+                    seen.add(stmt)
+                    normalized.append(stmt)
+        return normalized
+
+    def _expand_use_import(self, import_stmt: str) -> List[str]:
+        stmt = import_stmt.strip()
+        if not re.search(r'\buse\b', stmt) or "{" not in stmt:
+            return [stmt]
+
+        match = re.search(r'\buse\s+(.+?)\s*;', stmt, re.DOTALL)
+        if not match:
+            return [stmt]
+
+        paths = self._expand_use_path("", match.group(1).strip())
+        return [f"use {path};" for path in paths] or [stmt]
+
+    def _expand_use_path(self, prefix: str, path: str) -> List[str]:
+        path = path.strip()
+        path = re.sub(r'\s+as\s+[A-Za-z_]\w*$', '', path).strip()
+        if not path:
+            return []
+
+        brace_index = path.find("{")
+        if brace_index == -1:
+            return [self._join_use_path(prefix, path)]
+
+        before = path[:brace_index].rstrip(":")
+        after = path[brace_index + 1:]
+        inner, suffix = self._split_braced_use(after)
+        base = self._join_use_path(prefix, before) if before else prefix
+        expanded: List[str] = []
+        for part in self._split_top_level_commas(inner):
+            expanded.extend(self._expand_use_path(base, part))
+        if suffix.strip():
+            expanded.extend(self._expand_use_path(prefix, suffix.strip()))
+        return expanded
+
+    def _split_braced_use(self, text: str) -> tuple[str, str]:
+        depth = 1
+        for idx, char in enumerate(text):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[:idx], text[idx + 1:]
+        return text, ""
+
+    def _split_top_level_commas(self, text: str) -> List[str]:
+        parts: List[str] = []
+        start = 0
+        depth = 0
+        for idx, char in enumerate(text):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            elif char == "," and depth == 0:
+                part = text[start:idx].strip()
+                if part:
+                    parts.append(part)
+                start = idx + 1
+        tail = text[start:].strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
+    def _join_use_path(self, prefix: str, suffix: str) -> str:
+        prefix = prefix.strip(":")
+        suffix = suffix.strip(":")
+        if not prefix:
+            return suffix
+        if not suffix or suffix == "self":
+            return prefix
+        return f"{prefix}::{suffix}"
     
     def _nearest_cargo_manifest(
         self,

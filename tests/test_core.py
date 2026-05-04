@@ -111,6 +111,21 @@ class test_core(unittest.TestCase):
         self.assertEqual(verbose["meta"]["language"], "python")
         self.assertEqual(roundtrip.meta, {"language": "python", "line_count": 12})
 
+    def test_json_omits_empty_optional_fields(self):
+        chunk = core.Chunk(path="p", text="T", meta={})
+
+        data = chunk.to_json(verbose=True)
+
+        self.assertEqual(data, {"path": "p", "text": "T"})
+
+    def test_json_preserves_nonempty_media_fields(self):
+        chunk = core.Chunk(path="p", text="T", audios=["a.wav"], videos=["v.mp4"])
+
+        data = chunk.to_json()
+
+        self.assertEqual(data["audios"], ["a.wav"])
+        self.assertEqual(data["videos"], ["v.mp4"])
+
     def test_chunk_to_llamaindex(self):
         chunk = core.Chunk(
             path="example.md",

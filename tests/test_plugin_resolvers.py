@@ -88,6 +88,80 @@ def test_rust_plugin_resolves_crate_module(tmp_path):
     assert edge.to_file.endswith("src/utils.rs")
 
 
+def test_rust_plugin_resolves_mod_item(tmp_path):
+    cargo_toml = tmp_path / "Cargo.toml"
+    cargo_toml.write_text(
+        "[package]\nname = \"demo-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+    )
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    main_file = src_dir / "main.rs"
+    main_file.write_text("mod utils;\n")
+    (src_dir / "utils.rs").write_text("pub fn helper() {}\n")
+
+    plugin = RustPlugin()
+    manifest_data = plugin.parse_manifest(cargo_toml)
+    config = PluginConfig(
+        project_root=tmp_path,
+        context=_build_context("rust", cargo_toml, manifest_data),
+    )
+
+    edge = plugin.resolve_import("mod utils;", main_file, config)
+
+    assert edge is not None
+    assert edge.is_external is False
+    assert edge.to_file.endswith("src/utils.rs")
+
+
+def test_rust_plugin_expands_grouped_use_imports():
+    plugin = RustPlugin()
+
+    imports = plugin.normalize_imports([
+        "use crate::{utils::{helper, Thing}, api::Router};",
+        "pub use serde::{Serialize, Deserialize};",
+    ])
+
+    assert imports == [
+        "use crate::utils::helper;",
+        "use crate::utils::Thing;",
+        "use crate::api::Router;",
+        "use serde::Serialize;",
+        "use serde::Deserialize;",
+    ]
+
+
+def test_dependency_mapper_uses_rust_plugin_for_mod_resolution(tmp_path):
+    cargo_toml = tmp_path / "Cargo.toml"
+    cargo_toml.write_text(
+        "[package]\nname = \"demo-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+    )
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    main_file = src_dir / "main.rs"
+    utils_file = src_dir / "utils.rs"
+    main_file.write_text("mod utils;\n")
+    utils_file.write_text("pub fn helper() {}\n")
+
+    mapper = DependencyMapper(str(tmp_path))
+    graph = mapper.build_graph({
+        str(main_file): FileAnalysis(
+            path="src/main.rs",
+            language="rust",
+            imports=["mod utils;"],
+        ),
+        str(utils_file): FileAnalysis(
+            path="src/utils.rs",
+            language="rust",
+        ),
+    })
+
+    assert len(graph.edges) == 1
+    assert graph.edges[0].is_external is False
+    assert graph.edges[0].to_file == "src/utils.rs"
+
+
 def test_web_plugin_resolves_tsconfig_alias(tmp_path):
     package_json = tmp_path / "package.json"
     package_json.write_text('{"name":"demo-web"}')
@@ -146,6 +220,39 @@ def test_web_plugin_resolves_tsconfig_alias(tmp_path):
     assert edge is not None
     assert edge.is_external is False
     assert edge.to_file.endswith("src/lib/helper.ts")
+
+
+def test_dependency_mapper_uses_web_plugin_for_tsconfig_alias(tmp_path):
+    package_json = tmp_path / "package.json"
+    package_json.write_text('{"name":"demo-web"}')
+    tsconfig = tmp_path / "tsconfig.json"
+    tsconfig.write_text(
+        '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}'
+    )
+
+    source_file = tmp_path / "src" / "main.ts"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("import { helper } from '@/lib/helper';\n")
+    helper_file = tmp_path / "src" / "lib" / "helper.ts"
+    helper_file.parent.mkdir(parents=True)
+    helper_file.write_text("export const helper = () => 1;\n")
+
+    mapper = DependencyMapper(str(tmp_path))
+    graph = mapper.build_graph({
+        str(source_file): FileAnalysis(
+            path="src/main.ts",
+            language="typescript",
+            imports=["import { helper } from '@/lib/helper';"],
+        ),
+        str(helper_file): FileAnalysis(
+            path="src/lib/helper.ts",
+            language="typescript",
+        ),
+    })
+
+    assert len(graph.edges) == 1
+    assert graph.edges[0].is_external is False
+    assert graph.edges[0].to_file == "src/lib/helper.ts"
 
 
 def test_builtin_plugin_registration_is_idempotent():

@@ -525,7 +525,13 @@ class DependencyMapper:
         - `builtin_first` (default): built-in -> plugin -> custom
         - `plugin_first`: plugin -> built-in -> custom
         """
-        if self._plugin_resolver_precedence == "plugin_first":
+        plugin_first_languages = {"javascript", "typescript", "tsx", "rust"}
+        use_plugin_first = (
+            self._plugin_resolver_precedence == "plugin_first"
+            or language in plugin_first_languages
+        )
+
+        if use_plugin_first:
             plugin_edge = self._resolve_plugin_import(import_stmt, from_file)
             if plugin_edge:
                 return plugin_edge
