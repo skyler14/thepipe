@@ -11,6 +11,51 @@ Python codegraph pieces.
 This spec uses comparator source paths relative to the comparator repo root, not
 temporary local paths.
 
+## Implementation Status
+
+Implemented on `codex/codegraph-sidecar`:
+
+- complete Python facade for all 14 donor MCP tools;
+- hardened sidecar process boundary with timeout, cache isolation, MCP
+  normalization, and version checks;
+- SHA-256 verified atomic archive installation;
+- repo-local manifest plus pointer-only SQLite master registry;
+- DB/WAL/SHM accounting, soft-cap reporting, and explicit global LRU pruning;
+- read-only donor SQLite adapter, integrity check, and schema fingerprint;
+- `code-relations/v2`, v1 compatibility, compact digest, and per-file chunks;
+- pinned temporary source build that packages only compiled artifacts;
+- context-based ctypes ABI and C shim over `cbm_mcp_handle_tool`;
+- explicit `code_relations: "graph"` package/CLI mode;
+- local git exclusion through `.git/info/exclude`.
+
+Measured on arm64 macOS at pinned commit
+`b075f0506ce4286219edd1bc3dccb196f2ed7cb0`:
+
+- donor checkout: 1.4 GB;
+- generated/native source under `internal/`: 1.2 GB;
+- temporary build directory: 537 MB;
+- standard executable: 257 MB;
+- gzip release archive: 36 MB;
+- shared library: 257 MB;
+- two-file fixture graph: 1.69 MB, 8 nodes, 11 edges.
+
+The grammar checkout and object files are build-only. Installed users need the
+executable or shared library, not the 1.2 GB source tree.
+
+Verified behavior:
+
+- real sidecar indexing and all read/query tools;
+- real shared-library indexing and the same tool contract;
+- both native modes in one Python process;
+- v2 CLI output from an auto-detected deployment.
+
+Still gated:
+
+- published per-platform release checksums/catalog;
+- Linux and Windows shared-library PIC/allocator CI;
+- skill and registration changes;
+- replacement/removal of existing Python analyzer modules.
+
 ## Source Findings
 
 Scoped `thepipe` map over comparator `src/` found:
@@ -212,10 +257,16 @@ Repo-local:
 
 ```text
 .thepipe/
-  manifest.json
-  codegraph.sqlite
-  codegraph.sqlite.gz     # optional, explicit shared artifact
+  codegraph/
+    manifest.json
+    cache/
+      <normalized-absolute-repo-path>.db
 ```
+
+The cache directory is added to `.git/info/exclude` by default. Set
+`codegraph_git_exclude=false` when the caller manages ignore policy. Explicit
+shareable donor artifacts remain `.codebase-memory/graph.db.zst` and are
+created only when persistence is enabled.
 
 Global master:
 

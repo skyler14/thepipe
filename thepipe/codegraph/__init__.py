@@ -6,6 +6,7 @@ from .database import (
     NodeRecord,
     SchemaError,
 )
+from .integration import process_codegraph
 from .sidecar import (
     GRAMMAR_ARTIFACT_POLICY,
     PINNED_RUNTIME_VERSION,
@@ -30,6 +31,7 @@ from .storage import (
     assess_database_size,
     database_size,
     discover_project_deployment,
+    ensure_git_excluded,
     manifest_path,
     master_registry_path,
     native_project_name,
@@ -68,11 +70,13 @@ __all__ = [
     "build_database_artifacts",
     "code_relations_v1",
     "discover_project_deployment",
+    "ensure_git_excluded",
     "manifest_path",
     "master_registry_path",
     "native_project_name",
     "project_cache_dir",
     "project_db_path",
+    "process_codegraph",
     "prune_global_cache",
     "read_manifest",
     "recommended_gitignore_entries",

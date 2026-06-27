@@ -1405,6 +1405,12 @@ def build_code_relations_json_payload(
     mode: str,
     repo_root: str,
 ) -> Dict[str, Any]:
+    for chunk in chunks:
+        meta = chunk.meta if isinstance(chunk.meta, dict) else {}
+        graph_payload = meta.get("code_relations_payload")
+        if isinstance(graph_payload, dict):
+            return graph_payload
+
     if mode == "mapnew":
         return _build_mapnew_json_payload(chunks, repo_root)
 

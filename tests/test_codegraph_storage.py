@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from pathlib import Path
 
 from thepipe.codegraph.storage import (
@@ -11,6 +12,7 @@ from thepipe.codegraph.storage import (
     assess_database_size,
     database_size,
     discover_project_deployment,
+    ensure_git_excluded,
     manifest_path,
     master_registry_path,
     native_project_name,
@@ -92,6 +94,7 @@ def test_master_registry_is_pointer_only_sqlite_database(tmp_path: Path) -> None
     registry = MasterRegistry(path)
 
     registry.upsert(deployment, last_head="deadbeef", status="ready")
+    registry.upsert(deployment, last_head="feedface", status="ready")
 
     assert registry.list() == [deployment]
     with sqlite3.connect(path) as connection:
@@ -102,6 +105,26 @@ def test_master_registry_is_pointer_only_sqlite_database(tmp_path: Path) -> None
             )
         }
     assert tables == {"repos"}
+
+
+def test_repo_cache_is_locally_git_ignored_without_touching_root_gitignore(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+
+    assert ensure_git_excluded(tmp_path)
+    assert ensure_git_excluded(tmp_path)
+
+    exclude = subprocess.run(
+        ["git", "rev-parse", "--git-path", "info/exclude"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    lines = (tmp_path / exclude).read_text(encoding="utf-8").splitlines()
+    assert lines.count(".thepipe/codegraph/cache/") == 1
+    assert not (tmp_path / ".gitignore").exists()
 
 
 def test_database_size_includes_wal_and_shm(tmp_path: Path) -> None:

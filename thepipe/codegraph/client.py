@@ -14,6 +14,7 @@ from .storage import (
     MasterRegistry,
     database_size,
     discover_project_deployment,
+    ensure_git_excluded,
     write_manifest,
 )
 
@@ -36,9 +37,11 @@ class CodegraphClient:
         backend: CodeGraphBackend,
         *,
         registry: MasterRegistry | None = None,
+        git_exclude: bool = True,
     ) -> None:
         self.backend = backend
         self.registry = registry or MasterRegistry()
+        self.git_exclude = git_exclude
 
     def index_repository(
         self,
@@ -294,5 +297,7 @@ class CodegraphClient:
             entity_count=int(native.get("nodes", 0)),
             edge_count=int(native.get("edges", 0)),
         )
+        if self.git_exclude:
+            ensure_git_excluded(repo_root)
         write_manifest(deployment)
         self.registry.upsert(deployment, status=str(native.get("status", "ready")))

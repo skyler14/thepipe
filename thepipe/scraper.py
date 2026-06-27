@@ -497,6 +497,9 @@ def scrape_directory(
     # Additional: code_n1 (default 3), code_n2 (default 5)
     code_relations = options.get('code_relations')
     if code_relations:
+        if code_relations == "graph":
+            from .codegraph.integration import process_codegraph
+            return process_codegraph(dir_path, options=options)
         from .analyzer.integration import process_code_relations
         return process_code_relations(
             dir_path=dir_path,

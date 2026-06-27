@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -89,6 +90,34 @@ def recommended_gitignore_entries() -> list[str]:
         ".thepipe/codegraph/*.db*",
         ".thepipe/codegraph/tmp/",
     ]
+
+
+def ensure_git_excluded(repo_root: str | Path) -> bool:
+    """Add the local graph cache to .git/info/exclude without touching tracked files."""
+    root = Path(repo_root)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    exclude = Path(result.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = root / exclude
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    entry = ".thepipe/codegraph/cache/"
+    if entry in existing.splitlines():
+        return True
+    with exclude.open("a", encoding="utf-8") as output:
+        if existing and not existing.endswith("\n"):
+            output.write("\n")
+        output.write(f"{entry}\n")
+    return True
 
 
 def write_manifest(deployment: CodegraphDeployment) -> Path:
