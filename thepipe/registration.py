@@ -175,22 +175,25 @@ or prior context already reveals most of the file structure.
 # DuckDB
 {thepipe_cmd} "duckdb:///path/to/db.duckdb" --db "SELECT *" -f
 
+# Raw ODBC
+{thepipe_cmd} "odbc://?connect=DRIVER%3DSQLite3%3BDatabase%3D%2Ftmp%2Fdemo.db" --db "SELECT * FROM orders" -f
+
 # Show schema only (no query)
 {thepipe_cmd} "postgresql://host/db" --db -f
 
 # Parquet file as database
-{thepipe_cmd} data.parquet --db "SELECT * FROM parquet_data WHERE col > 10" -f
+{thepipe_cmd} data.parquet --db "SELECT * FROM source_data WHERE col > 10" -f
 
 # Parquet (recommended for local files)
 # Parquet is the most native file-backed format for --db. Point thepipe directly
-# at the .parquet file and query parquet_data, without wrapping in DuckDB.
-{thepipe_cmd} /path/to/data.parquet --db "SELECT * FROM parquet_data LIMIT 10" -f
+# at the .parquet file and query source_data, without wrapping in DuckDB.
+{thepipe_cmd} /path/to/data.parquet --db "SELECT * FROM source_data LIMIT 10" -f
 
 # CSV file as database  
-{thepipe_cmd} data.csv --db "SELECT * FROM csv_data LIMIT 100" -f
+{thepipe_cmd} data.csv --db "SELECT * FROM source_data LIMIT 100" -f
 
 # Excel file as database
-{thepipe_cmd} data.xlsx --db "SELECT * FROM excel_data" -f
+{thepipe_cmd} data.xlsx --db "SELECT * FROM source_data" -f
 ```
 
 ## Database Connection Formats
@@ -200,6 +203,7 @@ or prior context already reveals most of the file structure.
 - MariaDB: `mariadb://user:pass@host:3306/db`
 - SQLite: `sqlite:///path/to/database.db`
 - DuckDB: `duckdb:///path/to/database.duckdb`
+- Raw ODBC: `odbc://?connect=<urlencoded ODBC connection string>`
 - MS SQL Server: `mssql://user:pass@host:1433/db`
 - JDBC MySQL: `jdbc:mysql://host:3306/db` (auto-converted)
 - JDBC PostgreSQL: `jdbc:postgresql://host:5432/db` (auto-converted)

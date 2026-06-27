@@ -9,6 +9,9 @@ import pandas as pd
 import re
 from .core import Chunk
 
+DUCKDB_SOURCE_VIEW = "source_data"
+DUCKDB_FILE_SOURCE_TYPES = {"parquet", "csv", "excel", "orc", "feather", "json", "jsonl"}
+
 def get_all_tables(db_instance, db_type: str = None, verbose: bool = False) -> List[str]:
     """Retrieve all available tables in the database."""
     tables = []
@@ -49,9 +52,8 @@ def get_all_tables(db_instance, db_type: str = None, verbose: bool = False) -> L
         pass
     
     # Default tables based on db_type
-    if db_type in ["parquet", "csv", "excel"]:
-        default_views = {"parquet": "parquet_data", "csv": "csv_data", "excel": "excel_data"}
-        tables.append(default_views.get(db_type))
+    if db_type in DUCKDB_FILE_SOURCE_TYPES:
+        tables.append(DUCKDB_SOURCE_VIEW)
     
     return tables
 

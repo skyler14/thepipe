@@ -109,6 +109,9 @@ thepipe "sqlite:///path/to/database.db" --db "SELECT * FROM table"
 
 # DuckDB
 thepipe "duckdb:///analytics.duckdb" --db "SELECT * FROM table"
+
+# Raw ODBC
+thepipe "odbc://?connect=DRIVER%3DSQLite3%3BDatabase%3D%2Ftmp%2Fdemo.db" --db "SELECT * FROM table"
 ```
 
 ### Data File Formats

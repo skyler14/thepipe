@@ -4,6 +4,7 @@ This module provides a clean interface for database operations in thepipe.
 """
 
 from typing import Dict, List, Optional, Any, Union, Tuple
+import importlib
 import logging
 import os
 import pandas as pd
@@ -11,6 +12,7 @@ import json
 import re
 from pathlib import Path
 import time
+from urllib.parse import parse_qs, urlparse
 
 from .core import Chunk
 
@@ -20,6 +22,9 @@ from .database_analysis import execute_fallback, format_analysis_for_llm, get_al
 # Constants
 DEFAULT_MAX_ROWS = 15
 DEFAULT_PREVIEW_ROWS = 5
+DUCKDB_SOURCE_VIEW = "source_data"
+DUCKDB_FILE_SOURCE_TYPES = {"parquet", "csv", "excel", "orc", "feather", "json", "jsonl"}
+DUCKDB_FORGIVING_SOURCE_TYPES = {"json", "jsonl", "csv"}
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,10 @@ class DatabaseManager:
         self.verbose = verbose
         self.options = options or {}  # Store options for use in other methods
         self.db = None
+        self._odbc_connection = None
+        self._duckdb_config_dict: Optional[Dict[str, Any]] = None
+        self._duckdb_read_mode = self._resolve_duckdb_read_mode()
+        self._duckdb_read_warning: Optional[str] = None
         self._connect()
         
     def _detect_database_type(self, source: Union[str, Dict]) -> str:
@@ -66,32 +75,246 @@ class DatabaseManager:
                 return "sqlite"
             elif source.startswith("mssql://") or source.startswith("mssql+pyodbc://"):
                 return "mssql"
+            elif source.startswith("odbc://"):
+                return "odbc"
             elif source.startswith("duckdb://"):
                 return "duckdb"
-            elif source.endswith((".parquet", ".parq")) or "/parquet/" in source or "*.parquet" in source:
+            lower_source = source.lower()
+            if lower_source.endswith((".parquet", ".parq")) or "/parquet/" in lower_source or "*.parquet" in lower_source:
                 return "parquet"
-            elif source.endswith(".orc"):
+            elif lower_source.endswith(".orc"):
                 return "orc"
-            elif source.endswith((".feather", ".arrow", ".ipc")):
+            elif lower_source.endswith((".feather", ".arrow", ".ipc")):
                 return "feather"
-            elif source.endswith((".jsonl", ".ndjson")):
+            elif lower_source.endswith((".jsonl", ".ndjson", ".jsonl.gz", ".ndjson.gz")):
                 return "jsonl"
-            elif source.endswith(".csv"):
+            elif lower_source.endswith((".json", ".json.gz")):
+                return "json"
+            elif lower_source.endswith((".csv", ".csv.gz", ".tsv", ".tsv.gz")):
                 return "csv"
-            elif source.endswith((".xlsx", ".xls")):
+            elif lower_source.endswith((".xlsx", ".xls")):
                 return "excel"
-            elif source.endswith(".duckdb") or source.endswith(".db"):
+            elif lower_source.endswith(".duckdb") or lower_source.endswith(".db"):
                 return "duckdb"
             elif os.path.isdir(source):
-                # Check if directory contains parquet files
-                for file in os.listdir(source):
-                    if file.endswith('.parquet') or file.endswith('.parq'):
-                        return "parquet"
+                directory_type = self._detect_directory_source_type(source)
+                if directory_type:
+                    return directory_type
         elif isinstance(source, dict) and "type" in source:
             return source["type"]
             
         return "unknown"
-    
+
+    def _detect_directory_source_type(self, directory: str) -> Optional[str]:
+        family_to_extensions = {
+            "parquet": (".parquet", ".parq"),
+            "jsonl": (".jsonl", ".ndjson", ".jsonl.gz", ".ndjson.gz"),
+            "json": (".json", ".json.gz"),
+            "csv": (".csv", ".csv.gz", ".tsv", ".tsv.gz"),
+        }
+
+        counts = {family: 0 for family in family_to_extensions}
+        for path in Path(directory).rglob("*"):
+            if not path.is_file():
+                continue
+            lower_name = path.name.lower()
+            for family, extensions in family_to_extensions.items():
+                if lower_name.endswith(extensions):
+                    counts[family] += 1
+                    break
+
+        best_family = max(counts, key=counts.get)
+        return best_family if counts[best_family] > 0 else None
+
+    def _uses_duckdb_source_view(self) -> bool:
+        return self.db_type in DUCKDB_FILE_SOURCE_TYPES
+
+    def _is_odbc(self) -> bool:
+        return self.db_type == "odbc"
+
+    def _resolve_duckdb_read_mode(self) -> str:
+        requested_mode = str(self.options.get("db_read_mode", "")).strip().lower()
+        if requested_mode in {"strict", "forgiving"}:
+            return requested_mode
+        if self.db_type in DUCKDB_FORGIVING_SOURCE_TYPES:
+            return "forgiving"
+        return "strict"
+
+    def _sql_literal(self, value: str) -> str:
+        return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+
+    def _duckdb_source_paths(self) -> List[str]:
+        if not isinstance(self.connection_info, str):
+            raise ValueError("DuckDB file sources require a string path")
+
+        source = Path(self.connection_info)
+        if source.is_dir():
+            family = self._detect_directory_source_type(str(source))
+            if not family:
+                raise ValueError(f"Could not find DuckDB-readable files in directory: {source}")
+            patterns = {
+                "parquet": ("*.parquet", "*.parq"),
+                "jsonl": ("*.jsonl", "*.ndjson", "*.jsonl.gz", "*.ndjson.gz"),
+                "json": ("*.json", "*.json.gz"),
+                "csv": ("*.csv", "*.csv.gz", "*.tsv", "*.tsv.gz"),
+            }[family]
+            files: List[str] = []
+            for pattern in patterns:
+                files.extend(str(path) for path in source.rglob(pattern))
+            if not files:
+                raise ValueError(f"No files matched supported DuckDB patterns in {source}")
+            return sorted(set(files))
+        return [str(source)]
+
+    def _duckdb_source_argument(self, paths: List[str]) -> str:
+        if len(paths) == 1:
+            return self._sql_literal(paths[0])
+        return "[" + ", ".join(self._sql_literal(path) for path in paths) + "]"
+
+    def _create_duckdb_source_view(self) -> None:
+        if not self.db:
+            raise ValueError("DuckDB database connection is not initialized")
+
+        ignore_errors = (
+            self._duckdb_read_mode == "forgiving"
+            and self.db_type in DUCKDB_FORGIVING_SOURCE_TYPES
+        )
+
+        if self.db_type == "excel":
+            import pandas as pd
+            import tempfile
+
+            if self.verbose:
+                print(f"[thepipe] Reading Excel file: {self.connection_info}")
+
+            df = pd.read_excel(self.connection_info)
+            with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_csv:
+                temp_path = temp_csv.name
+                df.to_csv(temp_path, index=False)
+            self._temp_path = temp_path
+            source_arg = self._sql_literal(temp_path)
+            create_view_sql = f"CREATE VIEW {DUCKDB_SOURCE_VIEW} AS SELECT * FROM read_csv_auto({source_arg})"
+        elif self.db_type in {"json", "jsonl"}:
+            source_arg = self._duckdb_source_argument(self._duckdb_source_paths())
+            ignore_clause = ", ignore_errors=true" if ignore_errors else ""
+            create_view_sql = f"CREATE VIEW {DUCKDB_SOURCE_VIEW} AS SELECT * FROM read_json_auto({source_arg}{ignore_clause})"
+        elif self.db_type == "csv":
+            source_arg = self._duckdb_source_argument(self._duckdb_source_paths())
+            ignore_clause = ", ignore_errors=true" if ignore_errors else ""
+            create_view_sql = f"CREATE VIEW {DUCKDB_SOURCE_VIEW} AS SELECT * FROM read_csv_auto({source_arg}{ignore_clause})"
+        elif self.db_type == "parquet":
+            source_arg = self._duckdb_source_argument(self._duckdb_source_paths())
+            create_view_sql = f"CREATE VIEW {DUCKDB_SOURCE_VIEW} AS SELECT * FROM read_parquet({source_arg})"
+        elif self.db_type == "orc":
+            source_arg = self._duckdb_source_argument(self._duckdb_source_paths())
+            create_view_sql = f"CREATE VIEW {DUCKDB_SOURCE_VIEW} AS SELECT * FROM read_orc({source_arg})"
+        elif self.db_type == "feather":
+            source_arg = self._duckdb_source_argument(self._duckdb_source_paths())
+            create_view_sql = f"CREATE VIEW {DUCKDB_SOURCE_VIEW} AS SELECT * FROM {source_arg}"
+        else:
+            raise ValueError(f"Unsupported DuckDB source type: {self.db_type}")
+
+        if self.verbose:
+            print(f"[thepipe] Creating DuckDB source view: {create_view_sql}")
+        self.db.execute(create_view_sql)
+        if ignore_errors:
+            self._duckdb_read_warning = (
+                f"Note: DuckDB is reading this {self.db_type} source in forgiving mode "
+                f"(`ignore_errors=true`); malformed rows may be skipped."
+            )
+
+    def _new_duckdb_file_source_db(self):
+        if self._duckdb_config_dict is None:
+            raise ValueError("DuckDB file-source config is not initialized")
+        return Database("duckdb://", config_dict=self._duckdb_config_dict)
+
+    def _prepend_duckdb_read_warning(self, text: str) -> str:
+        if not self._duckdb_read_warning:
+            return text
+        return f"{self._duckdb_read_warning}\n\n{text}"
+
+    def _parse_odbc_connect_string(self) -> str:
+        if not isinstance(self.connection_info, str):
+            raise ValueError("ODBC connections require a string source")
+
+        parsed = urlparse(self.connection_info)
+        connect = parse_qs(parsed.query).get("connect", [""])[0]
+        if not connect:
+            raise ValueError(
+                "ODBC connections require a URL like "
+                "`odbc://?connect=<urlencoded ODBC connection string>`"
+            )
+        return connect
+
+    def _quote_identifier(self, name: str) -> str:
+        return '"' + name.replace('"', '""') + '"'
+
+    def _list_odbc_tables(self) -> List[str]:
+        if not self._odbc_connection:
+            return []
+
+        cursor = self._odbc_connection.cursor()
+        try:
+            tables = []
+            seen = set()
+            for row in cursor.tables():
+                table_name = getattr(row, "table_name", None)
+                table_type = str(getattr(row, "table_type", "") or "").upper()
+                if not table_name or table_name in seen:
+                    continue
+                if table_type and table_type not in {"TABLE", "VIEW"}:
+                    continue
+                seen.add(table_name)
+                tables.append(table_name)
+            return tables
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    def _get_odbc_columns(self, table: str) -> List[Any]:
+        if not self._odbc_connection:
+            return []
+
+        cursor = self._odbc_connection.cursor()
+        try:
+            return list(cursor.columns(table=table))
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    def _execute_odbc_query(self, query: str, params: Optional[Union[List[Any], Tuple[Any, ...]]] = None) -> Optional[pd.DataFrame]:
+        if not self._odbc_connection:
+            raise ValueError("ODBC connection is not initialized")
+
+        cursor = self._odbc_connection.cursor()
+        try:
+            if params is None:
+                cursor.execute(query)
+            elif isinstance(params, (list, tuple)):
+                cursor.execute(query, params)
+            else:
+                raise ValueError("ODBC query params must be a list or tuple")
+
+            if cursor.description:
+                columns = [column[0] for column in cursor.description]
+                rows = cursor.fetchall()
+                return pd.DataFrame.from_records(rows, columns=columns)
+
+            try:
+                self._odbc_connection.commit()
+            except Exception:
+                pass
+            return None
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
     def _convert_jdbc_url(self, jdbc_url: str) -> str:
         """Convert JDBC URL to SQLAlchemy-compatible format.
         
@@ -140,126 +363,27 @@ class DatabaseManager:
                 "autolimit": self.options.get("max_rows", DEFAULT_MAX_ROWS),
                 "displaylimit": self.options.get("max_rows", DEFAULT_MAX_ROWS),
             }
+            self._duckdb_config_dict = config_dict
             
             if self.verbose:
                 print(f"[thepipe] Connecting to {self.db_type} database")
                 print(f"[thepipe] Connection info: {self.connection_info if isinstance(self.connection_info, str) else 'dict'}")
             
-            # Special handling for parquet files and directories
-            if self.db_type == "parquet":
-                # Use DuckDB for parquet files
-                connection_str = f"duckdb://"
-                
-                if self.verbose:
-                    print(f"[thepipe] Using DuckDB for parquet data: {connection_str}")
-                    
-                self.db = Database(connection_str, config_dict=config_dict)
-                
-                # We'll create the view in get_schema() later
-                # This ensures we don't try to create the view before running a query
-                
-                if self.verbose:
-                    print(f"[thepipe] DuckDB connection established for parquet data")
-                    
-            elif self.db_type == "csv":
-                # Handle CSV files with DuckDB
-                connection_str = f"duckdb://"
-                self.db = Database(connection_str, config_dict=config_dict)
-                
-                if self.verbose:
-                    print(f"[thepipe] Creating view for CSV file: {self.connection_info}")
-                    
+            # DuckDB-backed file-like sources
+            if self._uses_duckdb_source_view():
+                self.db = self._new_duckdb_file_source_db()
+                self._create_duckdb_source_view()
+            elif self._is_odbc():
+                connect_string = self._parse_odbc_connect_string()
                 try:
-                    self.db.execute(f"CREATE VIEW csv_data AS SELECT * FROM '{self.connection_info}'")
-                except Exception as e:
-                    if self.verbose:
-                        print(f"[thepipe] Error creating CSV view: {str(e)}")
-            elif self.db_type == "excel":
-                # For Excel, we'll use pandas to load the data first, then DuckDB
-                import pandas as pd
-                
-                if self.verbose:
-                    print(f"[thepipe] Reading Excel file: {self.connection_info}")
-                    
-                df = pd.read_excel(self.connection_info)
-                
-                # Save to temporary CSV
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_csv:
-                    temp_path = temp_csv.name
-                    df.to_csv(temp_path, index=False)
-                
-                # Use DuckDB with the CSV
-                connection_str = f"duckdb://"
-                self.db = Database(connection_str, config_dict=config_dict)
-                
-                if self.verbose:
-                    print(f"[thepipe] Creating view for Excel data from temp file: {temp_path}")
-                    
-                self.db.execute(f"CREATE VIEW excel_data AS SELECT * FROM '{temp_path}'")
-                
-                # Store path for cleanup
-                self._temp_path = temp_path
-            elif self.db_type == "orc":
-                # Handle ORC files with DuckDB via PyArrow
-                connection_str = f"duckdb://"
-                self.db = Database(connection_str, config_dict=config_dict)
-                
-                if self.verbose:
-                    print(f"[thepipe] Creating view for ORC file: {self.connection_info}")
-                
-                try:
-                    import pyarrow.orc as orc
-                except ImportError:
+                    pyodbc = importlib.import_module("pyodbc")
+                except ImportError as e:
                     raise ImportError(
-                        "pyarrow with ORC support is required to read ORC files. "
-                        "Install with: pip install 'pyarrow[orc]'"
-                    )
-                
-                try:
-                    orc_table = orc.read_table(self.connection_info)
-                except Exception as e:
-                    raise ValueError(f"Failed to read ORC file '{self.connection_info}': {e}")
-                
-                # NOTE: Using _connection (private API) because JupySQL's Database 
-                # doesn't expose register() for Arrow tables. This may break if 
-                # JupySQL refactors internals.
-                conn = self.db._connection
-                conn.register('orc_data', orc_table)
-            elif self.db_type == "feather":
-                # Handle Feather/Arrow IPC files with DuckDB
-                connection_str = f"duckdb://"
-                self.db = Database(connection_str, config_dict=config_dict)
-                
-                if self.verbose:
-                    print(f"[thepipe] Creating view for Feather/Arrow file: {self.connection_info}")
-                
-                try:
-                    import pyarrow.feather as feather
-                except ImportError:
-                    raise ImportError(
-                        "pyarrow is required to read Feather/Arrow files. "
-                        "Install with: pip install pyarrow"
-                    )
-                
-                try:
-                    arrow_table = feather.read_table(self.connection_info)
-                except Exception as e:
-                    raise ValueError(f"Failed to read Feather file '{self.connection_info}': {e}")
-                
-                # NOTE: Using _connection (private API) - see ORC handler comment
-                conn = self.db._connection
-                conn.register('feather_data', arrow_table)
-            elif self.db_type == "jsonl":
-                # Handle JSON Lines files with DuckDB
-                connection_str = f"duckdb://"
-                self.db = Database(connection_str, config_dict=config_dict)
-                
-                if self.verbose:
-                    print(f"[thepipe] Creating view for JSONL file: {self.connection_info}")
-                    
-                # DuckDB can read JSON/JSONL directly
-                self.db.execute(f"CREATE VIEW jsonl_data AS SELECT * FROM read_json_auto('{self.connection_info}')")
+                        "ODBC support requires optional dependency `pyodbc`. "
+                        "Install it and ensure the target ODBC driver is available."
+                    ) from e
+                self._odbc_connection = pyodbc.connect(connect_string, autocommit=True)
+                self.db = self._odbc_connection
             elif self.db_type == "duckdb":
                 # Handle DuckDB database files directly
                 if self.connection_info.startswith("duckdb://"):
@@ -333,53 +457,40 @@ class DatabaseManager:
         try:
             if self.verbose:
                 print(f"[thepipe] Getting schema for {self.db_type} database")
-                
-            if self.db_type in ["parquet", "csv", "excel"]:
-                # Get schema from the first few rows
-                view_name = {
-                    "parquet": "parquet_data",
-                    "csv": "csv_data", 
-                    "excel": "excel_data"
-                }.get(self.db_type)
+
+            if self._is_odbc():
+                tables = self._list_odbc_tables()
+                schema_info = "## Database Schema\n\n"
+
+                if not tables:
+                    schema_info += "*No tables found*\n"
+
+                for table in tables:
+                    schema_info += f"### Table: {table}\n\n"
+                    schema_info += "| Column | Type | Nullable | Default |\n"
+                    schema_info += "|--------|------|----------|---------|\n"
+                    try:
+                        columns = self._get_odbc_columns(table)
+                        if not columns:
+                            schema_info += "*Schema information not available*\n\n"
+                            continue
+                        for column in columns:
+                            column_name = getattr(column, "column_name", "")
+                            type_name = getattr(column, "type_name", "") or "unknown"
+                            nullable = getattr(column, "nullable", "")
+                            default = getattr(column, "column_def", None) or "NULL"
+                            schema_info += f"| {column_name} | {type_name} | {nullable} | {default} |\n"
+                    except Exception as e:
+                        schema_info += f"*Error retrieving schema: {str(e)}*\n"
+                    schema_info += "\n"
+            elif self._uses_duckdb_source_view():
+                # Get schema from the first few rows of the DuckDB-backed source view
+                view_name = DUCKDB_SOURCE_VIEW
                 
                 if self.verbose:
                     print(f"[thepipe] Using view name: {view_name}")
                 
                 try:
-                    # First try to check if the view exists
-                    if self.db_type == "parquet":
-                        check_query = f"SELECT name FROM sqlite_master WHERE type='view' AND name='{view_name}'"
-                        check_df = self.db.query(check_query)
-                        
-                        if self.verbose:
-                            print(f"[thepipe] View check result: {len(check_df)} rows")
-                            
-                        if len(check_df) == 0:
-                            if self.verbose:
-                                print(f"[thepipe] View {view_name} doesn't exist, creating it")
-                                
-                            # The view doesn't exist, try to create it
-                            if isinstance(self.connection_info, str):
-                                if os.path.isdir(self.connection_info):
-                                    # Directory of parquet files
-                                    path_pattern = os.path.join(self.connection_info, "*.parquet")
-                                    try:
-                                        self.db.execute(f"CREATE VIEW {view_name} AS SELECT * FROM '{path_pattern}'")
-                                        if self.verbose:
-                                            print(f"[thepipe] Created view for parquet files: {path_pattern}")
-                                    except Exception as e:
-                                        if self.verbose:
-                                            print(f"[thepipe] Error creating view: {str(e)}")
-                                else:
-                                    # Single parquet file or pattern
-                                    try:
-                                        self.db.execute(f"CREATE VIEW {view_name} AS SELECT * FROM '{self.connection_info}'")
-                                        if self.verbose:
-                                            print(f"[thepipe] Created view for parquet file: {self.connection_info}")
-                                    except Exception as e:
-                                        if self.verbose:
-                                            print(f"[thepipe] Error creating view: {str(e)}")
-                    
                     # Query the view to get schema information
                     query = f"SELECT * FROM {view_name} LIMIT 1"
                     if self.verbose:
@@ -472,7 +583,7 @@ class DatabaseManager:
                 
             return Chunk(
                 path=f"database://{self.db_type}/schema",
-                text=schema_info
+                text=self._prepend_duckdb_read_warning(schema_info)
             )
             
         except Exception as e:
@@ -497,13 +608,35 @@ class DatabaseManager:
         """
         try:
             preview_text = "## Data Preview\n\n"
-            
-            if self.db_type in ["parquet", "csv", "excel"]:
-                view_name = {
-                    "parquet": "parquet_data",
-                    "csv": "csv_data", 
-                    "excel": "excel_data"
-                }.get(self.db_type)
+
+            if self._is_odbc():
+                tables = self._list_odbc_tables()
+                if not tables:
+                    preview_text += "*No tables found*\n"
+
+                for table in tables:
+                    quoted_table = self._quote_identifier(table)
+                    preview_text += f"### Table: {table}\n\n"
+                    try:
+                        count_df = self._execute_odbc_query(f"SELECT COUNT(*) AS count FROM {quoted_table}")
+                        if isinstance(count_df, pd.DataFrame) and not count_df.empty:
+                            preview_text += f"Row count: {int(count_df['count'].iloc[0]):,}\n\n"
+                    except Exception as e:
+                        preview_text += f"*Error getting row count: {str(e)}*\n\n"
+
+                    try:
+                        # ponytail: generic ODBC preview uses LIMIT; add driver-specific TOP/FETCH FIRST fallback only when a real backend needs it.
+                        sample_df = self._execute_odbc_query(f"SELECT * FROM {quoted_table} LIMIT {max_rows}")
+                        if isinstance(sample_df, pd.DataFrame) and not sample_df.empty:
+                            preview_text += "Sample data:\n\n```\n"
+                            preview_text += sample_df.to_string()
+                            preview_text += "\n```\n\n"
+                        else:
+                            preview_text += "*No data in table*\n\n"
+                    except Exception as e:
+                        preview_text += f"*Error getting preview: {str(e)}*\n\n"
+            elif self._uses_duckdb_source_view():
+                view_name = DUCKDB_SOURCE_VIEW
                 
                 # Get row count
                 count_df = self.db.query(f"SELECT COUNT(*) as count FROM {view_name}")
@@ -619,7 +752,7 @@ class DatabaseManager:
             
             return Chunk(
                 path=f"database://{self.db_type}/preview",
-                text=preview_text
+                text=self._prepend_duckdb_read_warning(preview_text)
             )
             
         except Exception as e:
@@ -630,7 +763,7 @@ class DatabaseManager:
                 text=f"Error generating data preview: {str(e)}"
             )
     
-    def execute_query(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Chunk]:
+    def execute_query(self, query: str, params: Optional[Any] = None) -> List[Chunk]:
         """
         Execute SQL query and return results as chunks.
         
@@ -641,101 +774,105 @@ class DatabaseManager:
         Returns:
             List of Chunk objects with query results
         """
-        # Get tables and schema information
-        tables = get_all_tables(self.db, self.db_type, self.verbose)
-        view_name = tables[0] if tables else None
-        
-        # Get schema text
-        schema_text = ""
-        if view_name:
-            schema_text = get_schema_for_all_tables(self.db, tables, self.verbose)
-        
-        # Always run auto-analysis with detailed output
-        analysis_text = ""
-        if view_name:
-            try:
-                # Pass through any options for analysis
-                analysis_options = self.options.get("analysis", {}) if hasattr(self, "options") else {}
-                
-                auto_analysis = get_auto_analysis(
-                    self.db, 
-                    self.db_type, 
-                    view_name, 
-                    verbose=self.verbose,
-                    options=analysis_options
-                )
-                
-                # Format detailed analysis with full column statistics
-                analysis_text = "## Automatic Database Analysis\n\n"
-                
-                # Add basic dataset info
-                if 'total_rows' in auto_analysis:
-                    analysis_text += f"Total rows: {auto_analysis['total_rows']:,}\n"
-                    
-                if 'columns' in auto_analysis:
-                    analysis_text += f"Total columns: {len(auto_analysis['columns'])}\n\n"
-                    analysis_text += f"Columns: {', '.join(auto_analysis['columns'])}\n\n"
-                
-                # Add column type categorization
-                if 'column_types' in auto_analysis:
-                    cat_cols = auto_analysis['column_types'].get('categorical', [])
-                    num_cols = auto_analysis['column_types'].get('numeric', [])
-                    
-                    if cat_cols:
-                        analysis_text += f"Categorical columns: {', '.join(cat_cols)}\n\n"
-                        
-                    if num_cols:
-                        analysis_text += f"Numeric columns: {', '.join(num_cols)}\n\n"
-                
-                # Add detailed column statistics
-                if 'column_stats' in auto_analysis:
-                    analysis_text += "### Column Statistics\n\n"
-                    
-                    for col, stats in auto_analysis['column_stats'].items():
-                        analysis_text += f"#### {col}\n"
-                        
-                        if stats['type'] == 'categorical':
-                            analysis_text += f"Type: Categorical\n"
-                            if 'distinct_count' in stats:
-                                analysis_text += f"Distinct values: {stats['distinct_count']}\n"
-                            
-                            if 'top_values' in stats:
-                                analysis_text += "Top values:\n"
-                                for val in stats['top_values']:
-                                    analysis_text += f"- {val['value']}: {val['count']} ({val['percentage']:.2f}%)\n"
-                        
-                        elif stats['type'] == 'numeric':
-                            analysis_text += f"Type: Numeric\n"
-                            if 'stats' in stats:
-                                stat_data = stats['stats']
-                                analysis_text += f"Range: {stat_data.get('min', 'N/A')} to {stat_data.get('max', 'N/A')}\n"
-                                analysis_text += f"Mean: {stat_data.get('mean', 'N/A')}\n"
-                                analysis_text += f"Null count: {stat_data.get('null_count', 'N/A')}\n"
-                        
-                        analysis_text += "\n"
-                
-                # Add key columns info
-                if 'potential_keys' in auto_analysis and auto_analysis['potential_keys']:
-                    analysis_text += f"Potential key columns: {', '.join(auto_analysis['potential_keys'])}\n\n"
-                    
-                if 'date_columns' in auto_analysis and auto_analysis['date_columns']:
-                    analysis_text += f"Date columns: {', '.join(auto_analysis['date_columns'])}\n\n"
-                    
-            except Exception as e:
-                if self.verbose:
-                    print(f"[thepipe] Error running auto analysis: {str(e)}")
-        
-        # Create combined schema and analysis chunk
-        combined_text = schema_text
-        if analysis_text:
-            combined_text += f"\n\n{analysis_text}"
-        
-        schema_chunk = Chunk(
-            path=f"database://{self.db_type}/schema",
-            text=combined_text
-        )
-        chunks = [schema_chunk]
-        
+        if self._is_odbc():
+            schema_chunk = self.get_schema()
+            chunks = [schema_chunk]
+        else:
+            # Get tables and schema information
+            tables = get_all_tables(self.db, self.db_type, self.verbose)
+            view_name = tables[0] if tables else None
+
+            # Get schema text
+            schema_text = ""
+            if view_name:
+                schema_text = get_schema_for_all_tables(self.db, tables, self.verbose)
+
+            # Always run auto-analysis with detailed output
+            analysis_text = ""
+            if view_name:
+                try:
+                    # Pass through any options for analysis
+                    analysis_options = self.options.get("analysis", {}) if hasattr(self, "options") else {}
+
+                    auto_analysis = get_auto_analysis(
+                        self.db,
+                        self.db_type,
+                        view_name,
+                        verbose=self.verbose,
+                        options=analysis_options
+                    )
+
+                    # Format detailed analysis with full column statistics
+                    analysis_text = "## Automatic Database Analysis\n\n"
+
+                    # Add basic dataset info
+                    if 'total_rows' in auto_analysis:
+                        analysis_text += f"Total rows: {auto_analysis['total_rows']:,}\n"
+
+                    if 'columns' in auto_analysis:
+                        analysis_text += f"Total columns: {len(auto_analysis['columns'])}\n\n"
+                        analysis_text += f"Columns: {', '.join(auto_analysis['columns'])}\n\n"
+
+                    # Add column type categorization
+                    if 'column_types' in auto_analysis:
+                        cat_cols = auto_analysis['column_types'].get('categorical', [])
+                        num_cols = auto_analysis['column_types'].get('numeric', [])
+
+                        if cat_cols:
+                            analysis_text += f"Categorical columns: {', '.join(cat_cols)}\n\n"
+
+                        if num_cols:
+                            analysis_text += f"Numeric columns: {', '.join(num_cols)}\n\n"
+
+                    # Add detailed column statistics
+                    if 'column_stats' in auto_analysis:
+                        analysis_text += "### Column Statistics\n\n"
+
+                        for col, stats in auto_analysis['column_stats'].items():
+                            analysis_text += f"#### {col}\n"
+
+                            if stats['type'] == 'categorical':
+                                analysis_text += f"Type: Categorical\n"
+                                if 'distinct_count' in stats:
+                                    analysis_text += f"Distinct values: {stats['distinct_count']}\n"
+
+                                if 'top_values' in stats:
+                                    analysis_text += "Top values:\n"
+                                    for val in stats['top_values']:
+                                        analysis_text += f"- {val['value']}: {val['count']} ({val['percentage']:.2f}%)\n"
+
+                            elif stats['type'] == 'numeric':
+                                analysis_text += f"Type: Numeric\n"
+                                if 'stats' in stats:
+                                    stat_data = stats['stats']
+                                    analysis_text += f"Range: {stat_data.get('min', 'N/A')} to {stat_data.get('max', 'N/A')}\n"
+                                    analysis_text += f"Mean: {stat_data.get('mean', 'N/A')}\n"
+                                    analysis_text += f"Null count: {stat_data.get('null_count', 'N/A')}\n"
+
+                            analysis_text += "\n"
+
+                    # Add key columns info
+                    if 'potential_keys' in auto_analysis and auto_analysis['potential_keys']:
+                        analysis_text += f"Potential key columns: {', '.join(auto_analysis['potential_keys'])}\n\n"
+
+                    if 'date_columns' in auto_analysis and auto_analysis['date_columns']:
+                        analysis_text += f"Date columns: {', '.join(auto_analysis['date_columns'])}\n\n"
+
+                except Exception as e:
+                    if self.verbose:
+                        print(f"[thepipe] Error running auto analysis: {str(e)}")
+
+            # Create combined schema and analysis chunk
+            combined_text = schema_text
+            if analysis_text:
+                combined_text += f"\n\n{analysis_text}"
+
+            schema_chunk = Chunk(
+                path=f"database://{self.db_type}/schema",
+                text=self._prepend_duckdb_read_warning(combined_text)
+            )
+            chunks = [schema_chunk]
+
         try:
             # Fix query syntax if SQLFluff is available
             if is_sqlfluff_available():
@@ -744,16 +881,19 @@ class DatabaseManager:
                 query = lint_and_fix_sql(query, dialect)
                 if self.verbose and original_query != query:
                     print(f"[thepipe] SQLFluff fixed query from:\n{original_query}\nto:\n{query}")
-            
+
             # Execute the query
-            result = self.db.query(query, params=params)
-            
+            if self._is_odbc():
+                result = self._execute_odbc_query(query, params=params)
+            else:
+                result = self.db.query(query, params=params)
+
             # Format the result
             result_text = f"## SQL Query\n\n```sql\n{query}\n```\n\n"
-            
+
             if isinstance(result, pd.DataFrame):
                 result_text += f"## Results ({len(result)} rows)\n\n"
-                
+
                 if not result.empty:
                     # Convert to JSON for consistent formatting
                     result_text += "```json\n"
@@ -765,23 +905,24 @@ class DatabaseManager:
                 # Non-DataFrame result (e.g., for non-SELECT queries)
                 result_text += f"## Results\n\n"
                 result_text += "Query executed successfully."
-            
+
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/query",
-                text=result_text
+                text=self._prepend_duckdb_read_warning(result_text)
             ))
-            
+            schema_chunk.text = self._prepend_duckdb_read_warning(schema_chunk.text or "")
+
             return chunks
-            
+
         except Exception as e:
             if self.verbose:
                 print(f"[thepipe] Error executing query: {str(e)}")
-            
+
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/error",
                 text=f"Error executing query: {str(e)}"
             ))
-            
+
             return chunks
 
     def execute_iterative_analysis(self, natural_language_query: str, 
@@ -1057,6 +1198,12 @@ class DatabaseManager:
         Returns:
             List of Chunk objects with query results
         """
+        if self._is_odbc():
+            return [Chunk(
+                path="database://odbc/error",
+                text="Natural language database analysis is not supported for generic ODBC sources yet. Provide explicit SQL."
+            )]
+
         # Get tables and schema information
         tables = get_all_tables(self.db, self.db_type, self.verbose)
         view_name = tables[0] if tables else None
@@ -1443,6 +1590,7 @@ def process_database(
             preview_chunk = db_manager.get_preview(
                 max_rows=options.get("max_rows", DEFAULT_PREVIEW_ROWS)
             )
+            schema_chunk.text = db_manager._prepend_duckdb_read_warning(schema_chunk.text or "")
             db_manager.close()
             return [schema_chunk, preview_chunk]
         
@@ -1460,6 +1608,14 @@ def process_database(
         if verbose:
             print(f"[thepipe] Query type: {'SQL' if is_sql_query_result else 'Natural Language'}")
         
+        if not is_sql_query_result and db_manager.db_type == "odbc":
+            result_chunks = [schema_chunk, Chunk(
+                path="database://odbc/error",
+                text="Natural language database analysis is not supported for generic ODBC sources yet. Provide explicit SQL."
+            )]
+            db_manager.close()
+            return result_chunks
+
         if is_sql_query_result:
             # Direct SQL execution
             if verbose:
@@ -1534,10 +1690,15 @@ def get_sql_dialect(db_type: str) -> str:
         "postgresql": "postgres",
         "mysql": "mysql",
         "sqlite": "sqlite",
+        "odbc": "ansi",
         "duckdb": "duckdb",
         "parquet": "duckdb",
         "csv": "duckdb",
-        "excel": "duckdb"
+        "excel": "duckdb",
+        "json": "duckdb",
+        "jsonl": "duckdb",
+        "orc": "duckdb",
+        "feather": "duckdb",
     }
     return dialect_mapping.get(db_type.lower(), "ansi")
 
