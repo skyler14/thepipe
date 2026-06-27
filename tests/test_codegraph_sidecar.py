@@ -64,6 +64,18 @@ def test_native_policy_keeps_raw_generated_grammars_out_of_the_python_repo() -> 
     assert len(PINNED_UPSTREAM_COMMIT) == 40
 
 
+def test_native_source_lock_matches_python_provenance_constants() -> None:
+    lock_path = Path(__file__).parents[1] / "native" / "codegraph" / "upstream.lock"
+    lock = dict(
+        line.split("=", 1)
+        for line in lock_path.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    )
+
+    assert lock["UPSTREAM_REPO"] == UPSTREAM_REPO
+    assert lock["UPSTREAM_COMMIT"] == PINNED_UPSTREAM_COMMIT
+
+
 def test_sidecar_from_env_is_opt_in(tmp_path: Path) -> None:
     binary = _fake_sidecar(tmp_path, "print(json.dumps({'content': []}))")
 
