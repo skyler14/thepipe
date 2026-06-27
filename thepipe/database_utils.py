@@ -729,6 +729,14 @@ class DatabaseManager:
         combined_text = schema_text
         if analysis_text:
             combined_text += f"\n\n{analysis_text}"
+
+        # TODO(database-graph): consider projecting schema metadata into the same
+        # graph query shape as codegraph: (Database)-[:HAS_TABLE]->(Table),
+        # (Table)-[:HAS_COLUMN]->(Column), and
+        # (Column)-[:REFERENCES]->(Column). Cypher would then be useful for
+        # metadata questions like dependency paths, FK impact, PII-looking
+        # columns, and view/table reachability while SQL remains the row-data
+        # query language.
         
         schema_chunk = Chunk(
             path=f"database://{self.db_type}/schema",
