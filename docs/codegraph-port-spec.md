@@ -116,6 +116,9 @@ distribution and support policy are cleaner.
 Do not add sidecar-first instructions to skill files yet. Notes to add later:
 
 - use `code_relations: "graph"` only when a pinned binary/archive is installed;
+- treat graph freshness as policy, not a tax on every read: use cached graph
+  actions for quick lookups, refresh periodically, after meaningful git
+  changes, or when the user asks for current impact analysis;
 - prefer `codegraph_action: "summary"` or `"entities"` before emitting full v2
   graph JSON on huge repos;
 - use `codegraph_action: "neighbors"` for impact/caller/callee context;
@@ -278,6 +281,10 @@ Insights gathered after real repo introspection:
 - `codegraph_refresh` should probably default to false for read actions when a
   deployment already exists. Reindexing is correct for `emit` and explicit
   refresh, but surprising for `summary`, `entities`, `neighbors`, and `sql`.
+  Freshness can be a separate periodic/optional policy: read actions should read
+  the existing DB by default, while agents or callers can request refresh when
+  the repo changed, the DB is stale by age/head, or the user asks for current
+  state.
 - Shared-library initialization can emit native logs. Sidecar isolates this
   better. Before shared library becomes preferred, add a quiet native-log
   default or explicit log sink.
