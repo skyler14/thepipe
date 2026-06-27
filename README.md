@@ -110,6 +110,19 @@ that cache to `.git/info/exclude` by default, and records a pointer in the
 thepipe master registry. The sidecar binary is the compiled byproduct; the
 large raw grammar checkout used to build it is not required at runtime.
 
+Once a graph exists, use `codegraph_action` for bounded graph access without
+emitting the full payload:
+
+```bash
+thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "entities", "codegraph_query": "main"}' -f json
+thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "neighbors", "codegraph_entity": "main", "codegraph_direction": "outbound"}' -f json
+thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "sql", "codegraph_sql": "SELECT name FROM nodes LIMIT 20"}' -f json
+```
+
+Shared-library builds use the same graph contract through
+`codegraph_library` or `codegraph_library_archive` plus
+`codegraph_library_sha256`; the sidecar remains the portable fallback.
+
 ---
 
 ## 💾 Database Support

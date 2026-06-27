@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -22,8 +23,37 @@ def default_binary_path(
     binary_name: str = "codebase-memory-mcp",
 ) -> Path:
     """Return the default sidecar install path for a pinned runtime."""
-    root = Path(install_dir) if install_dir is not None else Path.home() / ".cache" / "thepipe" / "bin"
+    root = (
+        Path(install_dir)
+        if install_dir is not None
+        else Path.home() / ".cache" / "thepipe" / "bin"
+    )
     return root / f"{binary_name}-{version}"
+
+
+def default_library_name() -> str:
+    if sys.platform == "darwin":
+        return "libthepipe_codegraph.dylib"
+    if os.name == "nt":
+        return "thepipe_codegraph.dll"
+    return "libthepipe_codegraph.so"
+
+
+def default_library_path(
+    *,
+    version: str,
+    install_dir: str | Path | None = None,
+    library_name: str | None = None,
+) -> Path:
+    """Return the default shared-library install path for a pinned runtime."""
+    root = (
+        Path(install_dir)
+        if install_dir is not None
+        else Path.home() / ".cache" / "thepipe" / "lib"
+    )
+    name = library_name or default_library_name()
+    path = Path(name)
+    return root / f"{path.stem}-{version}{path.suffix}"
 
 
 def sha256_file(path: str | Path) -> str:
@@ -97,6 +127,29 @@ def install_sidecar_archive(
         expected_sha256=expected_sha256,
         required_version=required_version,
         binary_name=binary_name,
+    )
+
+
+def install_shared_library_archive(
+    archive: str | Path,
+    *,
+    expected_sha256: str,
+    required_version: str,
+    install_dir: str | Path | None = None,
+    library_name: str | None = None,
+) -> Path:
+    """Install a pinned shared-library archive into the default thepipe cache."""
+    member_name = library_name or default_library_name()
+    return install_archive(
+        archive,
+        default_library_path(
+            version=required_version,
+            install_dir=install_dir,
+            library_name=member_name,
+        ),
+        expected_sha256=expected_sha256,
+        required_version=None,
+        binary_name=member_name,
     )
 
 

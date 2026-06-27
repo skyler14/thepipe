@@ -16,6 +16,7 @@ temporary local paths.
 Implemented on `codex/codegraph-sidecar`:
 
 - complete Python facade for all 14 donor MCP tools;
+- read-only local graph accessor for deployed SQLite graphs;
 - hardened sidecar process boundary with timeout, cache isolation, MCP
   normalization, and version checks;
 - SHA-256 verified atomic archive installation;
@@ -27,6 +28,8 @@ Implemented on `codex/codegraph-sidecar`:
 - context-based ctypes ABI and C shim over `cbm_mcp_handle_tool`;
 - explicit `code_relations: "graph"` package/CLI mode;
 - public graph-mode tool schema and registration docs;
+- explicit graph action output for `summary`, `files`, `entities`, `edges`,
+  `neighbors`, and bounded read-only SQL;
 - sidecar bootstrap from local tar/zip archive with required SHA-256 and
   pinned runtime version validation;
 - local git exclusion through `.git/info/exclude`.
@@ -49,6 +52,8 @@ Verified behavior:
 
 - real sidecar indexing and all read/query tools;
 - real shared-library indexing and the same tool contract;
+- real shared-library archive installation through `codegraph_library_archive`;
+- local graph actions through `codegraph_action`;
 - both native modes in one Python process;
 - v2 CLI output from an auto-detected deployment.
 
@@ -56,7 +61,7 @@ Still gated:
 
 - published per-platform release checksums/catalog;
 - Linux and Windows shared-library PIC/allocator CI;
-- skill-file specific agent rollout beyond generated registration text;
+- hand-authored skill-file rollout and default agent behavior;
 - replacement/removal of existing Python analyzer modules.
 
 ## Source Findings
@@ -102,7 +107,21 @@ Important source anchors:
 
 ## Skill Integration Gate
 
-Sidecar stays internal until this gate passes:
+Generated registration text may mention graph mode once full binary support is
+green. Hand-authored skill files and default agent behavior stay gated until
+distribution and support policy are cleaner.
+
+Do not add sidecar-first instructions to skill files yet. Notes to add later:
+
+- use `code_relations: "graph"` only when a pinned binary/archive is installed;
+- prefer `codegraph_action: "summary"` or `"entities"` before emitting full v2
+  graph JSON on huge repos;
+- use `codegraph_action: "neighbors"` for impact/caller/callee context;
+- use `codegraph_action: "sql"` only for bounded read-only inspection;
+- keep `.thepipe/codegraph/cache/` git-ignored unless explicitly requested;
+- fall back to `code_relations: "map"` when no deployment or sidecar exists.
+
+Default skill rollout remains blocked until:
 
 1. Sidecar binary install/discovery works on supported OS/arch.
 2. Binary version is pinned and verified by checksum.
@@ -117,7 +136,6 @@ Sidecar stays internal until this gate passes:
 
 Only after that:
 
-- update registration instructions,
 - expose sidecar in agent-facing skill docs,
 - consider MCP/server install hooks.
 
@@ -806,6 +824,28 @@ Returns:
 - omitted/pruned records,
 - parser/backend warnings.
 
+### `access_graph`
+
+Implemented as `CodegraphGraph` and `codegraph_action`.
+
+```python
+CodegraphGraph.open_repo(repo).find_entities(query="main", kind="Function")
+CodegraphGraph.open_repo(repo).neighbors("main", direction="outbound", depth=1)
+CodegraphGraph.open_repo(repo).query_sql("SELECT name FROM nodes LIMIT 20")
+```
+
+CLI/package actions:
+
+- `summary`: project/file/entity/edge counts;
+- `files`: indexed file hashes/sizes;
+- `entities`: bounded local entity search;
+- `edges`: bounded edge list;
+- `neighbors`: bounded BFS around an entity;
+- `sql`: bounded read-only `SELECT`/`WITH`/`PRAGMA`.
+
+These actions are intentionally local SQLite reads. They make existing graph DBs
+useful even when the sidecar is not running.
+
 ### `emit_mapnew_from_graph`
 
 ```python
@@ -916,10 +956,14 @@ Only here may registration/skills mention sidecar-backed codegraph.
 
 ### Stage 6: Shared Library
 
-- Build curated native source.
-- Use compiled grammar packs, not generated source checkout.
-- Expose same JSON contract through `ctypes`.
-- Keep sidecar fallback.
+- Build curated native source. Initial macOS build done.
+- Use compiled grammar packs, not generated source checkout. Done for packaged
+  artifacts.
+- Expose same JSON contract through `ctypes`. Done through `tp_context_call`.
+- Install from `codegraph_library_archive` plus SHA-256. Done.
+- Keep sidecar fallback. Done.
+- Add Linux/Windows PIC/link/allocator CI before making shared library the
+  default.
 
 ### Stage 7: Retire Inferior Python Pieces
 

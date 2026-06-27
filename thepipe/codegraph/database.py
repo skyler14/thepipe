@@ -5,7 +5,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import quote
 
 REQUIRED_COLUMNS = {
@@ -187,6 +187,25 @@ class CodegraphDatabase:
                 (project,),
             )
         ]
+
+    def query_rows(
+        self,
+        sql: str,
+        params: Sequence[Any] | None = None,
+        *,
+        max_rows: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Run a bounded read-only SQL query against the graph database."""
+        statement = sql.strip()
+        if not statement:
+            raise ValueError("sql is required")
+        first = statement.split(None, 1)[0].lower()
+        if first not in {"select", "with", "pragma"}:
+            raise ValueError("only read-only SELECT/WITH/PRAGMA queries are supported")
+        if max_rows < 1:
+            raise ValueError("max_rows must be positive")
+        rows = self.connection.execute(statement, tuple(params or ()))
+        return [dict(row) for row in rows.fetchmany(max_rows)]
 
     def _count(self, table: str, project: str) -> int:
         row = self.connection.execute(

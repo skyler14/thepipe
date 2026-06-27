@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,17 @@ def test_graph_mode_archive_requires_checksum(tmp_path: Path) -> None:
         )
 
 
+def test_graph_mode_library_archive_requires_checksum(tmp_path: Path) -> None:
+    with pytest.raises(
+        RuntimeError,
+        match="codegraph_library_archive requires codegraph_library_sha256",
+    ):
+        process_codegraph(
+            tmp_path,
+            options={"codegraph_library_archive": "/tmp/libthepipe_codegraph.tar.gz"},
+        )
+
+
 def test_graph_mode_installs_verified_sidecar_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -178,6 +190,127 @@ def test_graph_mode_installs_verified_sidecar_archive(
     assert calls["closed"] is True
 
 
+def test_graph_mode_installs_verified_shared_library_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {}
+
+    def fake_install_shared_library_archive(
+        archive,
+        *,
+        expected_sha256,
+        required_version,
+        install_dir=None,
+        library_name=None,
+    ):
+        calls["install"] = {
+            "archive": archive,
+            "expected_sha256": expected_sha256,
+            "required_version": required_version,
+            "install_dir": install_dir,
+            "library_name": library_name,
+        }
+        return tmp_path / "lib" / "libthepipe_codegraph-0.10.0.dylib"
+
+    class FakeSharedLibraryBackend:
+        kind = "shared-library"
+
+        def __init__(self, path, *, cache_dir):
+            calls["backend"] = {"path": path, "cache_dir": cache_dir}
+
+        def version(self):
+            return "0.10.0"
+
+        def close(self):
+            calls["closed"] = True
+
+    class FakeClient:
+        def __init__(self, backend, *, registry, git_exclude):
+            calls["client"] = {"git_exclude": git_exclude}
+
+        def index_repository(self, root, *, mode, persistence):
+            calls["index"] = {"root": root, "mode": mode, "persistence": persistence}
+
+        def load_artifacts(self, root):
+            from thepipe.codegraph.outputs import CodegraphArtifacts
+
+            project, _ = _project_database(root)
+            chunks = process_codegraph(root, options={})
+            payload = chunks[0].meta["code_relations_payload"]
+            assert payload["project"] == project
+            return CodegraphArtifacts(
+                payload=payload,
+                digest="graph digest",
+                chunks=chunks[1:],
+            )
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(
+        integration,
+        "install_shared_library_archive",
+        fake_install_shared_library_archive,
+    )
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
+    monkeypatch.setattr(integration, "CodegraphClient", FakeClient)
+
+    chunks = process_codegraph(
+        tmp_path,
+        options={
+            "codegraph_library_archive": "/tmp/lib.tar.gz",
+            "codegraph_library_sha256": "abc123",
+            "codegraph_library_name": "libthepipe_codegraph.dylib",
+            "codegraph_required_version": "0.10.0",
+            "codegraph_install_dir": str(tmp_path / "lib"),
+        },
+    )
+
+    assert chunks[0].meta["schema_version"] == "code-relations/v2"
+    assert calls["install"]["archive"] == "/tmp/lib.tar.gz"
+    assert calls["install"]["library_name"] == "libthepipe_codegraph.dylib"
+    assert calls["backend"]["path"] == (
+        tmp_path / "lib" / "libthepipe_codegraph-0.10.0.dylib"
+    )
+    assert calls["index"]["mode"] == "fast"
+    assert calls["closed"] is True
+
+
+def test_graph_mode_rejects_wrong_shared_library_archive_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_install_shared_library_archive(*args, **kwargs):
+        return tmp_path / "lib" / "libthepipe_codegraph-0.10.0.dylib"
+
+    class FakeSharedLibraryBackend:
+        def __init__(self, path, *, cache_dir):
+            self.closed = False
+
+        def version(self):
+            return "0.9.0"
+
+        def close(self):
+            self.closed = True
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(
+        integration,
+        "install_shared_library_archive",
+        fake_install_shared_library_archive,
+    )
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
+
+    with pytest.raises(RuntimeError, match="requires version 0.10.0"):
+        process_codegraph(
+            tmp_path,
+            options={
+                "codegraph_library_archive": "/tmp/lib.tar.gz",
+                "codegraph_library_sha256": "abc123",
+                "codegraph_required_version": "0.10.0",
+            },
+        )
+
+
 def test_scrape_directory_routes_explicit_graph_mode(tmp_path: Path) -> None:
     _project_database(tmp_path)
 
@@ -187,3 +320,76 @@ def test_scrape_directory_routes_explicit_graph_mode(tmp_path: Path) -> None:
     )
 
     assert chunks[0].meta["schema_version"] == "code-relations/v2"
+
+
+def test_scrape_directory_can_query_detected_graph_entities(tmp_path: Path) -> None:
+    _project_database(tmp_path)
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_action": "entities",
+            "codegraph_query": "main",
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert chunks[0].path == "codegraph-action.json"
+    assert chunks[0].meta["action"] == "entities"
+    assert payload["schema_version"] == "thepipe-codegraph-action/v1"
+    assert payload["result"][0]["qualified_name"].endswith(".app.main")
+
+
+def test_scrape_directory_can_run_read_only_graph_sql(tmp_path: Path) -> None:
+    _project_database(tmp_path)
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_action": "sql",
+            "codegraph_sql": "SELECT name FROM nodes ORDER BY id",
+            "codegraph_limit": 1,
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload["result"]["rows"] == [{"name": "main"}]
+
+
+def test_scrape_directory_can_traverse_graph_neighbors(tmp_path: Path) -> None:
+    project, _ = _project_database(tmp_path)
+    with sqlite3.connect(
+        tmp_path / ".thepipe" / "codegraph" / "cache" / f"{project}.db"
+    ) as connection:
+        connection.execute(
+            """
+            INSERT INTO nodes VALUES (
+                2, ?, 'Function', 'helper', ?, 'helper.py', 1, 2, '{}'
+            )
+            """,
+            (project, f"{project}.helper.helper"),
+        )
+        connection.execute(
+            "INSERT INTO file_hashes VALUES (?, 'helper.py', 'def', 1, 20)",
+            (project,),
+        )
+        connection.execute(
+            "INSERT INTO edges VALUES (1, ?, 1, 2, 'CALLS', '{}')",
+            (project,),
+        )
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_action": "neighbors",
+            "codegraph_entity": "main",
+            "codegraph_direction": "outbound",
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert [node["name"] for node in payload["result"]["nodes"]] == ["main", "helper"]
+    assert payload["result"]["edges"][0]["kind"] == "CALLS"

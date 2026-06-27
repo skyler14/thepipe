@@ -1,10 +1,14 @@
 from .artifacts import (
     ArtifactError,
     default_binary_path,
+    default_library_name,
+    default_library_path,
     install_archive,
+    install_shared_library_archive,
     install_sidecar_archive,
     sha256_file,
 )
+from .access import CodegraphAccessError, CodegraphGraph
 from .client import CodeGraphBackend, CodegraphClient
 from .database import (
     CodegraphDatabase,
@@ -51,8 +55,10 @@ from .storage import (
 
 __all__ = [
     "CodegraphArtifacts",
+    "CodegraphAccessError",
     "CodeGraphBackend",
     "CodegraphDatabase",
+    "CodegraphGraph",
     "CodegraphClient",
     "CodegraphDeployment",
     "EdgeRecord",
@@ -88,7 +94,10 @@ __all__ = [
     "recommended_gitignore_entries",
     "sidecar_from_env",
     "default_binary_path",
+    "default_library_name",
+    "default_library_path",
     "install_archive",
+    "install_shared_library_archive",
     "install_sidecar_archive",
     "sha256_file",
     "write_manifest",

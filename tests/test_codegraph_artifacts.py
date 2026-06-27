@@ -10,7 +10,9 @@ import pytest
 from thepipe.codegraph.artifacts import (
     ArtifactError,
     default_binary_path,
+    default_library_path,
     install_archive,
+    install_shared_library_archive,
     install_sidecar_archive,
     sha256_file,
 )
@@ -19,6 +21,16 @@ from thepipe.codegraph.artifacts import (
 def _binary_archive(tmp_path: Path, body: bytes) -> Path:
     archive = tmp_path / "codegraph.tar.gz"
     info = tarfile.TarInfo("codebase-memory-mcp")
+    info.mode = 0o755
+    info.size = len(body)
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.addfile(info, io.BytesIO(body))
+    return archive
+
+
+def _named_archive(tmp_path: Path, name: str, body: bytes) -> Path:
+    archive = tmp_path / f"{name}.tar.gz"
+    info = tarfile.TarInfo(name)
     info.mode = 0o755
     info.size = len(body)
     with tarfile.open(archive, "w:gz") as bundle:
@@ -97,3 +109,24 @@ def test_install_sidecar_archive_uses_versioned_cache_path(tmp_path: Path) -> No
     assert default_binary_path(version="0.10.0", install_dir=tmp_path) == (
         tmp_path / "codebase-memory-mcp-0.10.0"
     )
+
+
+def test_install_shared_library_archive_uses_versioned_cache_path(tmp_path: Path) -> None:
+    archive = _named_archive(tmp_path, "libthepipe_codegraph.dylib", b"dylib")
+    expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    installed = install_shared_library_archive(
+        archive,
+        expected_sha256=expected,
+        required_version="0.10.0",
+        install_dir=tmp_path / "cache-lib",
+        library_name="libthepipe_codegraph.dylib",
+    )
+
+    assert installed == tmp_path / "cache-lib" / "libthepipe_codegraph-0.10.0.dylib"
+    assert installed.read_bytes() == b"dylib"
+    assert default_library_path(
+        version="0.10.0",
+        install_dir=tmp_path,
+        library_name="libthepipe_codegraph.dylib",
+    ) == tmp_path / "libthepipe_codegraph-0.10.0.dylib"

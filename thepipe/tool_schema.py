@@ -181,6 +181,22 @@ TOOLS = [
                             "type": "string",
                             "description": "Directory for the installed sidecar executable; defaults to ~/.cache/thepipe/bin"
                         },
+                        "codegraph_library": {
+                            "type": "string",
+                            "description": "Path to a pinned codegraph shared library for code_relations='graph'"
+                        },
+                        "codegraph_library_archive": {
+                            "type": "string",
+                            "description": "Path to a pinned shared-library tar/zip archive to verify and install before graph indexing"
+                        },
+                        "codegraph_library_sha256": {
+                            "type": "string",
+                            "description": "Expected SHA-256 for codegraph_library_archive; required when codegraph_library_archive is set"
+                        },
+                        "codegraph_library_name": {
+                            "type": "string",
+                            "description": "Shared-library archive member name, e.g. libthepipe_codegraph.dylib"
+                        },
                         "codegraph_index_mode": {
                             "type": "string",
                             "enum": ["fast", "moderate", "full", "cross-repo-intelligence"],
@@ -197,6 +213,57 @@ TOOLS = [
                         "codegraph_timeout": {
                             "type": "number",
                             "description": "Seconds to wait for sidecar calls (default: 300 in graph integration)"
+                        },
+                        "codegraph_action": {
+                            "type": "string",
+                            "enum": ["emit", "summary", "files", "entities", "edges", "neighbors", "sql"],
+                            "description": "Use an existing graph deployment instead of emitting the full graph payload; default is emit"
+                        },
+                        "codegraph_query": {
+                            "type": "string",
+                            "description": "Entity search text for codegraph_action='entities'"
+                        },
+                        "codegraph_kind": {
+                            "type": "string",
+                            "description": "Entity kind filter for codegraph_action='entities', e.g. Function or Class"
+                        },
+                        "codegraph_file": {
+                            "type": "string",
+                            "description": "File path substring filter for codegraph_action='entities'"
+                        },
+                        "codegraph_qualified_name": {
+                            "type": "string",
+                            "description": "Qualified-name substring filter for codegraph_action='entities'"
+                        },
+                        "codegraph_entity": {
+                            "type": "string",
+                            "description": "Entity id, native id, name, or qualified name for codegraph_action='neighbors'"
+                        },
+                        "codegraph_direction": {
+                            "type": "string",
+                            "enum": ["inbound", "outbound", "both"],
+                            "description": "Traversal direction for codegraph_action='neighbors'"
+                        },
+                        "codegraph_depth": {
+                            "type": "integer",
+                            "description": "Traversal depth for codegraph_action='neighbors'"
+                        },
+                        "codegraph_edge_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional edge type filter for codegraph_action='neighbors'"
+                        },
+                        "codegraph_sql": {
+                            "type": "string",
+                            "description": "Read-only SELECT/WITH/PRAGMA SQL for codegraph_action='sql'"
+                        },
+                        "codegraph_sql_params": {
+                            "type": "array",
+                            "description": "SQL parameters for codegraph_action='sql'"
+                        },
+                        "codegraph_limit": {
+                            "type": "integer",
+                            "description": "Maximum rows/entities/edges returned by graph actions"
                         }
                     }
                 }
