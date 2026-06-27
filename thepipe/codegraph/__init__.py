@@ -1,5 +1,11 @@
 from .artifacts import ArtifactError, install_archive, sha256_file
 from .client import CodeGraphBackend, CodegraphClient
+from .database import (
+    CodegraphDatabase,
+    EdgeRecord,
+    NodeRecord,
+    SchemaError,
+)
 from .sidecar import (
     GRAMMAR_ARTIFACT_POLICY,
     PINNED_RUNTIME_VERSION,
@@ -32,8 +38,10 @@ from .storage import (
 __all__ = [
     "CodegraphArtifacts",
     "CodeGraphBackend",
+    "CodegraphDatabase",
     "CodegraphClient",
     "CodegraphDeployment",
+    "EdgeRecord",
     "GRAMMAR_ARTIFACT_POLICY",
     "PINNED_RUNTIME_VERSION",
     "PINNED_UPSTREAM_COMMIT",
@@ -44,6 +52,8 @@ __all__ = [
     "SidecarError",
     "ArtifactError",
     "MasterRegistry",
+    "NodeRecord",
+    "SchemaError",
     "assess_database_size",
     "database_size",
     "build_codegraph_artifacts",
