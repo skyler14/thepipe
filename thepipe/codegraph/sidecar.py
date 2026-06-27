@@ -70,6 +70,16 @@ class SidecarBackend:
 
         text = _first_text(envelope)
         if envelope.get("isError"):
+            if tool == "delete_project":
+                try:
+                    delete_result = json.loads(text)
+                except json.JSONDecodeError:
+                    delete_result = None
+                if (
+                    isinstance(delete_result, dict)
+                    and delete_result.get("status") == "not_found"
+                ):
+                    return delete_result
             raise SidecarError(text or "codegraph sidecar returned an error")
 
         try:

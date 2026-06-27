@@ -94,7 +94,7 @@ class SharedLibraryBackend:
                 str(detail or f"codegraph library call failed with status {status}")
             )
         if isinstance(decoded, dict):
-            return _unwrap_mcp(decoded)
+            return _unwrap_mcp(decoded, tool=tool)
         return {"value": decoded}
 
     def version(self) -> str:
@@ -121,7 +121,7 @@ class SharedLibraryBackend:
             pass
 
 
-def _unwrap_mcp(envelope: dict[str, Any]) -> dict[str, Any]:
+def _unwrap_mcp(envelope: dict[str, Any], *, tool: str) -> dict[str, Any]:
     if "content" not in envelope:
         return envelope
     text = ""
@@ -130,6 +130,16 @@ def _unwrap_mcp(envelope: dict[str, Any]) -> dict[str, Any]:
             text = str(item.get("text", ""))
             break
     if envelope.get("isError"):
+        if tool == "delete_project":
+            try:
+                delete_result = json.loads(text)
+            except json.JSONDecodeError:
+                delete_result = None
+            if (
+                isinstance(delete_result, dict)
+                and delete_result.get("status") == "not_found"
+            ):
+                return delete_result
         raise SharedLibraryError(text or "codegraph library returned an MCP error")
     try:
         decoded = json.loads(text)

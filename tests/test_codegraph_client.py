@@ -12,6 +12,8 @@ from thepipe.codegraph.storage import (
     project_cache_dir,
     project_db_path,
     read_manifest,
+    write_manifest,
+    CodegraphDeployment,
 )
 
 
@@ -251,3 +253,30 @@ def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Pa
     artifacts = client.load_artifacts(repo)
     assert artifacts.payload["schema_version"] == "code-relations/v2"
     assert artifacts.payload["project"] == project
+
+
+def test_delete_project_removes_stale_manifest_and_master_pointer(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    db = project_db_path(repo, "demo")
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"database")
+    deployment = CodegraphDeployment(
+        repo_root=repo,
+        db_path=db,
+        project_name="demo",
+    )
+    write_manifest(deployment)
+    registry = MasterRegistry(tmp_path / "master.sqlite")
+    registry.upsert(deployment)
+
+    class DeleteBackend(FakeBackend):
+        def call(self, tool: str, payload: dict[str, object]) -> dict[str, object]:
+            db.unlink()
+            return {"project": "demo", "status": "deleted"}
+
+    result = CodegraphClient(DeleteBackend(), registry=registry).delete_project("demo")
+
+    assert result["status"] == "deleted"
+    assert read_manifest(repo) is None
+    assert registry.list() == []

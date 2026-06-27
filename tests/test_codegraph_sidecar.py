@@ -57,6 +57,18 @@ def test_sidecar_errors_on_mcp_error_envelope(tmp_path: Path) -> None:
         SidecarBackend(binary).call("query_graph", {"query": "MATCH bad"})
 
 
+def test_sidecar_preserves_delete_not_found_as_a_result(tmp_path: Path) -> None:
+    binary = _fake_sidecar(
+        tmp_path,
+        "print(json.dumps({'isError': True, 'content': [{'type': 'text', "
+        "'text': json.dumps({'project': 'missing', 'status': 'not_found'})}]}))",
+    )
+
+    assert SidecarBackend(binary).call(
+        "delete_project", {"project": "missing"}
+    ) == {"project": "missing", "status": "not_found"}
+
+
 def test_native_policy_keeps_raw_generated_grammars_out_of_the_python_repo() -> None:
     assert "compiled" in GRAMMAR_ARTIFACT_POLICY
     assert "raw generated grammar" in GRAMMAR_ARTIFACT_POLICY

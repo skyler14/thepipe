@@ -322,6 +322,17 @@ class MasterRegistry:
             for row in rows
         ]
 
+    def remove(self, repo_root: str | Path) -> bool:
+        if not self.path.is_file():
+            return False
+        with sqlite3.connect(self.path) as connection:
+            self._ensure_schema(connection)
+            cursor = connection.execute(
+                "DELETE FROM repos WHERE root_path = ?",
+                (str(repo_root),),
+            )
+        return cursor.rowcount > 0
+
     @staticmethod
     def _ensure_schema(connection: sqlite3.Connection) -> None:
         connection.execute(

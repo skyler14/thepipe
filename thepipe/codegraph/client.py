@@ -15,6 +15,7 @@ from .storage import (
     database_size,
     discover_project_deployment,
     ensure_git_excluded,
+    manifest_path,
     write_manifest,
 )
 
@@ -76,7 +77,17 @@ class CodegraphClient:
         return self.backend.call("index_status", {"project": project})
 
     def delete_project(self, project: str) -> dict[str, Any]:
-        return self.backend.call("delete_project", {"project": project})
+        deployments = [
+            deployment
+            for deployment in self.registry.list()
+            if deployment.project_name == project
+        ]
+        result = self.backend.call("delete_project", {"project": project})
+        if result.get("status") == "deleted":
+            for deployment in deployments:
+                manifest_path(deployment.repo_root).unlink(missing_ok=True)
+                self.registry.remove(deployment.repo_root)
+        return result
 
     def search_graph(
         self,

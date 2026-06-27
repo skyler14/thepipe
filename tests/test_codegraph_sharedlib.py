@@ -97,3 +97,26 @@ def test_shared_library_rejects_invalid_json() -> None:
 
     with pytest.raises(SharedLibraryError, match="invalid JSON"):
         backend.call("list_projects", {})
+
+
+def test_shared_library_preserves_delete_not_found_as_a_result() -> None:
+    response = {
+        "isError": True,
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {"project": "missing", "status": "not_found"}
+                ),
+            }
+        ],
+    }
+    backend = SharedLibraryBackend(
+        cache_dir="/repo/cache",
+        library=FakeLibrary(response=response),
+    )
+
+    assert backend.call("delete_project", {"project": "missing"}) == {
+        "project": "missing",
+        "status": "not_found",
+    }
