@@ -4,6 +4,12 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from .outputs import CodegraphArtifacts, build_codegraph_artifacts
+from .storage import (
+    CodegraphDeployment,
+    MasterRegistry,
+    database_size,
+    write_manifest,
+)
 
 INDEX_MODES = frozenset({"full", "moderate", "fast", "cross-repo-intelligence"})
 
@@ -19,8 +25,14 @@ def _payload(**values: Any) -> dict[str, Any]:
 class CodegraphClient:
     """Stable Python facade over the codebase-memory MCP tool contract."""
 
-    def __init__(self, backend: CodeGraphBackend) -> None:
+    def __init__(
+        self,
+        backend: CodeGraphBackend,
+        *,
+        registry: MasterRegistry | None = None,
+    ) -> None:
         self.backend = backend
+        self.registry = registry or MasterRegistry()
 
     def index_repository(
         self,
@@ -45,6 +57,7 @@ class CodegraphClient:
                 target_projects=list(target_projects) if target_projects is not None else None,
             ),
         )
+        self._record_local_deployment(root, native)
         return build_codegraph_artifacts(native, mode="map", repo_root=str(root))
 
     def list_projects(self) -> dict[str, Any]:
@@ -234,3 +247,28 @@ class CodegraphClient:
             "ingest_traces",
             {"project": project, "traces": list(traces)},
         )
+
+    def _record_local_deployment(
+        self, repo_root: Path, native: dict[str, Any]
+    ) -> None:
+        cache_dir = getattr(self.backend, "cache_dir", None)
+        project = native.get("project")
+        if cache_dir is None or not isinstance(project, str):
+            return
+        db_path = Path(cache_dir) / f"{project}.db"
+        if not db_path.is_file():
+            return
+        artifact = repo_root / ".codebase-memory" / "graph.db.zst"
+        deployment = CodegraphDeployment(
+            repo_root=repo_root,
+            db_path=db_path,
+            project_name=project,
+            backend_kind="sidecar",
+            backend_version=str(native.get("backend_version", "")),
+            artifact_path=artifact if artifact.is_file() else None,
+            size_bytes=database_size(db_path),
+            entity_count=int(native.get("nodes", 0)),
+            edge_count=int(native.get("edges", 0)),
+        )
+        write_manifest(deployment)
+        self.registry.upsert(deployment, status=str(native.get("status", "ready")))

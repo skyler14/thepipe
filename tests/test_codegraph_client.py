@@ -5,6 +5,13 @@ from pathlib import Path
 import pytest
 
 from thepipe.codegraph.client import CodegraphClient
+from thepipe.codegraph.storage import (
+    MasterRegistry,
+    native_project_name,
+    project_cache_dir,
+    project_db_path,
+    read_manifest,
+)
 
 
 class FakeBackend:
@@ -179,3 +186,34 @@ def test_index_repository_rejects_unknown_mode(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="mode"):
         client.index_repository(tmp_path, mode="turbo")
+
+
+def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = native_project_name(repo.resolve())
+
+    class IndexingBackend(FakeBackend):
+        cache_dir = project_cache_dir(repo)
+
+        def call(self, tool: str, payload: dict[str, object]) -> dict[str, object]:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            (self.cache_dir / f"{project}.db").write_bytes(b"SQLite format 3\0")
+            return {
+                "project": project,
+                "status": "indexed",
+                "nodes": 12,
+                "edges": 9,
+            }
+
+    registry = MasterRegistry(tmp_path / "master.sqlite")
+    client = CodegraphClient(IndexingBackend(), registry=registry)
+
+    client.index_repository(repo)
+
+    deployment = read_manifest(repo)
+    assert deployment is not None
+    assert deployment.db_path == project_db_path(repo, project)
+    assert deployment.entity_count == 12
+    assert deployment.edge_count == 9
+    assert registry.list() == [deployment]
