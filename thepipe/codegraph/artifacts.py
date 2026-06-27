@@ -15,6 +15,17 @@ class ArtifactError(RuntimeError):
     pass
 
 
+def default_binary_path(
+    *,
+    version: str,
+    install_dir: str | Path | None = None,
+    binary_name: str = "codebase-memory-mcp",
+) -> Path:
+    """Return the default sidecar install path for a pinned runtime."""
+    root = Path(install_dir) if install_dir is not None else Path.home() / ".cache" / "thepipe" / "bin"
+    return root / f"{binary_name}-{version}"
+
+
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as source:
@@ -65,6 +76,28 @@ def install_archive(
     finally:
         temporary.unlink(missing_ok=True)
     return destination_path
+
+
+def install_sidecar_archive(
+    archive: str | Path,
+    *,
+    expected_sha256: str,
+    required_version: str,
+    install_dir: str | Path | None = None,
+    binary_name: str = "codebase-memory-mcp",
+) -> Path:
+    """Install a pinned sidecar archive into the default thepipe cache."""
+    return install_archive(
+        archive,
+        default_binary_path(
+            version=required_version,
+            install_dir=install_dir,
+            binary_name=binary_name,
+        ),
+        expected_sha256=expected_sha256,
+        required_version=required_version,
+        binary_name=binary_name,
+    )
 
 
 def _extract_tar_binary(archive: Path, destination: Path, binary_name: str) -> None:

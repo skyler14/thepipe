@@ -6,11 +6,12 @@ from typing import Any
 
 from thepipe.core import Chunk
 
+from .artifacts import install_sidecar_archive
 from .client import CodeGraphBackend, CodegraphClient
 from .database import CodegraphDatabase
 from .outputs import CodegraphArtifacts, build_database_artifacts
 from .sharedlib import SharedLibraryBackend
-from .sidecar import SidecarBackend
+from .sidecar import PINNED_RUNTIME_VERSION, SidecarBackend
 from .storage import (
     MasterRegistry,
     discover_project_deployment,
@@ -66,12 +67,39 @@ def _backend_from_options(
     binary = options.get("codegraph_binary") or os.environ.get(
         "THEPIPE_CODEGRAPH_BINARY"
     )
+    archive = options.get("codegraph_archive") or os.environ.get(
+        "THEPIPE_CODEGRAPH_ARCHIVE"
+    )
+    archive_sha256 = options.get("codegraph_sha256") or os.environ.get(
+        "THEPIPE_CODEGRAPH_SHA256"
+    )
     cache_dir = project_cache_dir(root)
     if library:
         return SharedLibraryBackend(library, cache_dir=cache_dir)
     if binary:
         return SidecarBackend(
             binary,
+            cache_dir=cache_dir,
+            timeout=float(options.get("codegraph_timeout", 300)),
+        )
+    if archive:
+        if not archive_sha256:
+            raise RuntimeError("codegraph_archive requires codegraph_sha256")
+        required_version = str(
+            options.get("codegraph_required_version")
+            or os.environ.get("THEPIPE_CODEGRAPH_REQUIRED_VERSION")
+            or PINNED_RUNTIME_VERSION
+        )
+        installed = install_sidecar_archive(
+            archive,
+            expected_sha256=str(archive_sha256),
+            required_version=required_version,
+            install_dir=options.get("codegraph_install_dir")
+            or os.environ.get("THEPIPE_CODEGRAPH_INSTALL_DIR"),
+            binary_name=str(options.get("codegraph_binary_name", "codebase-memory-mcp")),
+        )
+        return SidecarBackend(
+            installed,
             cache_dir=cache_dir,
             timeout=float(options.get("codegraph_timeout", 300)),
         )
@@ -83,7 +111,7 @@ def _load_detected_artifacts(root: Path) -> CodegraphArtifacts:
     if deployment is None:
         raise RuntimeError(
             "graph mode needs an existing deployment or explicit "
-            "codegraph_binary/codegraph_library"
+            "codegraph_binary/codegraph_library/codegraph_archive"
         )
     with CodegraphDatabase(deployment.db_path) as database:
         database.validate_schema()

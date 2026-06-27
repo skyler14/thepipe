@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from thepipe.codegraph.artifacts import ArtifactError, install_archive, sha256_file
+from thepipe.codegraph.artifacts import (
+    ArtifactError,
+    default_binary_path,
+    install_archive,
+    install_sidecar_archive,
+    sha256_file,
+)
 
 
 def _binary_archive(tmp_path: Path, body: bytes) -> Path:
@@ -70,3 +76,24 @@ def test_install_archive_requires_expected_binary_member(tmp_path: Path) -> None
             tmp_path / "bin" / "codebase-memory-mcp",
             expected_sha256=sha256_file(archive),
         )
+
+
+def test_install_sidecar_archive_uses_versioned_cache_path(tmp_path: Path) -> None:
+    archive = _binary_archive(
+        tmp_path,
+        b"#!/bin/sh\nprintf 'codebase-memory-mcp 0.10.0\\n'\n",
+    )
+    expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    installed = install_sidecar_archive(
+        archive,
+        expected_sha256=expected,
+        required_version="0.10.0",
+        install_dir=tmp_path / "cache-bin",
+    )
+
+    assert installed == tmp_path / "cache-bin" / "codebase-memory-mcp-0.10.0"
+    assert installed.is_file()
+    assert default_binary_path(version="0.10.0", install_dir=tmp_path) == (
+        tmp_path / "codebase-memory-mcp-0.10.0"
+    )

@@ -130,14 +130,15 @@ TOOLS = [
                     "properties": {
                         "code_relations": {
                             "type": "string",
-                            "enum": ["limited", "map", "mapnn", "mapall", "mapnew"],
+                            "enum": ["limited", "map", "mapnn", "mapall", "mapnew", "graph"],
                             "description": (
                                 "Code analysis mode: "
                                 "'limited' = only requested files, "
                                 "'map' = all files with digests (or only include_patterns if provided), "
                                 "'mapnn' = digests with N1/N2 neighbor cutoff (recommended), "
                                 "'mapall' = full for patterns, digest for rest, "
-                                "'mapnew' = diff map (old vs new git revisions)"
+                                "'mapnew' = diff map (old vs new git revisions), "
+                                "'graph' = sidecar-backed persistent code graph"
                             )
                         },
                         "code_n1": {
@@ -159,6 +160,43 @@ TOOLS = [
                         "json_verbose": {
                             "type": "boolean",
                             "description": "Include imports, line-level symbol spans, call graph, logical region hashes, and mapnew file/hunk preview metadata in JSON output (-f json)"
+                        },
+                        "codegraph_binary": {
+                            "type": "string",
+                            "description": "Path to a pinned codegraph sidecar executable for code_relations='graph'"
+                        },
+                        "codegraph_archive": {
+                            "type": "string",
+                            "description": "Path to a pinned sidecar tar/zip archive to verify and install before graph indexing"
+                        },
+                        "codegraph_sha256": {
+                            "type": "string",
+                            "description": "Expected SHA-256 for codegraph_archive; required when codegraph_archive is set"
+                        },
+                        "codegraph_required_version": {
+                            "type": "string",
+                            "description": "Required sidecar runtime version for archive install (default: pinned thepipe codegraph runtime)"
+                        },
+                        "codegraph_install_dir": {
+                            "type": "string",
+                            "description": "Directory for the installed sidecar executable; defaults to ~/.cache/thepipe/bin"
+                        },
+                        "codegraph_index_mode": {
+                            "type": "string",
+                            "enum": ["fast", "moderate", "full", "cross-repo-intelligence"],
+                            "description": "Native codegraph indexing mode for code_relations='graph' (default: fast)"
+                        },
+                        "codegraph_refresh": {
+                            "type": "boolean",
+                            "description": "Whether graph mode should refresh the native index when a backend is supplied (default: true)"
+                        },
+                        "codegraph_git_exclude": {
+                            "type": "boolean",
+                            "description": "Add repo-local .thepipe/codegraph/cache/ to .git/info/exclude (default: true)"
+                        },
+                        "codegraph_timeout": {
+                            "type": "number",
+                            "description": "Seconds to wait for sidecar calls (default: 300 in graph integration)"
                         }
                     }
                 }
@@ -168,7 +206,8 @@ TOOLS = [
         "examples": [
             {"dir_path": "./src", "include_patterns": ["*.py", "*.tsx"]},
             {"dir_path": ".", "include_patterns": ["src/*.py"], "options": {"code_relations": "mapnn"}},
-            {"dir_path": ".", "include_patterns": ["main.py"], "options": {"code_relations": "mapnn", "code_n1": 2, "code_n2": 4}}
+            {"dir_path": ".", "include_patterns": ["main.py"], "options": {"code_relations": "mapnn", "code_n1": 2, "code_n2": 4}},
+            {"dir_path": ".", "options": {"code_relations": "graph", "codegraph_binary": "/path/to/codebase-memory-mcp"}}
         ]
     },
     {

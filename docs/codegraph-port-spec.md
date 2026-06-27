@@ -26,6 +26,9 @@ Implemented on `codex/codegraph-sidecar`:
 - pinned temporary source build that packages only compiled artifacts;
 - context-based ctypes ABI and C shim over `cbm_mcp_handle_tool`;
 - explicit `code_relations: "graph"` package/CLI mode;
+- public graph-mode tool schema and registration docs;
+- sidecar bootstrap from local tar/zip archive with required SHA-256 and
+  pinned runtime version validation;
 - local git exclusion through `.git/info/exclude`.
 
 Measured on arm64 macOS at pinned commit
@@ -53,7 +56,7 @@ Still gated:
 
 - published per-platform release checksums/catalog;
 - Linux and Windows shared-library PIC/allocator CI;
-- skill and registration changes;
+- skill-file specific agent rollout beyond generated registration text;
 - replacement/removal of existing Python analyzer modules.
 
 ## Source Findings
@@ -902,10 +905,12 @@ Aggressive TDD loop:
 
 ### Stage 5: Full Binary Support Achieved
 
-- Full sidecar tool surface tested.
-- Projections stable.
-- Disk policy stable.
-- Fallback stable.
+- Full sidecar tool surface tested. Done.
+- Projections stable. Done.
+- Disk policy stable. Done.
+- Fallback stable. Done.
+- Public `code_relations: "graph"` option schema. Done.
+- Local archive/checksum install path. Done.
 
 Only here may registration/skills mention sidecar-backed codegraph.
 

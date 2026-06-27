@@ -87,6 +87,97 @@ def test_graph_mode_requires_deployment_or_explicit_backend(tmp_path: Path) -> N
         process_codegraph(tmp_path, options={})
 
 
+def test_graph_mode_archive_requires_checksum(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="codegraph_archive requires codegraph_sha256"):
+        process_codegraph(
+            tmp_path,
+            options={"codegraph_archive": "/tmp/codegraph.tar.gz"},
+        )
+
+
+def test_graph_mode_installs_verified_sidecar_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {}
+
+    def fake_install_sidecar_archive(
+        archive,
+        *,
+        expected_sha256,
+        required_version,
+        install_dir=None,
+        binary_name="codebase-memory-mcp",
+    ):
+        calls["install"] = {
+            "archive": archive,
+            "expected_sha256": expected_sha256,
+            "required_version": required_version,
+            "install_dir": install_dir,
+            "binary_name": binary_name,
+        }
+        return tmp_path / "bin" / "codebase-memory-mcp-0.10.0"
+
+    class FakeSidecarBackend:
+        kind = "sidecar"
+
+        def __init__(self, binary, *, cache_dir, timeout):
+            calls["backend"] = {
+                "binary": binary,
+                "cache_dir": cache_dir,
+                "timeout": timeout,
+            }
+
+        def close(self):
+            calls["closed"] = True
+
+    class FakeClient:
+        def __init__(self, backend, *, registry, git_exclude):
+            calls["client"] = {"git_exclude": git_exclude}
+
+        def index_repository(self, root, *, mode, persistence):
+            calls["index"] = {"root": root, "mode": mode, "persistence": persistence}
+
+        def load_artifacts(self, root):
+            from thepipe.codegraph.outputs import CodegraphArtifacts
+
+            project, _ = _project_database(root)
+            chunks = process_codegraph(root, options={})
+            payload = chunks[0].meta["code_relations_payload"]
+            assert payload["project"] == project
+            return CodegraphArtifacts(
+                payload=payload,
+                digest="graph digest",
+                chunks=chunks[1:],
+            )
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "install_sidecar_archive", fake_install_sidecar_archive)
+    monkeypatch.setattr(integration, "SidecarBackend", FakeSidecarBackend)
+    monkeypatch.setattr(integration, "CodegraphClient", FakeClient)
+
+    chunks = process_codegraph(
+        tmp_path,
+        options={
+            "codegraph_archive": "/tmp/codegraph.tar.gz",
+            "codegraph_sha256": "abc123",
+            "codegraph_required_version": "0.10.0",
+            "codegraph_install_dir": str(tmp_path / "bin"),
+            "codegraph_index_mode": "fast",
+            "codegraph_timeout": 12,
+        },
+    )
+
+    assert chunks[0].meta["schema_version"] == "code-relations/v2"
+    assert calls["install"]["archive"] == "/tmp/codegraph.tar.gz"
+    assert calls["install"]["expected_sha256"] == "abc123"
+    assert calls["install"]["required_version"] == "0.10.0"
+    assert calls["backend"]["binary"] == tmp_path / "bin" / "codebase-memory-mcp-0.10.0"
+    assert calls["backend"]["timeout"] == 12
+    assert calls["index"]["mode"] == "fast"
+    assert calls["closed"] is True
+
+
 def test_scrape_directory_routes_explicit_graph_mode(tmp_path: Path) -> None:
     _project_database(tmp_path)
 

@@ -1,4 +1,10 @@
-from .artifacts import ArtifactError, install_archive, sha256_file
+from .artifacts import (
+    ArtifactError,
+    default_binary_path,
+    install_archive,
+    install_sidecar_archive,
+    sha256_file,
+)
 from .client import CodeGraphBackend, CodegraphClient
 from .database import (
     CodegraphDatabase,
@@ -81,7 +87,9 @@ __all__ = [
     "read_manifest",
     "recommended_gitignore_entries",
     "sidecar_from_env",
+    "default_binary_path",
     "install_archive",
+    "install_sidecar_archive",
     "sha256_file",
     "write_manifest",
 ]

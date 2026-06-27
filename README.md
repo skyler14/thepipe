@@ -88,6 +88,28 @@ thepipe ./repo --options '{"code_relations": "auto"}' -f
 - 📊 Full codebase context in minimal tokens
 - 🌍 Supports Python, JS/TS, Dart, Swift, Kotlin, Ruby, Go, Rust, C/C++, Java, +155 more
 
+### Persistent Code Graph Sidecar
+
+For deeper graph queries, `code_relations: "graph"` can use a pinned
+`codebase-memory-mcp` sidecar and projects the native SQLite graph back into
+thepipe chunks plus `code-relations/v2` JSON:
+
+```bash
+thepipe ./repo --options '{"code_relations": "graph", "codegraph_binary": "/path/to/codebase-memory-mcp"}' -f json
+```
+
+To install from a release archive without keeping raw generated grammar source
+in this repo, pass a local archive and checksum:
+
+```bash
+thepipe ./repo --options '{"code_relations": "graph", "codegraph_archive": "/path/to/codegraph.tar.gz", "codegraph_sha256": "SHA256"}' -f json
+```
+
+Graph mode stores repo-local databases under `.thepipe/codegraph/cache/`, adds
+that cache to `.git/info/exclude` by default, and records a pointer in the
+thepipe master registry. The sidecar binary is the compiled byproduct; the
+large raw grammar checkout used to build it is not required at runtime.
+
 ---
 
 ## 💾 Database Support
