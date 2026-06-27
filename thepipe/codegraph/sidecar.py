@@ -20,6 +20,8 @@ class SidecarError(RuntimeError):
 
 
 class SidecarBackend:
+    kind = "sidecar"
+
     def __init__(
         self,
         binary: str | Path,
@@ -30,6 +32,7 @@ class SidecarBackend:
         self.binary = Path(binary)
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.timeout = timeout
+        self._version: str | None = None
 
     def call(self, tool: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         self._check_binary()
@@ -78,6 +81,8 @@ class SidecarBackend:
         return {"value": decoded}
 
     def version(self) -> str:
+        if self._version is not None:
+            return self._version
         self._check_binary()
         try:
             proc = subprocess.run(
@@ -96,7 +101,8 @@ class SidecarBackend:
         output = proc.stdout.strip()
         if not output:
             raise SidecarError("codegraph sidecar returned an empty version")
-        return output.rsplit(" ", 1)[-1]
+        self._version = output.rsplit(" ", 1)[-1]
+        return self._version
 
     def require_version(self, expected: str) -> None:
         actual = self.version()

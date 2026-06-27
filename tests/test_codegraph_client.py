@@ -197,6 +197,9 @@ def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Pa
     class IndexingBackend(FakeBackend):
         cache_dir = project_cache_dir(repo)
 
+        def version(self) -> str:
+            return "0.10.0"
+
         def call(self, tool: str, payload: dict[str, object]) -> dict[str, object]:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             with sqlite3.connect(self.cache_dir / f"{project}.db") as connection:
@@ -241,6 +244,7 @@ def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Pa
     assert deployment.db_path == project_db_path(repo, project)
     assert deployment.entity_count == 12
     assert deployment.edge_count == 9
+    assert deployment.backend_version == "0.10.0"
     assert len(deployment.schema_fingerprint) == 64
     assert registry.list() == [deployment]
 

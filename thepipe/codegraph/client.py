@@ -283,13 +283,20 @@ class CodegraphClient:
         with CodegraphDatabase(db_path) as database:
             schema_fingerprint = database.validate_schema()
             database_summary = database.summary(project)
+        backend_version = str(native.get("backend_version", ""))
+        version = getattr(self.backend, "version", None)
+        if not backend_version and callable(version):
+            try:
+                backend_version = str(version())
+            except Exception:
+                backend_version = ""
         artifact = repo_root / ".codebase-memory" / "graph.db.zst"
         deployment = CodegraphDeployment(
             repo_root=repo_root,
             db_path=db_path,
             project_name=project,
-            backend_kind="sidecar",
-            backend_version=str(native.get("backend_version", "")),
+            backend_kind=str(getattr(self.backend, "kind", "sidecar")),
+            backend_version=backend_version,
             schema_fingerprint=schema_fingerprint,
             artifact_path=artifact if artifact.is_file() else None,
             size_bytes=database_size(db_path),

@@ -13,6 +13,8 @@ class SharedLibraryError(RuntimeError):
 class SharedLibraryBackend:
     """ctypes adapter for the stable coarse-grained codegraph JSON ABI."""
 
+    kind = "shared-library"
+
     def __init__(
         self,
         path: str | Path | None = None,
