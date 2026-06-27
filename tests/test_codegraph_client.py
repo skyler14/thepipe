@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -198,7 +199,31 @@ def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Pa
 
         def call(self, tool: str, payload: dict[str, object]) -> dict[str, object]:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            (self.cache_dir / f"{project}.db").write_bytes(b"SQLite format 3\0")
+            with sqlite3.connect(self.cache_dir / f"{project}.db") as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE projects (name TEXT, indexed_at TEXT, root_path TEXT);
+                    CREATE TABLE file_hashes (
+                        project TEXT, rel_path TEXT, sha256 TEXT, mtime_ns INTEGER, size INTEGER
+                    );
+                    CREATE TABLE nodes (
+                        id INTEGER, project TEXT, label TEXT, name TEXT, qualified_name TEXT,
+                        file_path TEXT, start_line INTEGER, end_line INTEGER, properties TEXT
+                    );
+                    CREATE TABLE edges (
+                        id INTEGER, project TEXT, source_id INTEGER, target_id INTEGER,
+                        type TEXT, properties TEXT
+                    );
+                    CREATE TABLE project_summaries (
+                        project TEXT, summary TEXT, source_hash TEXT,
+                        created_at TEXT, updated_at TEXT
+                    );
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO projects VALUES (?, '2026-01-01', ?)",
+                    (project, str(repo)),
+                )
             return {
                 "project": project,
                 "status": "indexed",
@@ -216,4 +241,9 @@ def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Pa
     assert deployment.db_path == project_db_path(repo, project)
     assert deployment.entity_count == 12
     assert deployment.edge_count == 9
+    assert len(deployment.schema_fingerprint) == 64
     assert registry.list() == [deployment]
+
+    artifacts = client.load_artifacts(repo)
+    assert artifacts.payload["schema_version"] == "code-relations/v2"
+    assert artifacts.payload["project"] == project

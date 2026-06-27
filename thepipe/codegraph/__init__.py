@@ -15,7 +15,12 @@ from .sidecar import (
     SidecarError,
     sidecar_from_env,
 )
-from .outputs import CodegraphArtifacts, build_codegraph_artifacts
+from .outputs import (
+    CodegraphArtifacts,
+    build_codegraph_artifacts,
+    build_database_artifacts,
+    code_relations_v1,
+)
 from .storage import (
     DEFAULT_GLOBAL_CAP_BYTES,
     DEFAULT_REPO_SOFT_CAP_BYTES,
@@ -57,6 +62,8 @@ __all__ = [
     "assess_database_size",
     "database_size",
     "build_codegraph_artifacts",
+    "build_database_artifacts",
+    "code_relations_v1",
     "discover_project_deployment",
     "manifest_path",
     "master_registry_path",

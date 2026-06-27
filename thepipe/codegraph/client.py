@@ -3,11 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from .outputs import CodegraphArtifacts, build_codegraph_artifacts
+from .database import CodegraphDatabase
+from .outputs import (
+    CodegraphArtifacts,
+    build_codegraph_artifacts,
+    build_database_artifacts,
+)
 from .storage import (
     CodegraphDeployment,
     MasterRegistry,
     database_size,
+    discover_project_deployment,
     write_manifest,
 )
 
@@ -248,6 +254,19 @@ class CodegraphClient:
             {"project": project, "traces": list(traces)},
         )
 
+    def load_artifacts(self, repo_root: str | Path) -> CodegraphArtifacts:
+        root = Path(repo_root).resolve()
+        deployment = discover_project_deployment(root)
+        if deployment is None:
+            raise FileNotFoundError(f"no codegraph deployment found for {root}")
+        with CodegraphDatabase(deployment.db_path) as database:
+            database.validate_schema()
+            return build_database_artifacts(
+                database,
+                deployment.project_name,
+                repo_root=str(root),
+            )
+
     def _record_local_deployment(
         self, repo_root: Path, native: dict[str, Any]
     ) -> None:
@@ -258,6 +277,9 @@ class CodegraphClient:
         db_path = Path(cache_dir) / f"{project}.db"
         if not db_path.is_file():
             return
+        with CodegraphDatabase(db_path) as database:
+            schema_fingerprint = database.validate_schema()
+            database_summary = database.summary(project)
         artifact = repo_root / ".codebase-memory" / "graph.db.zst"
         deployment = CodegraphDeployment(
             repo_root=repo_root,
@@ -265,8 +287,10 @@ class CodegraphClient:
             project_name=project,
             backend_kind="sidecar",
             backend_version=str(native.get("backend_version", "")),
+            schema_fingerprint=schema_fingerprint,
             artifact_path=artifact if artifact.is_file() else None,
             size_bytes=database_size(db_path),
+            file_count=int(database_summary["files"]),
             entity_count=int(native.get("nodes", 0)),
             edge_count=int(native.get("edges", 0)),
         )
