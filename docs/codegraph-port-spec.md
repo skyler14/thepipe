@@ -255,6 +255,78 @@ This preserves repo-local stores without leaking donor structs into Python.
 Future donor work should move cache resolution into `cbm_mcp_server_t`, which
 will remove the environment lock without changing the Python ABI.
 
+## Shared-Library Migration Readiness
+
+The sidecar is functional enough to remain the portability fallback. Migration
+to shared-library focus should not mean "delete sidecar"; it should mean "prefer
+shared library only where the process model is worth the tighter coupling."
+
+Insights gathered after real repo introspection:
+
+- Full JSON is not the LLM-facing product. On this repo, full graph JSON was
+  roughly 781k estimated tokens and old map JSON was roughly 1.31M estimated
+  tokens. Default agent behavior must prefer compact graph actions or old
+  `map -f text`, not full `-f json`.
+- Local package graph actions are fast enough for agent loops, roughly
+  1-35ms on this repo. CLI action calls are roughly 3.1-3.6s due Python/CLI
+  startup. Shared library mainly helps long-lived Python processes, not
+  one-shot CLI startup.
+- `neighbors` is still too verbose for a small graph action because node and
+  edge attributes are carried through. Before making graph actions default,
+  add compact action output that strips attributes unless
+  `codegraph_verbose=true`.
+- `codegraph_refresh` should probably default to false for read actions when a
+  deployment already exists. Reindexing is correct for `emit` and explicit
+  refresh, but surprising for `summary`, `entities`, `neighbors`, and `sql`.
+- Shared-library initialization can emit native logs. Sidecar isolates this
+  better. Before shared library becomes preferred, add a quiet native-log
+  default or explicit log sink.
+- Shared library removes process-spawn overhead but also removes crash
+  isolation. Any allocator, SQLite, parser, or C UB crash can take down the
+  Python process. Keep sidecar fallback and add stress tests before defaulting
+  shared library in agent runtimes.
+- The current context ABI is intentionally coarse JSON. Do not expose donor C
+  structs yet. The fastest safe win is keeping `tp_context_call` stable while
+  optimizing output shape and cache/context lifetime.
+- Donor cache selection remains partly process-global. The shim serializes
+  environment install/restore, but concurrent contexts still need stress tests
+  before a shared library backend is considered thread-safe for servers.
+- macOS shared-library build is proven. Linux/Windows still need PIC/linker,
+  allocator, symbol visibility, SQLite, and packaging CI.
+- Final prebuilt artifacts are the dependency boundary. Prebuilt grammar object
+  packs are likely more fragile than final `.dylib/.so/.dll` artifacts because
+  they become platform/compiler/ABI-specific.
+
+Extra evidence to gather before changing default preference from sidecar to
+shared library:
+
+1. Sidecar vs shared-library latency for repeated tool calls in the same Python
+   process: `summary`, `entities`, `neighbors`, `search_graph`, `query_graph`,
+   and `trace_path`.
+2. Shared-library repeated index/query/delete loop under one Python process to
+   detect allocator or SQLite lifetime bugs.
+3. Two-context test indexing two different repos with different cache dirs.
+4. Threaded call test, even if the policy remains "not thread-safe"; document
+   actual behavior.
+5. Native log suppression test.
+6. Artifact install test from release-like catalog, not just local paths.
+7. Linux x64 sidecar artifact, then Linux x64 shared library artifact.
+8. Windows sidecar artifact before Windows shared library.
+9. Compact output snapshots for graph actions and token budget checks.
+10. Incremental/no-op timing after no file changes, both sidecar and shared
+    library.
+
+Go/no-go for shared-library default in Python package contexts:
+
+- all 14 tool contracts pass on sidecar and shared library;
+- graph actions pass compact output snapshots;
+- no native logs leak by default;
+- repeated in-process calls are measurably faster than sidecar;
+- two-context cache isolation passes;
+- crash/stress loop survives repeated index/query/delete;
+- sidecar fallback stays available for unsupported platforms and crash
+  isolation.
+
 ## Grammar Strategy
 
 Comparator generated grammar C files are not runtime source. They are build
