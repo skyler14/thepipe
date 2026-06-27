@@ -26,6 +26,7 @@ git -C "$CHECKOUT" fetch --depth 1 origin "$UPSTREAM_COMMIT"
 git -C "$CHECKOUT" checkout -q FETCH_HEAD
 
 make -C "$CHECKOUT" -f Makefile.cbm "$UPSTREAM_BUILD_TARGET" \
+    CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$UPSTREAM_API_VERSION\\\"\"" \
     LIBGIT2_CFLAGS= LIBGIT2_LIBS=
 
 cp "$CHECKOUT/build/c/codebase-memory-mcp" "$STAGE/codebase-memory-mcp"
