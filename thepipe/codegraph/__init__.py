@@ -1,8 +1,10 @@
+from .client import CodegraphClient
 from .sidecar import (
     GRAMMAR_ARTIFACT_POLICY,
     UPSTREAM_REPO,
     SidecarBackend,
     SidecarError,
+    sidecar_from_env,
 )
 from .outputs import CodegraphArtifacts, build_codegraph_artifacts
 from .storage import (
@@ -16,6 +18,7 @@ from .storage import (
 
 __all__ = [
     "CodegraphArtifacts",
+    "CodegraphClient",
     "CodegraphDeployment",
     "GRAMMAR_ARTIFACT_POLICY",
     "PROJECT_DB_RELATIVE_PATH",
@@ -27,4 +30,5 @@ __all__ = [
     "master_registry_path",
     "project_db_path",
     "recommended_gitignore_entries",
+    "sidecar_from_env",
 ]

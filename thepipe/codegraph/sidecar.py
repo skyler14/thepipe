@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -53,3 +54,10 @@ def _first_text(envelope: dict[str, Any]) -> str:
         if item.get("type") == "text":
             return str(item.get("text", ""))
     return ""
+
+
+def sidecar_from_env(env: dict[str, str] | None = None) -> SidecarBackend | None:
+    value = (env or os.environ).get("THEPIPE_CODEGRAPH_BINARY")
+    if not value:
+        return None
+    return SidecarBackend(value)

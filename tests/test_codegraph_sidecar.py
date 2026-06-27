@@ -10,6 +10,7 @@ from thepipe.codegraph.sidecar import (
     UPSTREAM_REPO,
     SidecarBackend,
     SidecarError,
+    sidecar_from_env,
 )
 
 
@@ -59,3 +60,10 @@ def test_native_policy_keeps_raw_generated_grammars_out_of_the_python_repo() -> 
     assert "compiled" in GRAMMAR_ARTIFACT_POLICY
     assert "raw generated grammar" in GRAMMAR_ARTIFACT_POLICY
     assert UPSTREAM_REPO.startswith("https://")
+
+
+def test_sidecar_from_env_is_opt_in(tmp_path: Path) -> None:
+    binary = _fake_sidecar(tmp_path, "print(json.dumps({'content': []}))")
+
+    assert sidecar_from_env({}) is None
+    assert sidecar_from_env({"THEPIPE_CODEGRAPH_BINARY": str(binary)}).binary == binary
