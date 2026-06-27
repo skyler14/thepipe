@@ -124,6 +124,8 @@ def test_repo_cache_is_locally_git_ignored_without_touching_root_gitignore(
     ).stdout.strip()
     lines = (tmp_path / exclude).read_text(encoding="utf-8").splitlines()
     assert lines.count(".thepipe/codegraph/cache/") == 1
+    assert lines.count(".thepipe/codegraph/manifest.json") == 1
+    assert lines.count(".thepipe/codegraph/tmp/") == 1
     assert not (tmp_path / ".gitignore").exists()
 
 

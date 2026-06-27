@@ -341,6 +341,46 @@ def test_scrape_directory_can_query_detected_graph_entities(tmp_path: Path) -> N
     assert payload["result"][0]["qualified_name"].endswith(".app.main")
 
 
+def test_graph_action_payload_survives_json_projection(tmp_path: Path) -> None:
+    _project_database(tmp_path)
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_action": "summary",
+        },
+    )
+
+    payload = build_code_relations_json_payload(chunks, "graph", str(tmp_path))
+
+    assert payload["schema_version"] == "thepipe-codegraph-action/v1"
+    assert payload["action"] == "summary"
+    assert payload["result"]["nodes"] == 1
+
+
+def test_graph_files_action_respects_limit(tmp_path: Path) -> None:
+    project, _ = _project_database(tmp_path)
+    with sqlite3.connect(
+        tmp_path / ".thepipe" / "codegraph" / "cache" / f"{project}.db"
+    ) as connection:
+        connection.execute(
+            "INSERT INTO file_hashes VALUES (?, 'extra.py', 'def', 1, 20)",
+            (project,),
+        )
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_action": "files",
+            "codegraph_limit": 1,
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert len(payload["result"]) == 1
+
+
 def test_scrape_directory_can_run_read_only_graph_sql(tmp_path: Path) -> None:
     _project_database(tmp_path)
 

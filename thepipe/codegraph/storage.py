@@ -85,6 +85,7 @@ def master_registry_path(*, home: str | Path | None = None) -> Path:
 
 def recommended_gitignore_entries() -> list[str]:
     return [
+        ".thepipe/codegraph/manifest.json",
         ".thepipe/codegraph/cache/",
         ".thepipe/codegraph/*.sqlite*",
         ".thepipe/codegraph/*.db*",
@@ -110,13 +111,15 @@ def ensure_git_excluded(repo_root: str | Path) -> bool:
         exclude = root / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-    entry = ".thepipe/codegraph/cache/"
-    if entry in existing.splitlines():
+    lines = existing.splitlines()
+    entries = [entry for entry in recommended_gitignore_entries() if entry not in lines]
+    if not entries:
         return True
     with exclude.open("a", encoding="utf-8") as output:
         if existing and not existing.endswith("\n"):
             output.write("\n")
-        output.write(f"{entry}\n")
+        for entry in entries:
+            output.write(f"{entry}\n")
     return True
 
 

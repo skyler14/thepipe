@@ -88,7 +88,7 @@ def _run_graph_action(root: Path, options: dict[str, Any]) -> dict[str, Any]:
         if action == "summary":
             result: Any = graph.summary()
         elif action == "files":
-            result = graph.files()
+            result = graph.files()[: int(options.get("codegraph_limit", 200))]
         elif action == "entities":
             result = graph.find_entities(
                 query=options.get("codegraph_query"),
