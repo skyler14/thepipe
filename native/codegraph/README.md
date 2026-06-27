@@ -14,3 +14,13 @@ Run `scripts/codegraph/build-sidecar.sh`. It:
 5. removes the large temporary checkout unless `KEEP_BUILD=1`.
 
 The generated archive belongs in release storage, not git.
+
+Set `BUILD_SHARED=1` to also build the context-based ctypes library on macOS.
+The shared library reuses the donor MCP dispatcher through
+`tp_context_call`; it does not expose donor C structs. Each context carries a
+repo-local cache directory. Calls temporarily install that directory under a
+global lock because the pinned donor still resolves `CBM_CACHE_DIR`
+process-wide.
+
+Linux and Windows shared-library packaging remain gated. The sidecar is the
+portable fallback until PIC/linking and allocator tests pass on those targets.

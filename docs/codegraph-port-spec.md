@@ -163,24 +163,29 @@ Python wrapper rules:
 
 ## Shared Library Mode
 
-After sidecar contract stabilizes, build a shared library with same JSON
-contract:
+After sidecar contract stabilizes, build a shared library with the same JSON
+contract. The implemented ABI uses an explicit context because the donor cache
+directory is otherwise process-global:
 
 ```c
-int tp_index_repo(const char *repo, const char *db,
-                  const char *options_json, char **out_json);
-int tp_query_graph(const char *db,
-                   const char *request_json, char **out_json);
-int tp_emit_chunks(const char *db,
-                   const char *options_json, char **out_json);
+tp_context *tp_context_new(const char *cache_dir);
+int tp_context_call(tp_context *context, const char *tool,
+                    const char *request_json, char **out_json);
+void tp_context_free(tp_context *context);
 const char *tp_version(void);
-void tp_free(char *ptr);
+void tp_string_free(char *ptr);
 ```
 
 Python wrapper uses stdlib `ctypes`. Avoid CPython extension/Cython first:
 calls are coarse, ABI pain is not worth it.
 
 Keep sidecar fallback after shared library lands.
+
+The first shim serializes calls only while installing/restoring
+`CBM_CACHE_DIR`, then dispatches directly through `cbm_mcp_handle_tool`.
+This preserves repo-local stores without leaking donor structs into Python.
+Future donor work should move cache resolution into `cbm_mcp_server_t`, which
+will remove the environment lock without changing the Python ABI.
 
 ## Grammar Strategy
 
@@ -246,6 +251,11 @@ Retention order:
 4. Drop old run records.
 5. Vacuum if reclaim estimate exceeds 64 MB.
 6. Mark oversize instead of deleting graph core.
+
+The donor incremental pipeline is retained. It compares discovered files to
+persisted `file_hashes` using mtime and size, reparses only changed files, and
+returns through `incremental.noop` when there are no changes. Do not add a
+second Python content scanner unless measurement proves this insufficient.
 
 ## MCP Tool Surface To Support
 
@@ -884,4 +894,3 @@ Keep:
 - Should repo-local `.thepipe/codegraph.sqlite` be default, or comparator cache
   default with manifest pointer first?
 - Do we store snippets in our overlay DB, or always read source on demand?
-

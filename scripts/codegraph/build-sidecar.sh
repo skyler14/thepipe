@@ -38,3 +38,24 @@ tar -czf "$ARCHIVE" -C "$STAGE" codebase-memory-mcp
 shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
 
 printf 'Built %s\n' "$ARCHIVE"
+
+if [[ "${BUILD_SHARED:-0}" == "1" ]]; then
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        printf 'Shared-library packaging is currently verified only on Darwin.\n' >&2
+        exit 2
+    fi
+    LIBRARY="$STAGE/libthepipe_codegraph.dylib"
+    make -C "$CHECKOUT" \
+        -f Makefile.cbm \
+        -f "$ROOT/native/codegraph/Makefile.shared" \
+        tp-shared \
+        TP_SHIM="$ROOT/native/codegraph/tp_codegraph.c" \
+        TP_INCLUDE="$ROOT/native/codegraph" \
+        TP_VERSION="$UPSTREAM_API_VERSION" \
+        TP_SHARED_OUT="$LIBRARY" \
+        LIBGIT2_CFLAGS= LIBGIT2_LIBS=
+    SHARED_ARCHIVE="$DIST/libthepipe-codegraph-darwin-${ARCH}-${UPSTREAM_COMMIT:0:12}.tar.gz"
+    tar -czf "$SHARED_ARCHIVE" -C "$STAGE" libthepipe_codegraph.dylib
+    shasum -a 256 "$SHARED_ARCHIVE" > "$SHARED_ARCHIVE.sha256"
+    printf 'Built %s\n' "$SHARED_ARCHIVE"
+fi

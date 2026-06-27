@@ -9,16 +9,13 @@ import pytest
 from thepipe.codegraph import (
     CodegraphClient,
     MasterRegistry,
+    SharedLibraryBackend,
     SidecarBackend,
     project_cache_dir,
 )
 
 
-@pytest.mark.skipif(
-    not os.environ.get("THEPIPE_CODEGRAPH_E2E_BINARY"),
-    reason="set THEPIPE_CODEGRAPH_E2E_BINARY to run the real sidecar contract",
-)
-def test_real_sidecar_full_read_surface(tmp_path: Path) -> None:
+def _exercise_real_backend(tmp_path: Path, backend_kind: str) -> None:
     repo = tmp_path / "fixture"
     repo.mkdir()
     (repo / "app.py").write_text(
@@ -49,11 +46,17 @@ def test_real_sidecar_full_read_surface(tmp_path: Path) -> None:
         check=True,
     )
 
-    backend = SidecarBackend(
-        os.environ["THEPIPE_CODEGRAPH_E2E_BINARY"],
-        cache_dir=project_cache_dir(repo),
-        timeout=300,
-    )
+    if backend_kind == "sidecar":
+        backend = SidecarBackend(
+            os.environ["THEPIPE_CODEGRAPH_E2E_BINARY"],
+            cache_dir=project_cache_dir(repo),
+            timeout=300,
+        )
+    else:
+        backend = SharedLibraryBackend(
+            os.environ["THEPIPE_CODEGRAPH_E2E_LIBRARY"],
+            cache_dir=project_cache_dir(repo),
+        )
     client = CodegraphClient(
         backend,
         registry=MasterRegistry(tmp_path / "master.sqlite"),
@@ -84,3 +87,22 @@ def test_real_sidecar_full_read_surface(tmp_path: Path) -> None:
     assert len(artifacts.payload["entities"]) == indexed["nodes"]
     assert len(artifacts.payload["edges"]) == indexed["edges"]
     assert len(artifacts.chunks) == 2
+    close = getattr(backend, "close", None)
+    if close:
+        close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("THEPIPE_CODEGRAPH_E2E_BINARY"),
+    reason="set THEPIPE_CODEGRAPH_E2E_BINARY to run the real sidecar contract",
+)
+def test_real_sidecar_full_read_surface(tmp_path: Path) -> None:
+    _exercise_real_backend(tmp_path, "sidecar")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("THEPIPE_CODEGRAPH_E2E_LIBRARY"),
+    reason="set THEPIPE_CODEGRAPH_E2E_LIBRARY to run the real shared library contract",
+)
+def test_real_shared_library_full_read_surface(tmp_path: Path) -> None:
+    _exercise_real_backend(tmp_path, "shared")

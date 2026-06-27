@@ -15,6 +15,7 @@ from .sidecar import (
     SidecarError,
     sidecar_from_env,
 )
+from .sharedlib import SharedLibraryBackend, SharedLibraryError
 from .outputs import (
     CodegraphArtifacts,
     build_codegraph_artifacts,
@@ -55,6 +56,8 @@ __all__ = [
     "UPSTREAM_REPO",
     "SidecarBackend",
     "SidecarError",
+    "SharedLibraryBackend",
+    "SharedLibraryError",
     "ArtifactError",
     "MasterRegistry",
     "NodeRecord",
