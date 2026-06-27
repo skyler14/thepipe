@@ -43,6 +43,8 @@ Measured on arm64 macOS at pinned commit
 - standard executable: 257 MB;
 - gzip release archive: 36 MB;
 - shared library: 257 MB;
+- fresh `scripts/codegraph/build-shared-library.sh` output on June 27, 2026:
+  37 MB sidecar archive and 36 MB shared-library archive under `/private/tmp`;
 - two-file fixture graph: 1.69 MB, 8 nodes, 11 edges.
 
 The grammar checkout and object files are build-only. Installed users need the
