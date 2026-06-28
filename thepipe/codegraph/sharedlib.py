@@ -21,6 +21,7 @@ class SharedLibraryBackend:
         *,
         cache_dir: str | Path,
         library: Any | None = None,
+        quiet: bool = True,
     ) -> None:
         if library is None:
             if path is None:
@@ -31,12 +32,14 @@ class SharedLibraryBackend:
                 raise SharedLibraryError(f"could not load codegraph library: {exc}") from exc
         self.library = library
         self.cache_dir = Path(cache_dir)
+        self.quiet = quiet
         self._configure_abi()
         self._context = self.library.tp_context_new(
             str(self.cache_dir).encode("utf-8")
         )
         if not self._context:
             raise SharedLibraryError("codegraph library could not create a context")
+        self._set_quiet(self.quiet)
 
     def _configure_abi(self) -> None:
         try:
@@ -57,6 +60,27 @@ class SharedLibraryBackend:
             self.library.tp_string_free.restype = None
         except AttributeError as exc:
             raise SharedLibraryError(f"codegraph library is missing ABI symbol: {exc}") from exc
+        self._tp_context_set_quiet = getattr(
+            self.library,
+            "tp_context_set_quiet",
+            None,
+        )
+        if self._tp_context_set_quiet is not None:
+            self._tp_context_set_quiet.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            self._tp_context_set_quiet.restype = ctypes.c_int
+        self._tp_abi_version = getattr(self.library, "tp_abi_version", None)
+        if self._tp_abi_version is not None:
+            self._tp_abi_version.argtypes = []
+            self._tp_abi_version.restype = ctypes.c_char_p
+
+    def _set_quiet(self, quiet: bool) -> None:
+        if self._tp_context_set_quiet is None:
+            return
+        status = self._tp_context_set_quiet(self._context, 1 if quiet else 0)
+        if status:
+            raise SharedLibraryError(
+                f"codegraph library rejected quiet setting with status {status}"
+            )
 
     def call(self, tool: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         request = json.dumps(
@@ -101,6 +125,14 @@ class SharedLibraryBackend:
         raw = self.library.tp_version()
         if not raw:
             raise SharedLibraryError("codegraph library returned an empty version")
+        return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+    def abi_version(self) -> str | None:
+        if self._tp_abi_version is None:
+            return None
+        raw = self._tp_abi_version()
+        if not raw:
+            return None
         return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
 
     def close(self) -> None:

@@ -3,6 +3,7 @@
 #include "cbm.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
+#include "foundation/log.h"
 #include "foundation/mem.h"
 #include "foundation/platform.h"
 #include "mcp/mcp.h"
@@ -16,9 +17,12 @@
 #define TP_CODEGRAPH_VERSION "dev"
 #endif
 
+#define TP_CODEGRAPH_ABI_VERSION "thepipe-codegraph/1"
+
 struct tp_context {
     char *cache_dir;
     cbm_mcp_server_t *server;
+    bool quiet;
 };
 
 static atomic_int g_init_state;
@@ -36,6 +40,7 @@ static char *tp_strdup(const char *value) {
 static void tp_initialize(void) {
     int expected = 0;
     if (atomic_compare_exchange_strong(&g_init_state, &expected, 1)) {
+        cbm_log_set_level(CBM_LOG_NONE);
         cbm_alloc_init();
         cbm_mem_init(0.5);
         cbm_mutex_init(&g_environment_lock);
@@ -57,11 +62,24 @@ tp_context *tp_context_new(const char *cache_dir) {
     }
     context->cache_dir = tp_strdup(cache_dir);
     context->server = cbm_mcp_server_new(NULL);
+    context->quiet = true;
     if (!context->cache_dir || !context->server) {
         tp_context_free(context);
         return NULL;
     }
     return context;
+}
+
+const char *tp_abi_version(void) {
+    return TP_CODEGRAPH_ABI_VERSION;
+}
+
+int tp_context_set_quiet(tp_context *context, int quiet) {
+    if (!context) {
+        return 1;
+    }
+    context->quiet = quiet != 0;
+    return 0;
 }
 
 int tp_context_call(tp_context *context, const char *tool,
@@ -71,8 +89,14 @@ int tp_context_call(tp_context *context, const char *tool,
     }
     *out_json = NULL;
     char previous[4096] = "";
+    CBMLogLevel previous_log_level = cbm_log_get_level();
 
     cbm_mutex_lock(&g_environment_lock);
+    if (context->quiet) {
+        cbm_log_set_level(CBM_LOG_NONE);
+    } else {
+        cbm_log_set_level(CBM_LOG_INFO);
+    }
     bool had_previous =
         cbm_safe_getenv("CBM_CACHE_DIR", previous, sizeof(previous), NULL) != NULL;
     int environment_status = cbm_setenv("CBM_CACHE_DIR", context->cache_dir, 1);
@@ -84,6 +108,7 @@ int tp_context_call(tp_context *context, const char *tool,
     } else {
         (void)cbm_unsetenv("CBM_CACHE_DIR");
     }
+    cbm_log_set_level(previous_log_level);
     cbm_mutex_unlock(&g_environment_lock);
 
     if (environment_status != 0) {

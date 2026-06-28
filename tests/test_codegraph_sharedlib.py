@@ -19,13 +19,20 @@ class FakeFunction:
 
 
 class FakeLibrary:
-    def __init__(self, *, status: int = 0, response: object = None) -> None:
+    def __init__(
+        self,
+        *,
+        status: int = 0,
+        response: object = None,
+        optional_symbols: bool = True,
+    ) -> None:
         self.status = status
         self.response = response if response is not None else {"ok": True}
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.call_contexts: list[int] = []
         self.freed: list[int] = []
         self.closed: list[int] = []
+        self.quiet_settings: list[tuple[int, int]] = []
         self.cache_dirs: list[str] = []
         self.next_context = 1234
         self._buffers: list[ctypes.Array] = []
@@ -34,6 +41,9 @@ class FakeLibrary:
         self.tp_context_free = FakeFunction(self._close)
         self.tp_version = FakeFunction(lambda: b"0.10.0")
         self.tp_string_free = FakeFunction(self._free)
+        if optional_symbols:
+            self.tp_abi_version = FakeFunction(lambda: b"thepipe-codegraph/1")
+            self.tp_context_set_quiet = FakeFunction(self._set_quiet)
 
     def _new(self, cache_dir):
         self.cache_dirs.append(ctypes.string_at(cache_dir).decode())
@@ -65,6 +75,10 @@ class FakeLibrary:
     def _free(self, pointer) -> None:
         self.freed.append(pointer.value if hasattr(pointer, "value") else int(pointer))
 
+    def _set_quiet(self, context, quiet) -> int:
+        self.quiet_settings.append((context, quiet))
+        return 0
+
 
 def test_shared_library_uses_same_backend_contract_and_frees_output() -> None:
     library = FakeLibrary(response={"results": [{"name": "main"}]})
@@ -79,6 +93,8 @@ def test_shared_library_uses_same_backend_contract_and_frees_output() -> None:
     assert len(library.freed) == 1
     assert library.cache_dirs == ["/repo/cache"]
     assert backend.version() == "0.10.0"
+    assert backend.abi_version() == "thepipe-codegraph/1"
+    assert library.quiet_settings == [(1234, 1)]
     backend.close()
     assert library.closed == [1234]
 
@@ -161,3 +177,23 @@ def test_shared_library_rejects_calls_after_close() -> None:
 
     with pytest.raises(SharedLibraryError, match="closed"):
         backend.call("list_projects", {})
+
+
+def test_shared_library_can_disable_quiet_mode() -> None:
+    library = FakeLibrary(response={"ok": True})
+    backend = SharedLibraryBackend(
+        cache_dir="/repo/cache",
+        library=library,
+        quiet=False,
+    )
+
+    assert library.quiet_settings == [(1234, 0)]
+    backend.close()
+
+
+def test_shared_library_accepts_older_library_without_optional_symbols() -> None:
+    library = FakeLibrary(response={"ok": True}, optional_symbols=False)
+    backend = SharedLibraryBackend(cache_dir="/repo/cache", library=library)
+
+    assert backend.abi_version() is None
+    assert backend.call("list_projects", {}) == {"ok": True}

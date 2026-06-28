@@ -14,6 +14,8 @@ extern "C" {
 typedef struct tp_context tp_context;
 
 TP_EXPORT tp_context *tp_context_new(const char *cache_dir);
+TP_EXPORT const char *tp_abi_version(void);
+TP_EXPORT int tp_context_set_quiet(tp_context *context, int quiet);
 TP_EXPORT int tp_context_call(tp_context *context, const char *tool,
                               const char *request_json, char **out_json);
 TP_EXPORT void tp_context_free(tp_context *context);

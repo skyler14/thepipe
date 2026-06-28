@@ -24,6 +24,22 @@ carries a repo-local cache directory. Calls temporarily install that directory
 under a global lock because the pinned donor still resolves `CBM_CACHE_DIR`
 process-wide.
 
+Shared-library ABI v1 exports only stable coarse-grained functions:
+
+- `tp_context_new(cache_dir)` / `tp_context_free(context)`;
+- `tp_context_call(context, tool, request_json, out_json)`;
+- `tp_context_set_quiet(context, quiet)`;
+- `tp_version()` for the pinned donor version;
+- `tp_abi_version()` for the thepipe wrapper contract.
+
+The wrapper is quiet by default before donor initialization, so in-process use
+does not leak structured logs into the host Python process. `quiet=False`
+re-enables donor INFO logs around individual calls for diagnostics.
+
+The Darwin ARM64 build currently produces a roughly 257 MB dylib, packaged as a
+roughly 37 MB archive. That archive is the intended install unit. The large
+generated grammar sources remain fallback build material, not runtime payload.
+
 Runtime installation supports either compiled artifact:
 
 - sidecar archive: `codegraph_archive` + `codegraph_sha256`;
