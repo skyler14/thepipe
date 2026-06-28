@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).parents[1]
 DIST_CODEGRAPH = REPO_ROOT / "dist" / "codegraph"
 LOCAL_SIDECAR = Path("/private/tmp/thepipe-codegraph-e2e-bin/codebase-memory-mcp")
 LOCAL_LIBRARY = Path("/private/tmp/thepipe-codegraph-e2e-lib/libthepipe_codegraph.dylib")
+LANGUAGE_FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
 
 @dataclass(frozen=True)
@@ -119,12 +120,57 @@ FIXTURES = [
     ),
 ]
 
+LANGUAGE_FIXTURE_FILES = [
+    "test.R",
+    "test.cs",
+    "test.dart",
+    "test.ex",
+    "test.hs",
+    "test.java",
+    "test.kt",
+    "test.lua",
+    "test.m",
+    "test.php",
+    "test.pl",
+    "test.rb",
+    "test.scala",
+    "test.swift",
+    "test_webapp.html",
+    "test_webapp.php",
+]
+OLD_CODE_RELATIONS_UNSUPPORTED_FIXTURES = {
+    "test.cs": "old tree-sitter-language-pack lacks c_sharp parser in this env",
+    "test.m": "old tree-sitter-language-pack lacks objective_c parser in this env",
+}
+
 
 def _write_fixture(root: Path, fixture: CodeFixture) -> None:
     for relative, content in fixture.files.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=thepipe",
+            "-c",
+            "user.email=tests@thepipe.local",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=root,
+        check=True,
+    )
+
+
+def _write_language_fixture(root: Path, filename: str) -> None:
+    source = LANGUAGE_FIXTURE_DIR / filename
+    target = root / filename
+    target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(
@@ -320,3 +366,62 @@ def test_sidecar_and_shared_library_emit_equivalent_codegraph_contract(
     assert _file_paths(sidecar_payload) == _file_paths(shared_payload)
     assert _symbol_names(sidecar_payload) == _symbol_names(shared_payload)
     assert len(_call_edges(shared_payload)) >= len(_call_edges(sidecar_payload))
+
+
+@pytest.mark.parametrize("filename", LANGUAGE_FIXTURE_FILES)
+def test_original_language_fixture_code_relations_baseline(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_language_fixture(repo, filename)
+
+    payload = _original_payload(repo)
+
+    assert payload["schema_version"] == "code-relations/v1"
+    if filename in OLD_CODE_RELATIONS_UNSUPPORTED_FIXTURES and not _file_paths(payload):
+        pytest.xfail(OLD_CODE_RELATIONS_UNSUPPORTED_FIXTURES[filename])
+    assert filename in _file_paths(payload)
+
+
+@pytest.mark.parametrize("filename", LANGUAGE_FIXTURE_FILES)
+@pytest.mark.parametrize("implementation", ["sidecar", "shared-library"])
+def test_codegraph_backends_ingest_old_language_fixture_files(
+    tmp_path: Path,
+    filename: str,
+    implementation: str,
+) -> None:
+    artifact = _artifact_path(implementation, tmp_path)
+    if artifact is None:
+        pytest.skip(f"{implementation} artifact is not available")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_language_fixture(repo, filename)
+    native = _codegraph_payload(repo, implementation, artifact)
+
+    assert native["schema_version"] == "code-relations/v2"
+    assert filename in _file_paths(native)
+    assert len(native.get("files", [])) >= 1
+    assert "graph" in native
+
+
+@pytest.mark.parametrize("filename", LANGUAGE_FIXTURE_FILES)
+def test_sidecar_and_shared_library_agree_on_old_language_fixture_files(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    sidecar = _artifact_path("sidecar", tmp_path)
+    shared = _artifact_path("shared-library", tmp_path)
+    if sidecar is None or shared is None:
+        pytest.skip("both sidecar and shared-library artifacts are required")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_language_fixture(repo, filename)
+    sidecar_payload = _codegraph_payload(repo, "sidecar", sidecar)
+    shared_payload = _codegraph_payload(repo, "shared-library", shared)
+
+    assert _file_paths(sidecar_payload) == _file_paths(shared_payload)
+    assert len(shared_payload.get("entities", [])) == len(sidecar_payload.get("entities", []))

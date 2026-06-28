@@ -129,6 +129,34 @@ def test_repo_cache_is_locally_git_ignored_without_touching_root_gitignore(
     assert not (tmp_path / ".gitignore").exists()
 
 
+def test_gitignored_project_deployment_is_still_discoverable(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    db = project_db_path(tmp_path)
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"SQLite format 3\0")
+    deployment = CodegraphDeployment(
+        repo_root=tmp_path,
+        db_path=db,
+        project_name="demo",
+        backend_kind="shared-library",
+        backend_version="0.10.0",
+    )
+
+    assert ensure_git_excluded(tmp_path)
+    write_manifest(deployment)
+
+    assert discover_project_deployment(tmp_path) == deployment
+    status = subprocess.run(
+        ["git", "status", "--short", "--ignored"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "!! .thepipe/" in status
+    assert read_manifest(tmp_path) == deployment
+
+
 def test_database_size_includes_wal_and_shm(tmp_path: Path) -> None:
     db = tmp_path / "demo.db"
     db.write_bytes(b"x" * 10)
