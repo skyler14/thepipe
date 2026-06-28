@@ -339,6 +339,103 @@ def test_scrape_directory_can_query_detected_graph_entities(tmp_path: Path) -> N
     assert chunks[0].meta["action"] == "entities"
     assert payload["schema_version"] == "thepipe-codegraph-action/v1"
     assert payload["result"][0]["qualified_name"].endswith(".app.main")
+    assert "attributes" not in payload["result"][0]
+
+
+def test_graph_actions_can_return_verbose_attributes(tmp_path: Path) -> None:
+    _project_database(tmp_path)
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_action": "entities",
+            "codegraph_query": "main",
+            "codegraph_verbose": True,
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload["result"][0]["attributes"] == {"signature": "def main()"}
+
+
+def test_graph_read_action_uses_existing_deployment_without_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _project_database(tmp_path)
+    calls = {}
+
+    class FakeBackend:
+        kind = "sidecar"
+
+        def call(self, tool, payload):
+            raise AssertionError(f"unexpected backend call: {tool}")
+
+        def close(self):
+            calls["closed"] = True
+
+    class FakeClient:
+        def __init__(self, backend, *, registry, git_exclude):
+            pass
+
+        def index_repository(self, root, *, mode, persistence):
+            calls["indexed"] = True
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SidecarBackend", lambda *a, **k: FakeBackend())
+    monkeypatch.setattr(integration, "CodegraphClient", FakeClient)
+
+    chunks = process_codegraph(
+        tmp_path,
+        options={
+            "codegraph_binary": "/tmp/native",
+            "codegraph_action": "summary",
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload["action"] == "summary"
+    assert "indexed" not in calls
+    assert calls["closed"] is True
+
+
+def test_graph_read_action_refreshes_when_no_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {}
+
+    class FakeBackend:
+        kind = "sidecar"
+
+        def close(self):
+            calls["closed"] = True
+
+    class FakeClient:
+        def __init__(self, backend, *, registry, git_exclude):
+            pass
+
+        def index_repository(self, root, *, mode, persistence):
+            calls["indexed"] = True
+            _project_database(root)
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SidecarBackend", lambda *a, **k: FakeBackend())
+    monkeypatch.setattr(integration, "CodegraphClient", FakeClient)
+
+    chunks = process_codegraph(
+        tmp_path,
+        options={
+            "codegraph_binary": "/tmp/native",
+            "codegraph_action": "summary",
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload["result"]["nodes"] == 1
+    assert calls["indexed"] is True
+    assert calls["closed"] is True
 
 
 def test_graph_action_payload_survives_json_projection(tmp_path: Path) -> None:

@@ -43,7 +43,7 @@ def process_codegraph(
                 registry=registry,
                 git_exclude=bool(options.get("codegraph_git_exclude", True)),
             )
-            if options.get("codegraph_refresh", True):
+            if _should_refresh(root, options):
                 client.index_repository(
                     root,
                     mode=str(options.get("codegraph_index_mode", "fast")),
@@ -66,6 +66,14 @@ def process_codegraph(
 
 def _action(options: dict[str, Any]) -> str:
     return str(options.get("codegraph_action", "emit"))
+
+
+def _should_refresh(root: Path, options: dict[str, Any]) -> bool:
+    if "codegraph_refresh" in options:
+        return bool(options["codegraph_refresh"])
+    if _action(options) == "emit":
+        return True
+    return discover_project_deployment(root) is None
 
 
 def _action_chunk(root: Path, options: dict[str, Any]) -> Chunk:
@@ -126,6 +134,8 @@ def _run_graph_action(root: Path, options: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             raise RuntimeError(f"unsupported codegraph_action: {action}")
+    if _compact_actions(options):
+        result = _compact_result(result)
     return {
         "schema_version": "thepipe-codegraph-action/v1",
         "source": "codegraph-sqlite",
@@ -134,6 +144,26 @@ def _run_graph_action(root: Path, options: dict[str, Any]) -> dict[str, Any]:
         "action": action,
         "result": result,
     }
+
+
+def _compact_actions(options: dict[str, Any]) -> bool:
+    if "codegraph_verbose" in options:
+        return not bool(options["codegraph_verbose"])
+    if "codegraph_compact" in options:
+        return bool(options["codegraph_compact"])
+    return True
+
+
+def _compact_result(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_compact_result(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _compact_result(item)
+            for key, item in value.items()
+            if key != "attributes"
+        }
+    return value
 
 
 def _backend_from_options(

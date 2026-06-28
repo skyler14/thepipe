@@ -178,11 +178,12 @@ Tests added:
 
 ### Still Open
 
-1. `neighbors` is too verbose for a "small" action.
+1. `neighbors` was too verbose for a "small" action.
 
-   Limit 10 still emitted 17,690 package bytes / 24,612 CLI bytes because each
-   node carries full attributes. Ponytail fix: add `codegraph_compact=true`
-   default for action results that strips attributes unless explicitly asked.
+   Limit 10 emitted 17,690 package bytes because each node carried full
+   attributes. Fixed after this report: compact graph action output now strips
+   attributes by default unless `codegraph_verbose=true`. The same neighbor
+   query measured 4,436 bytes after compacting.
 
 2. CLI action latency is high for tiny reads.
 
@@ -190,12 +191,11 @@ Tests added:
    nothing until this hurts agent loops; then add a small persistent server path
    or use package API from the agent runtime.
 
-3. `codegraph_refresh` defaults to true even for action calls when a backend is
+3. `codegraph_refresh` used to default to true even for action calls when a backend is
    supplied.
 
-   That is surprising for `summary`/`entities`/`sql`. Ponytail fix: if
-   `codegraph_action != "emit"` and a deployment exists, default refresh to
-   false unless explicitly set true.
+   Fixed after this report: if `codegraph_action != "emit"` and a deployment
+   exists, default refresh is false unless explicitly set true.
 
 4. Shared-library context initialization logs to stderr/stdout.
 
@@ -217,15 +217,15 @@ Tests added:
 
 ## Easy Victories To Consider
 
-1. Add compact graph action output.
+1. Keep compact graph action output as the default.
 
-   Cheapest version: strip `attributes` from `entities`, `edges`, and
-   `neighbors` unless `codegraph_verbose=true`.
+   Attributes are now stripped unless `codegraph_verbose=true`. Next cheap win
+   is snapshotting compact output shape before skill rollout.
 
-2. Change action refresh default.
+2. Keep action refresh policy explicit.
 
    If a graph DB exists and the user asked for an action, read it. Reindex only
-   when `codegraph_refresh=true`.
+   when `codegraph_refresh=true` or no deployment exists.
 
 3. Quiet shared-library init logs.
 

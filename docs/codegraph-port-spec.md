@@ -274,13 +274,14 @@ Insights gathered after real repo introspection:
   1-35ms on this repo. CLI action calls are roughly 3.1-3.6s due Python/CLI
   startup. Shared library mainly helps long-lived Python processes, not
   one-shot CLI startup.
-- `neighbors` is still too verbose for a small graph action because node and
-  edge attributes are carried through. Before making graph actions default,
-  add compact action output that strips attributes unless
-  `codegraph_verbose=true`.
-- `codegraph_refresh` should probably default to false for read actions when a
-  deployment already exists. Reindexing is correct for `emit` and explicit
-  refresh, but surprising for `summary`, `entities`, `neighbors`, and `sql`.
+- `neighbors` was too verbose for a small graph action because node and edge
+  attributes were carried through. Compact graph action output now strips
+  attributes unless `codegraph_verbose=true`; keep snapshotting this before
+  skill rollout.
+- `codegraph_refresh` defaults to false for read actions when a deployment
+  already exists. Reindexing remains correct for `emit`, explicit refresh, and
+  missing deployments, but read actions should not pay the freshness tax by
+  default.
   Freshness can be a separate periodic/optional policy: read actions should read
   the existing DB by default, while agents or callers can request refresh when
   the repo changed, the DB is stale by age/head, or the user asks for current
@@ -319,7 +320,7 @@ shared library:
 6. Artifact install test from release-like catalog, not just local paths.
 7. Linux x64 sidecar artifact, then Linux x64 shared library artifact.
 8. Windows sidecar artifact before Windows shared library.
-9. Compact output snapshots for graph actions and token budget checks.
+9. More compact output snapshots for graph actions and token budget checks.
 10. Incremental/no-op timing after no file changes, both sidecar and shared
     library.
 

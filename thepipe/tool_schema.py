@@ -204,7 +204,7 @@ TOOLS = [
                         },
                         "codegraph_refresh": {
                             "type": "boolean",
-                            "description": "Whether graph mode should refresh the native index when a backend is supplied (default: true)"
+                            "description": "Whether graph mode should refresh the native index when a backend is supplied; defaults true for emit and false for read actions with an existing deployment"
                         },
                         "codegraph_git_exclude": {
                             "type": "boolean",
@@ -264,6 +264,14 @@ TOOLS = [
                         "codegraph_limit": {
                             "type": "integer",
                             "description": "Maximum rows/entities/edges returned by graph actions"
+                        },
+                        "codegraph_compact": {
+                            "type": "boolean",
+                            "description": "Strip bulky graph attributes from action output (default: true)"
+                        },
+                        "codegraph_verbose": {
+                            "type": "boolean",
+                            "description": "Include full graph action attributes; overrides compact output"
                         }
                     }
                 }
