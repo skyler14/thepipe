@@ -188,8 +188,9 @@ def _backend_from_options(
         "THEPIPE_CODEGRAPH_SHA256"
     )
     cache_dir = project_cache_dir(root)
+    quiet = bool(options.get("codegraph_quiet", True))
     if library:
-        return SharedLibraryBackend(library, cache_dir=cache_dir)
+        return SharedLibraryBackend(library, cache_dir=cache_dir, quiet=quiet)
     if library_archive:
         if not library_sha256:
             raise RuntimeError(
@@ -208,7 +209,7 @@ def _backend_from_options(
             or os.environ.get("THEPIPE_CODEGRAPH_INSTALL_DIR"),
             library_name=options.get("codegraph_library_name"),
         )
-        backend = SharedLibraryBackend(installed, cache_dir=cache_dir)
+        backend = SharedLibraryBackend(installed, cache_dir=cache_dir, quiet=quiet)
         actual_version = backend.version()
         if actual_version != required_version:
             backend.close()

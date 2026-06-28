@@ -107,6 +107,62 @@ def test_graph_mode_library_archive_requires_checksum(tmp_path: Path) -> None:
         )
 
 
+def test_graph_mode_uses_explicit_shared_library_with_quiet_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {}
+
+    class FakeSharedLibraryBackend:
+        kind = "shared-library"
+
+        def __init__(self, path, *, cache_dir, quiet=True):
+            calls["backend"] = {
+                "path": path,
+                "cache_dir": cache_dir,
+                "quiet": quiet,
+            }
+
+        def close(self):
+            calls["closed"] = True
+
+    class FakeClient:
+        def __init__(self, backend, *, registry, git_exclude):
+            pass
+
+        def index_repository(self, root, *, mode, persistence):
+            calls["index"] = {"mode": mode, "persistence": persistence}
+            _project_database(root)
+
+        def load_artifacts(self, root):
+            from thepipe.codegraph.outputs import CodegraphArtifacts
+
+            chunks = process_codegraph(root, options={})
+            return CodegraphArtifacts(
+                payload=chunks[0].meta["code_relations_payload"],
+                digest="graph digest",
+                chunks=chunks[1:],
+            )
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
+    monkeypatch.setattr(integration, "CodegraphClient", FakeClient)
+
+    chunks = process_codegraph(
+        tmp_path,
+        options={
+            "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
+            "codegraph_quiet": False,
+        },
+    )
+
+    assert chunks[0].meta["schema_version"] == "code-relations/v2"
+    assert calls["backend"]["path"] == "/tmp/libthepipe_codegraph.dylib"
+    assert calls["backend"]["quiet"] is False
+    assert calls["index"]["mode"] == "fast"
+    assert calls["closed"] is True
+
+
 def test_graph_mode_installs_verified_sidecar_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,8 +271,12 @@ def test_graph_mode_installs_verified_shared_library_archive(
     class FakeSharedLibraryBackend:
         kind = "shared-library"
 
-        def __init__(self, path, *, cache_dir):
-            calls["backend"] = {"path": path, "cache_dir": cache_dir}
+        def __init__(self, path, *, cache_dir, quiet=True):
+            calls["backend"] = {
+                "path": path,
+                "cache_dir": cache_dir,
+                "quiet": quiet,
+            }
 
         def version(self):
             return "0.10.0"
@@ -262,6 +322,7 @@ def test_graph_mode_installs_verified_shared_library_archive(
             "codegraph_library_name": "libthepipe_codegraph.dylib",
             "codegraph_required_version": "0.10.0",
             "codegraph_install_dir": str(tmp_path / "lib"),
+            "codegraph_quiet": False,
         },
     )
 
@@ -271,6 +332,7 @@ def test_graph_mode_installs_verified_shared_library_archive(
     assert calls["backend"]["path"] == (
         tmp_path / "lib" / "libthepipe_codegraph-0.10.0.dylib"
     )
+    assert calls["backend"]["quiet"] is False
     assert calls["index"]["mode"] == "fast"
     assert calls["closed"] is True
 
@@ -282,7 +344,7 @@ def test_graph_mode_rejects_wrong_shared_library_archive_version(
         return tmp_path / "lib" / "libthepipe_codegraph-0.10.0.dylib"
 
     class FakeSharedLibraryBackend:
-        def __init__(self, path, *, cache_dir):
+        def __init__(self, path, *, cache_dir, quiet=True):
             self.closed = False
 
         def version(self):
