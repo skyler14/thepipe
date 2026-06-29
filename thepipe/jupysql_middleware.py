@@ -40,6 +40,9 @@ class Database:
         """
         global JUPYSQL_AVAILABLE
         if not JUPYSQL_AVAILABLE:
+            # TODO(database-hardening): remove runtime package installation.
+            # Raise install guidance and declare JupySQL through an optional extra;
+            # library execution must never mutate the caller's environment.
             # Attempt to install JupySQL if not available
             try:
                 import subprocess
@@ -139,6 +142,10 @@ class Database:
         pandas.DataFrame
             The result set as a DataFrame
         """
+        # TODO(database-hardening): pass params through driver-native execution.
+        # Current _bind_params path does not deliver SQLAlchemy bind values and
+        # `SELECT :value` fails despite a supplied {"value": ...} mapping.
+        # Never repair this through string interpolation.
         # Handle query parameters if provided
         if params:
             sql = self._bind_params(sql, params)
@@ -181,6 +188,8 @@ class Database:
         Bind parameters to the SQL query using JupySQL's approach
         If named_parameters is disabled, manually replaces placeholders
         """
+        # TODO(database-hardening): replace namespace mutation/manual replacement
+        # with one tested adapter contract for named and positional parameters.
         if not self.config.named_parameters:
             # Simple parameter binding
             for key, value in params.items():

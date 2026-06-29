@@ -94,6 +94,9 @@ class DatabaseManager:
                 return "csv"
             elif lower_source.endswith((".xlsx", ".xls")):
                 return "excel"
+            # TODO(database-hardening): `.db` is ambiguous and `.sqlite` file
+            # paths are not recognized. Add deterministic sniffing/override
+            # policy instead of treating every `.db` file as DuckDB.
             elif lower_source.endswith(".duckdb") or lower_source.endswith(".db"):
                 return "duckdb"
             elif os.path.isdir(source):
@@ -367,6 +370,8 @@ class DatabaseManager:
             
             if self.verbose:
                 print(f"[thepipe] Connecting to {self.db_type} database")
+                # TODO(database-hardening): redact URL userinfo and sensitive
+                # query parameters before logging connection information.
                 print(f"[thepipe] Connection info: {self.connection_info if isinstance(self.connection_info, str) else 'dict'}")
             
             # DuckDB-backed file-like sources
@@ -420,6 +425,8 @@ class DatabaseManager:
                     connection_str = connection_str.replace("mssql://", "mssql+pyodbc://", 1)
                 
                 if self.verbose:
+                    # TODO(database-hardening): log only a redacted URL. This
+                    # connection string can contain a plaintext password.
                     print(f"[thepipe] Connecting to database with connection string: {connection_str}")
                     
                 self.db = Database(connection_str, config_dict=config_dict)
@@ -787,6 +794,10 @@ class DatabaseManager:
             if view_name:
                 schema_text = get_schema_for_all_tables(self.db, tables, self.verbose)
 
+            # TODO(database-hardening): direct SQL must not trigger EDA by
+            # default. This currently adds many schema/full-table scans and
+            # profiles the first table even when the query targets another.
+            # Gate behind an explicit profile option and reuse one snapshot.
             # Always run auto-analysis with detailed output
             analysis_text = ""
             if view_name:
@@ -950,6 +961,10 @@ class DatabaseManager:
         Returns:
             List of Chunk objects with query results and insights
         """
+        # TODO(database-hardening): enforce read-only execution here before any
+        # LLM-produced SQL reaches self.db.query. Reject mutation/DDL and multiple
+        # statements, use read-only transactions/connections, and honor debug
+        # mode for iterative runs. Prompt instructions are not a security control.
         # Setup - use unified LLMClient
         from .llm import LLMClient
         
@@ -1218,6 +1233,8 @@ class DatabaseManager:
         # Get schema for all tables
         schema_text = get_schema_for_all_tables(self.db, tables, self.verbose)
         
+        # TODO(database-hardening): share the structured snapshot/profile built
+        # by the caller. This duplicates execute_query's EDA and Markdown builder.
         # Always run auto-analysis with detailed output
         analysis_text = ""
         if view_name:
@@ -1317,6 +1334,9 @@ class DatabaseManager:
             return chunks
         
         # Check if using iterative mode
+        # TODO(database-hardening): debug_mode currently becomes ineffective
+        # when iterative=True because execution is delegated before the debug
+        # branch below. Propagate debug intent or short-circuit first.
         if iterative:
             # Pass the combined schema and analysis text to the iterative analysis
             return self.execute_iterative_analysis(
@@ -1552,12 +1572,17 @@ def process_database(
     
     if verbose:
         print(f"[thepipe] Starting database processing")
+        # TODO(database-hardening): redact connection secrets before logging.
         print(f"[thepipe] Connection info: {connection_info if isinstance(connection_info, str) else 'dict'}")
         print(f"[thepipe] Query: {query}")
         print(f"[thepipe] Database type: {db_type}")
         print(f"[thepipe] Mode: {mode}")
         print(f"[thepipe] Options: {options}")
     
+    # TODO(database-hardening): hold db_manager outside this try and close it in
+    # finally. Current exception paths after construction can leak connections
+    # and temporary Excel files. Also avoid eager get_schema when query paths
+    # immediately perform their own schema discovery.
     try:
         # Initialize database manager with options
         if verbose:
