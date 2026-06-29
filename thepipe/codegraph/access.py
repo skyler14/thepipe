@@ -87,12 +87,18 @@ class CodegraphGraph:
         direction: str = "both",
         depth: int = 1,
         edge_types: Sequence[str] | None = None,
+        min_confidence: float | None = None,
+        max_transit_degree: int | None = None,
         limit: int = 200,
     ) -> dict[str, Any]:
         if direction not in {"inbound", "outbound", "both"}:
             raise ValueError("direction must be inbound, outbound, or both")
         if depth < 0:
             raise ValueError("depth must be non-negative")
+        if min_confidence is not None and not 0 <= min_confidence <= 1:
+            raise ValueError("min_confidence must be between 0 and 1")
+        if max_transit_degree is not None and max_transit_degree < 1:
+            raise ValueError("max_transit_degree must be positive")
         if limit < 1:
             raise ValueError("limit must be positive")
 
@@ -111,7 +117,10 @@ class CodegraphGraph:
             by_target.setdefault(edge.target_id, []).append(edge)
 
         seen_nodes = {start.id}
+        node_hops = {start.id: 0}
         seen_edges: dict[int, EdgeRecord] = {}
+        filtered_edge_ids: set[int] = set()
+        pruned_hubs: dict[int, dict[str, Any]] = {}
         queue: deque[tuple[int, int]] = deque([(start.id, 0)])
         while queue and len(seen_edges) < limit:
             node_id, current_depth = queue.popleft()
@@ -123,25 +132,58 @@ class CodegraphGraph:
                 by_source=by_source,
                 by_target=by_target,
             ):
+                if _below_confidence(edge, min_confidence):
+                    filtered_edge_ids.add(edge.id)
+                    continue
                 if edge.id not in seen_edges:
                     seen_edges[edge.id] = edge
                 next_id = edge.target_id if edge.source_id == node_id else edge.source_id
                 if next_id not in seen_nodes and next_id in nodes:
                     seen_nodes.add(next_id)
-                    queue.append((next_id, current_depth + 1))
+                    next_hop = current_depth + 1
+                    node_hops[next_id] = next_hop
+                    transit_degree = _candidate_degree(
+                        next_id,
+                        direction=direction,
+                        by_source=by_source,
+                        by_target=by_target,
+                        min_confidence=min_confidence,
+                    )
+                    if (
+                        max_transit_degree is not None
+                        and next_hop < depth
+                        and transit_degree > max_transit_degree
+                    ):
+                        node = nodes[next_id]
+                        pruned_hubs[next_id] = {
+                            "entity_id": f"native:{node.id}",
+                            "name": node.name,
+                            "qualified_name": node.qualified_name,
+                            "degree": transit_degree,
+                            "hop": next_hop,
+                        }
+                    else:
+                        queue.append((next_id, next_hop))
                 if len(seen_edges) >= limit:
                     break
 
         return {
             "project": self.project,
             "start": _node_dict(start),
-            "nodes": [_node_dict(nodes[node_id]) for node_id in sorted(seen_nodes)],
+            "nodes": [
+                {**_node_dict(nodes[node_id]), "hop": node_hops[node_id]}
+                for node_id in sorted(seen_nodes)
+            ],
             "edges": [
                 _edge_dict(edge)
                 for edge in sorted(seen_edges.values(), key=lambda item: item.id)
             ],
             "depth": depth,
             "direction": direction,
+            "filtered_edges": len(filtered_edge_ids),
+            "pruned_hubs": [
+                pruned_hubs[node_id] for node_id in sorted(pruned_hubs)
+            ],
         }
 
     def query_sql(
@@ -170,11 +212,25 @@ def _resolve_entity(entity: int | str, nodes: Iterable[NodeRecord]) -> NodeRecor
     entity_text = str(entity)
     if entity_text.startswith("native:"):
         entity_text = entity_text.split(":", 1)[1]
-    for node in nodes:
-        if entity_text.isdigit() and node.id == int(entity_text):
+    candidates = list(nodes)
+    if entity_text.isdigit():
+        for node in candidates:
+            if node.id == int(entity_text):
+                return node
+    for node in candidates:
+        if entity_text == node.qualified_name:
             return node
-        if entity_text in {node.qualified_name, node.name}:
-            return node
+    name_matches = [node for node in candidates if entity_text == node.name]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    if len(name_matches) > 1:
+        qualified_names = ", ".join(
+            sorted(node.qualified_name for node in name_matches)
+        )
+        raise CodegraphAccessError(
+            f"ambiguous entity name {entity_text!r}; use a qualified name: "
+            f"{qualified_names}"
+        )
     raise KeyError(f"entity not found: {entity}")
 
 
@@ -189,6 +245,37 @@ def _candidate_edges(
         yield from by_source.get(node_id, [])
     if direction in {"inbound", "both"}:
         yield from by_target.get(node_id, [])
+
+
+def _candidate_degree(
+    node_id: int,
+    *,
+    direction: str,
+    by_source: dict[int, list[EdgeRecord]],
+    by_target: dict[int, list[EdgeRecord]],
+    min_confidence: float | None,
+) -> int:
+    return len(
+        {
+            edge.id
+            for edge in _candidate_edges(
+                node_id,
+                direction=direction,
+                by_source=by_source,
+                by_target=by_target,
+            )
+            if not _below_confidence(edge, min_confidence)
+        }
+    )
+
+
+def _below_confidence(edge: EdgeRecord, min_confidence: float | None) -> bool:
+    confidence = edge.properties.get("confidence")
+    return (
+        min_confidence is not None
+        and isinstance(confidence, (int, float))
+        and confidence < min_confidence
+    )
 
 
 def _node_dict(node: NodeRecord) -> dict[str, Any]:

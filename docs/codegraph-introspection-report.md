@@ -183,7 +183,13 @@ Tests added:
    Limit 10 emitted 17,690 package bytes because each node carried full
    attributes. Fixed after this report: compact graph action output now strips
    attributes by default unless `codegraph_verbose=true`. The same neighbor
-   query measured 4,436 bytes after compacting.
+   query measured 4,436 bytes after compacting. A later quality pass also added
+   confidence filtering, high-degree transit-hub pruning, shortest-hop labels,
+   and explicit omission diagnostics. Package/CLI defaults are confidence `0.5`
+   and transit degree `25`; either can be disabled with `null`.
+
+   Ambiguous short entity names now fail with qualified-name candidates instead
+   of selecting whichever matching node SQLite returned first.
 
 2. CLI action latency is high for tiny reads.
 
@@ -214,6 +220,13 @@ Tests added:
 
    This is not new, but the sidecar graph path avoids it. Ponytail fix: downgrade
    missing optional parser tracebacks to a one-line warning.
+
+7. Native call edges remain heuristic.
+
+   Low-confidence suffix matches can connect unrelated common method names.
+   Local `neighbors` now suppresses low-confidence edges by default, but a
+   high-confidence type inference can still be wrong. Graph traversal is a
+   navigation aid, not proof of runtime dispatch or test coverage.
 
 ## Easy Victories To Consider
 

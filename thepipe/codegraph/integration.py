@@ -116,11 +116,21 @@ def _run_graph_action(root: Path, options: dict[str, Any]) -> dict[str, Any]:
             edge_types = options.get("codegraph_edge_types")
             if isinstance(edge_types, str):
                 edge_types = [edge_types]
+            min_confidence = options.get("codegraph_min_confidence", 0.5)
+            max_transit_degree = options.get("codegraph_max_transit_degree", 25)
             result = graph.neighbors(
                 entity,
                 direction=str(options.get("codegraph_direction", "both")),
                 depth=int(options.get("codegraph_depth", 1)),
                 edge_types=edge_types,
+                min_confidence=(
+                    None if min_confidence is None else float(min_confidence)
+                ),
+                max_transit_degree=(
+                    None
+                    if max_transit_degree is None
+                    else int(max_transit_degree)
+                ),
                 limit=int(options.get("codegraph_limit", 200)),
             )
         elif action == "sql":

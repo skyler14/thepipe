@@ -119,6 +119,13 @@ thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "neigh
 thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "sql", "codegraph_sql": "SELECT name FROM nodes LIMIT 20"}' -f json
 ```
 
+Neighbor actions reject ambiguous short entity names. Use a qualified name when
+multiple symbols share one name. They also suppress edges below
+`codegraph_min_confidence` (default `0.5`) and stop traversing through nodes above
+`codegraph_max_transit_degree` (default `25`). Suppressed-edge counts and pruned
+hubs remain visible in the response. Set either option to `null` to disable that
+filter.
+
 Shared-library builds use the same graph contract through
 `codegraph_library` or `codegraph_library_archive` plus
 `codegraph_library_sha256`; the sidecar remains the portable fallback.

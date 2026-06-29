@@ -103,6 +103,113 @@ def test_neighbors_returns_bounded_traversal(tmp_path: Path) -> None:
     assert both["edges"][0]["kind"] == "CONFIGURES"
 
 
+def test_neighbors_rejects_ambiguous_short_entity_names(tmp_path: Path) -> None:
+    graph = _graph(tmp_path)
+    with sqlite3.connect(graph.database.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO nodes VALUES (
+                4, 'demo', 'Function', 'main', 'demo.src.other.main',
+                'src/other.py', 1, 2, '{}'
+            )
+            """
+        )
+
+    try:
+        with pytest.raises(CodegraphAccessError, match="ambiguous entity name"):
+            graph.neighbors("main")
+    finally:
+        graph.close()
+
+
+def test_neighbors_filters_low_confidence_edges(tmp_path: Path) -> None:
+    graph = _graph(tmp_path)
+    with sqlite3.connect(graph.database.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO nodes VALUES (
+                4, 'demo', 'Function', 'uncertain', 'demo.src.lib.uncertain',
+                'src/lib.py', 4, 5, '{}'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO edges VALUES (
+                3, 'demo', 1, 4, 'CALLS',
+                '{"confidence":0.2,"strategy":"suffix_match"}'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO edges VALUES (
+                4, 'demo', 4, 4, 'CALLS',
+                '{"confidence":0.1,"strategy":"suffix_match"}'
+            )
+            """
+        )
+
+    try:
+        result = graph.neighbors(
+            "demo.src.app.main",
+            direction="outbound",
+            edge_types=["CALLS"],
+            min_confidence=0.5,
+        )
+    finally:
+        graph.close()
+
+    assert [node["name"] for node in result["nodes"]] == ["main", "helper"]
+    assert result["filtered_edges"] == 1
+
+
+def test_neighbors_prunes_high_degree_transit_hubs(tmp_path: Path) -> None:
+    graph = _graph(tmp_path)
+    with sqlite3.connect(graph.database.path) as connection:
+        connection.executemany(
+            "INSERT INTO nodes VALUES (?, 'demo', 'Function', ?, ?, 'src/hub.py', 1, 2, '{}')",
+            [
+                (4, "Chunk", "demo.src.hub.Chunk"),
+                (5, "leaf_a", "demo.src.hub.leaf_a"),
+                (6, "leaf_b", "demo.src.hub.leaf_b"),
+                (7, "leaf_c", "demo.src.hub.leaf_c"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO edges VALUES (?, 'demo', ?, ?, 'CALLS', '{}')",
+            [
+                (3, 1, 4),
+                (4, 5, 4),
+                (5, 6, 4),
+                (6, 7, 4),
+            ],
+        )
+
+    try:
+        result = graph.neighbors(
+            "demo.src.app.main",
+            direction="both",
+            depth=2,
+            edge_types=["CALLS"],
+            max_transit_degree=2,
+        )
+    finally:
+        graph.close()
+
+    assert [node["name"] for node in result["nodes"]] == ["main", "helper", "Chunk"]
+    assert [node["hop"] for node in result["nodes"]] == [0, 1, 1]
+    assert result["pruned_hubs"] == [
+        {
+            "entity_id": "native:4",
+            "name": "Chunk",
+            "qualified_name": "demo.src.hub.Chunk",
+            "degree": 4,
+            "hop": 1,
+        }
+    ]
+
+
 def test_query_sql_is_read_only_and_bounded(tmp_path: Path) -> None:
     with _graph(tmp_path) as graph:
         rows = graph.query_sql(

@@ -592,3 +592,44 @@ def test_scrape_directory_can_traverse_graph_neighbors(tmp_path: Path) -> None:
     payload = json.loads(chunks[0].text)
     assert [node["name"] for node in payload["result"]["nodes"]] == ["main", "helper"]
     assert payload["result"]["edges"][0]["kind"] == "CALLS"
+
+
+def test_graph_neighbor_action_applies_confidence_filter(tmp_path: Path) -> None:
+    project, db = _project_database(tmp_path)
+    with sqlite3.connect(db) as connection:
+        connection.executemany(
+            """
+            INSERT INTO nodes VALUES (
+                ?, ?, 'Function', ?, ?, 'helper.py', 1, 2, '{}'
+            )
+            """,
+            [
+                (2, project, "certain", f"{project}.helper.certain"),
+                (3, project, "uncertain", f"{project}.helper.uncertain"),
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO edges VALUES (?, ?, 1, ?, 'CALLS', ?)",
+            [
+                (1, project, 2, '{"confidence":0.9}'),
+                (2, project, 3, '{"confidence":0.2}'),
+            ],
+        )
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_action": "neighbors",
+            "codegraph_entity": "main",
+            "codegraph_direction": "outbound",
+            "codegraph_min_confidence": 0.5,
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert [node["name"] for node in payload["result"]["nodes"]] == [
+        "main",
+        "certain",
+    ]
+    assert payload["result"]["filtered_edges"] == 1

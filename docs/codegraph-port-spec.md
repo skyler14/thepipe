@@ -925,6 +925,25 @@ CLI/package actions:
 - `neighbors`: bounded BFS around an entity;
 - `sql`: bounded read-only `SELECT`/`WITH`/`PRAGMA`.
 
+`neighbors` quality controls:
+
+- short names must resolve uniquely; ambiguous names fail with qualified-name
+  candidates instead of silently selecting the first row;
+- `codegraph_min_confidence` defaults to `0.5` for package/CLI actions and drops
+  only edges carrying a lower numeric confidence;
+- `codegraph_max_transit_degree` defaults to `25` and returns high-degree hubs
+  without expanding through them;
+- each returned node includes its shortest `hop`;
+- `filtered_edges` and `pruned_hubs` make quality reduction explicit;
+- either filter accepts `null` to preserve every indexed edge or traverse every
+  hub.
+
+Motivation: native resolution deliberately preserves uncertain edges, and common
+symbols such as `close`, `query`, or `Chunk` can connect unrelated regions. A
+bounded local action should favor a useful neighborhood over exhaustive recall,
+but it must report what it omitted. Native `trace_path` remains available when
+the caller needs donor behavior without these local filters.
+
 These actions are intentionally local SQLite reads. They make existing graph DBs
 useful even when the sidecar is not running.
 
@@ -1066,6 +1085,123 @@ Keep:
 - Python fallback,
 - SQL extraction work,
 - `map/mapnn/mapnew` UX.
+
+## Deferred Database Roadmap
+
+Database functionality remains a separate product capability. Codegraph does not
+replace database connections, SQL execution, transactions, previews, or EDA.
+Detailed defects and acceptance criteria live on the main-based
+`codex/odbc-db-sources` branch in `docs/database-hardening-todo.md`; they are not
+implemented as part of this codegraph branch.
+
+### 1. Simplify the execution adapters
+
+Replace JupySQL-mediated execution with SQLAlchemy for relational databases and a
+small native DuckDB adapter for DuckDB/file-backed sources.
+
+Motivation:
+
+- current middleware adds global connection state and runtime package
+  installation;
+- parameter binding does not reach SQLAlchemy correctly;
+- SQLAlchemy already supplies pooling, transactions, URL handling, and Inspector;
+- DuckDB's native API handles file registration more directly than notebook
+  middleware.
+
+This is substitution, not removal: PostgreSQL, MySQL, SQLite, MSSQL, ODBC,
+DuckDB, CSV, Parquet, JSON, Arrow, and spreadsheet workflows remain supported
+through explicit adapters.
+
+### 2. Introduce a structured `DatabaseSnapshot`
+
+Represent catalogs, schemas, tables, views, columns, primary/foreign keys,
+indexes, types, row estimates, and diagnostics before rendering Markdown or
+`Chunk`.
+
+Motivation:
+
+- schema discovery and Markdown formatting are currently intertwined and
+  repeated;
+- one structured snapshot can feed preview, SQL, NL-to-SQL, graph projection,
+  and compact output;
+- versioned structure gives tests a stable contract independent of prose.
+
+### 3. Make EDA explicit, relevant, and budgeted
+
+Direct SQL should execute directly. Profiling should require an explicit mode or
+option and accept table, column, scan, sample, row, and elapsed-time budgets.
+
+Motivation:
+
+- measured trivial SQL caused 22 extra schema/profile statements;
+- current EDA profiles the first table even when the query targets another;
+- unbounded distinct/key scans become expensive on wide or remote tables;
+- partial results with diagnostics are more useful than hidden latency.
+
+### 4. Batch and cache profiling
+
+Build compatible aggregates into one bounded query per selected table, use
+sampling/approximation where available, and cache results by source identity plus
+freshness fingerprint.
+
+Motivation:
+
+- per-column round trips dominate remote-database latency;
+- repeated prompts usually reuse the same schema/profile;
+- explicit fingerprints permit cheap unchanged reads without pretending data is
+  permanently fresh.
+
+### 5. Project snapshots into an optional schema graph
+
+Map structured metadata into `Database`, `Schema`, `Table`, `View`, `Column`, and
+`Index` nodes with containment, reference, and view-dependency edges.
+
+Motivation:
+
+- foreign-key path search can choose relevant joins before sending context to an
+  LLM;
+- migration impact and schema drift are graph questions;
+- compact subgraphs avoid placing every table and column in every prompt.
+
+SQL remains the row-data language. Cypher/graph actions cover metadata topology.
+Raw rows and profile distributions should not become graph nodes.
+
+### 6. Start with a small Python SQLite metadata store
+
+Reuse codegraph's action envelope and cache/discovery policy, not donor table
+internals. Implement metadata queries with indexed SQLite reads and recursive
+CTEs first.
+
+Motivation:
+
+- current donor adapter is read-only and has no generic graph-ingestion API;
+- manually writing donor tables would couple database mode to private schema;
+- schema graphs are usually small enough that native acceleration is unproven;
+- Python implementation keeps the first milestone portable and testable.
+
+### 7. Add generic native ingestion only after evidence
+
+If measured metadata graphs outgrow the Python store, add a coarse ABI such as
+`replace_graph(project, graph_kind, nodes_json, edges_json)` and expose the same
+contract through sidecar and shared library.
+
+Motivation:
+
+- one bulk ABI preserves process isolation and avoids leaking donor structs;
+- identical sidecar/shared contracts maintain fallback;
+- performance data, not architectural symmetry, should justify C ownership.
+
+### Required safety gate
+
+Before NL-to-SQL or iterative EDA becomes a default:
+
+- enforce read-only connections/transactions, not prompt-only safety;
+- reject mutating and multi-statement generated SQL;
+- make iterative debug mode non-executing;
+- redact connection secrets;
+- close every connection/temp resource in `finally`;
+- test parameter binding, mutation rejection, query budgets, and multi-table
+  relevance on SQLite and DuckDB.
 
 ## Open Questions
 
