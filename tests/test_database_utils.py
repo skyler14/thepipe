@@ -16,9 +16,6 @@ from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# TODO(database-hardening): production checks importable module `sql`, while this
-# checks the distribution name and skips a usable installation. Align this gate
-# when implementing the integration coverage listed in docs/database-hardening-todo.md.
 JUPYSQL_AVAILABLE = importlib.util.find_spec("jupysql") is not None
 
 

@@ -237,10 +237,6 @@ def get_auto_analysis(db_instance, db_type: str = None, view_name: str = None,
                      max_samples: int = 5, verbose: bool = False,
                      options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Automatically analyze database to generate useful insights."""
-    # TODO(database-hardening): make profiling explicit and budgeted. Current
-    # implementation runs per-column type/cardinality/key scans against one
-    # selected table. Batch aggregates, select relevant tables, support sampling,
-    # and return partial structured results when query/time budgets are exhausted.
     analysis = {}
     options = options or {}
     max_samples = options.get("max_samples", max_samples)
