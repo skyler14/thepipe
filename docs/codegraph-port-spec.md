@@ -29,7 +29,7 @@ Implemented on `codex/codegraph-sidecar`:
 - explicit `code_relations: "graph"` package/CLI mode;
 - public graph-mode tool schema and registration docs;
 - explicit graph action output for `summary`, `files`, `entities`, `edges`,
-  `neighbors`, and bounded read-only SQL;
+  `neighbors`, and native backend actions;
 - sidecar bootstrap from local tar/zip archive with required SHA-256 and
   pinned runtime version validation;
 - local git exclusion through `.git/info/exclude`.
@@ -122,7 +122,12 @@ Do not add sidecar-first instructions to skill files yet. Notes to add later:
 - prefer `codegraph_action: "summary"` or `"entities"` before emitting full v2
   graph JSON on huge repos;
 - use `codegraph_action: "neighbors"` for impact/caller/callee context;
-- use `codegraph_action: "sql"` only for bounded read-only inspection;
+- use native graph actions such as `search_graph`, `query_graph`, `trace_path`,
+  `get_code_snippet`, and `get_architecture` when a sidecar/shared library is
+  available;
+- keep SQL-oriented functionality in database mode. The graph implementation has
+  a legacy read-only SQLite escape hatch for compatibility, but it is not the
+  recommended code-mode interface;
 - keep `.thepipe/codegraph/cache/` git-ignored unless explicitly requested;
 - fall back to `code_relations: "map"` when no deployment or sidecar exists.
 
@@ -865,6 +870,77 @@ Shared library should not expose all C structs directly. It should expose JSON
 requests and JSON responses, plus a small raw SQL read-only escape hatch only if
 absolutely needed for projection speed.
 
+### Native C Hook Candidates Beyond MCP Dispatch
+
+Observed source paths below are relative to the donor repo root.
+
+The current shared-library contract can dispatch every donor MCP tool through
+`src/mcp/mcp.h::cbm_mcp_handle_tool`. That is the right first stable ABI because
+it shares behavior with the full binary, keeps upgrades simple, and avoids
+binding directly to donor structs that may churn. The next stage should add
+select lower-level C wrappers only where they beat the MCP JSON layer in speed,
+ergonomics, or safety.
+
+High-value direct wrappers:
+
+- `src/pipeline/pipeline.h`
+  - `cbm_pipeline_new`, `cbm_pipeline_run`, `cbm_pipeline_set_persistence`,
+    `cbm_pipeline_get_excluded`, `cbm_pipeline_get_committed_counts`,
+    `cbm_pipeline_project_name`;
+  - use for progress-aware indexing, cleaner cancellation, and richer refresh
+    diagnostics than the current tool-envelope response.
+- `src/store/store.h`
+  - `cbm_store_open_path_query`, `cbm_store_check_integrity`,
+    `cbm_store_checkpoint`, `cbm_store_get_file_hashes`;
+  - use for fast freshness checks, manifest repair, read-only projections, and
+    repo-size policy without asking the MCP layer to format large JSON.
+- `src/store/store.h`
+  - `cbm_store_search`, `cbm_store_bfs`, `cbm_store_get_schema`,
+    `cbm_store_get_schema_counts`, `cbm_store_get_architecture`,
+    `cbm_store_vector_search`;
+  - use for compact thepipe-native outputs where Python controls pagination,
+    token budgeting, confidence filtering, and graph collapse.
+- `src/store/store.h`
+  - `cbm_store_find_node_by_qn`, `cbm_store_find_nodes_by_name`,
+    `cbm_store_find_nodes_by_file_overlap`, `cbm_store_node_neighbor_names`,
+    `cbm_store_node_degree`;
+  - use for snippet lookup, mapnew changed-region mapping, and ambiguity
+    workflows without shelling out to donor CLI behavior.
+- `src/cypher/cypher.h`
+  - lexer/parser/executor APIs;
+  - keep Cypher in codegraph mode as the graph query grammar. Do not confuse it
+    with SQL/database mode. If exposed directly, wrap as `query_graph`, not
+    arbitrary database SQL.
+- `src/discover/discover.h`
+  - `cbm_language_for_filename`, `cbm_discover_ex`, gitignore matcher helpers;
+  - use to replace parts of our Python file discovery only after golden parity
+    proves it does not regress thepipe include/exclude behavior.
+- `src/traces/traces.h`
+  - pure HTTP trace extraction helpers;
+  - keep low priority until donor `ingest_traces` mutates graph edges instead
+    of mostly acknowledging input.
+- `src/pipeline/pipeline.h`
+  - FQN and registry helpers such as `cbm_pipeline_fqn_compute`,
+    `cbm_pipeline_resolve_relative_import`, `cbm_registry_resolve`;
+  - candidate replacements for parts of our Python import/entity resolver once
+    language-specific compatibility tests are stronger.
+
+Do not bind everything at once. Each direct wrapper needs:
+
+- a C shim with opaque context ownership and explicit free functions;
+- ctypes tests against sidecar-equivalent JSON behavior;
+- stress tests for invalid UTF-8, long paths, missing DBs, and concurrent reads;
+- a fallback to MCP JSON dispatch for unsupported platforms or ABI mismatch;
+- version lock metadata tied to the donor commit in the archive manifest.
+
+The likely best split is:
+
+1. MCP JSON dispatch remains the broad compatibility layer.
+2. Direct store wrappers power thepipe compact/projection/read paths.
+3. Direct pipeline wrappers power refresh/index lifecycle.
+4. Direct parser/discover/registry wrappers are adopted only after they can
+   delete Python code without reducing thepipe-specific behavior.
+
 ## Thepipe-Specific Interfaces To Add
 
 Comparator API is graph-native. `thepipe` needs projection APIs:
@@ -913,7 +989,6 @@ Implemented as `CodegraphGraph` and `codegraph_action`.
 ```python
 CodegraphGraph.open_repo(repo).find_entities(query="main", kind="Function")
 CodegraphGraph.open_repo(repo).neighbors("main", direction="outbound", depth=1)
-CodegraphGraph.open_repo(repo).query_sql("SELECT name FROM nodes LIMIT 20")
 ```
 
 CLI/package actions:
@@ -922,8 +997,7 @@ CLI/package actions:
 - `files`: indexed file hashes/sizes;
 - `entities`: bounded local entity search;
 - `edges`: bounded edge list;
-- `neighbors`: bounded BFS around an entity;
-- `sql`: bounded read-only `SELECT`/`WITH`/`PRAGMA`.
+- `neighbors`: bounded BFS around an entity.
 
 `neighbors` quality controls:
 
@@ -944,8 +1018,27 @@ bounded local action should favor a useful neighborhood over exhaustive recall,
 but it must report what it omitted. Native `trace_path` remains available when
 the caller needs donor behavior without these local filters.
 
-These actions are intentionally local SQLite reads. They make existing graph DBs
+These actions are intentionally local graph reads. They make existing graph DBs
 useful even when the sidecar is not running.
+
+Native backend actions available when a sidecar or shared library is supplied:
+
+- `index_repository`: build/refresh the native graph and return v2 artifacts;
+- `search_graph`: BM25/structured/semantic graph search;
+- `query_graph`: Cypher query execution through the donor engine;
+- `trace_path`: donor call/data/cross-service traversal;
+- `get_code_snippet`: exact/suffix snippet lookup with ambiguity handling;
+- `get_graph_schema`: labels, edge types, property keys, and counts;
+- `get_architecture`: language/package/route/hotspot/boundary summaries;
+- `search_code`: graph-ranked code grep;
+- `list_projects`, `index_status`, `delete_project`: project lifecycle;
+- `detect_changes`: git-diff-to-symbol impact seed;
+- `manage_adr`: donor ADR store access;
+- `ingest_traces`: trace ingest surface, currently limited by donor behavior.
+
+The native actions are wired through `CodegraphClient`, so sidecar and
+shared-library backends share the same Python contract. They require an explicit
+backend unless an existing local projection action is being used.
 
 ### `emit_mapnew_from_graph`
 

@@ -216,28 +216,65 @@ TOOLS = [
                         },
                         "codegraph_action": {
                             "type": "string",
-                            "enum": ["emit", "summary", "files", "entities", "edges", "neighbors", "sql"],
-                            "description": "Use an existing graph deployment instead of emitting the full graph payload; default is emit"
+                            "enum": [
+                                "emit",
+                                "summary",
+                                "files",
+                                "entities",
+                                "edges",
+                                "neighbors",
+                                "index_repository",
+                                "search_graph",
+                                "query_graph",
+                                "trace_path",
+                                "get_code_snippet",
+                                "get_graph_schema",
+                                "get_architecture",
+                                "search_code",
+                                "list_projects",
+                                "index_status",
+                                "delete_project",
+                                "detect_changes",
+                                "manage_adr",
+                                "ingest_traces"
+                            ],
+                            "description": "Use a graph deployment or native backend for targeted graph access; default is emit"
+                        },
+                        "codegraph_project": {
+                            "type": "string",
+                            "description": "Explicit native project name for native codegraph actions; inferred from repo deployment when omitted"
                         },
                         "codegraph_query": {
                             "type": "string",
-                            "description": "Entity search text for codegraph_action='entities'"
+                            "description": "Search text for entities/search_graph/search_code, or Cypher when codegraph_action='query_graph' and codegraph_cypher is omitted"
+                        },
+                        "codegraph_cypher": {
+                            "type": "string",
+                            "description": "Cypher graph query for codegraph_action='query_graph'"
+                        },
+                        "codegraph_pattern": {
+                            "type": "string",
+                            "description": "Code search pattern for codegraph_action='search_code'"
                         },
                         "codegraph_kind": {
                             "type": "string",
-                            "description": "Entity kind filter for codegraph_action='entities', e.g. Function or Class"
+                            "description": "Entity/node label filter, e.g. Function or Class"
                         },
                         "codegraph_file": {
                             "type": "string",
-                            "description": "File path substring filter for codegraph_action='entities'"
+                            "description": "File/path filter for entities/search_graph/get_architecture"
+                        },
+                        "codegraph_file_pattern": {
+                            "type": "string",
+                            "description": "Native file-pattern filter for search_graph/search_code"
                         },
                         "codegraph_qualified_name": {
                             "type": "string",
-                            "description": "Qualified-name substring filter for codegraph_action='entities'"
+                            "description": "Qualified-name filter or snippet target"
                         },
                         "codegraph_entity": {
                             "type": "string",
-                            "description": "Entity id, native id, name, or qualified name for codegraph_action='neighbors'"
+                            "description": "Entity id, native id, name, or qualified name for neighbors/trace_path/snippet"
                         },
                         "codegraph_direction": {
                             "type": "string",
@@ -251,15 +288,17 @@ TOOLS = [
                         "codegraph_edge_types": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Optional edge type filter for codegraph_action='neighbors'"
+                            "description": "Optional edge type filter for neighbors/trace_path"
                         },
-                        "codegraph_sql": {
-                            "type": "string",
-                            "description": "Read-only SELECT/WITH/PRAGMA SQL for codegraph_action='sql'"
-                        },
-                        "codegraph_sql_params": {
+                        "codegraph_aspects": {
                             "type": "array",
-                            "description": "SQL parameters for codegraph_action='sql'"
+                            "items": {"type": "string"},
+                            "description": "Architecture aspects for codegraph_action='get_architecture'"
+                        },
+                        "codegraph_traces": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "Trace objects for codegraph_action='ingest_traces'"
                         },
                         "codegraph_limit": {
                             "type": "integer",

@@ -557,6 +557,243 @@ def test_scrape_directory_can_run_read_only_graph_sql(tmp_path: Path) -> None:
     assert payload["result"]["rows"] == [{"name": "main"}]
 
 
+@pytest.mark.parametrize(
+    ("action", "options", "expected_tool", "expected_payload", "native_result"),
+    [
+        (
+            "search_graph",
+            {"codegraph_query": "main", "codegraph_kind": "Function", "codegraph_limit": 7},
+            "search_graph",
+            {"query": "main", "label": "Function", "limit": 7, "offset": 0},
+            {"results": [{"name": "main"}], "total": 1},
+        ),
+        (
+            "query_graph",
+            {"codegraph_cypher": "MATCH (n) RETURN n", "codegraph_limit": 3},
+            "query_graph",
+            {"query": "MATCH (n) RETURN n", "max_rows": 3},
+            {"columns": ["n"], "rows": [["main"]]},
+        ),
+        (
+            "trace_path",
+            {
+                "codegraph_entity": "main",
+                "codegraph_direction": "outbound",
+                "codegraph_depth": 2,
+                "codegraph_edge_types": ["CALLS"],
+                "codegraph_include_tests": True,
+            },
+            "trace_path",
+            {
+                "function_name": "main",
+                "direction": "outbound",
+                "depth": 2,
+                "mode": "calls",
+                "edge_types": ["CALLS"],
+                "risk_labels": False,
+                "include_tests": True,
+            },
+            {"root": "main", "callees": ["helper"]},
+        ),
+        (
+            "get_code_snippet",
+            {"codegraph_qualified_name": "demo.app.main", "codegraph_include_neighbors": True},
+            "get_code_snippet",
+            {"qualified_name": "demo.app.main", "include_neighbors": True},
+            {"qualified_name": "demo.app.main", "source": "def main(): pass"},
+        ),
+        (
+            "get_graph_schema",
+            {},
+            "get_graph_schema",
+            {},
+            {"node_labels": [{"label": "Function", "count": 1}]},
+        ),
+        (
+            "get_architecture",
+            {"codegraph_file": "src", "codegraph_aspects": ["languages", "routes"]},
+            "get_architecture",
+            {"path": "src", "aspects": ["languages", "routes"]},
+            {"languages": [{"name": "Python"}]},
+        ),
+        (
+            "search_code",
+            {
+                "codegraph_pattern": "TODO",
+                "codegraph_file_pattern": "*.py",
+                "codegraph_regex": True,
+                "codegraph_limit": 4,
+            },
+            "search_code",
+            {
+                "pattern": "TODO",
+                "file_pattern": "*.py",
+                "mode": "compact",
+                "regex": True,
+                "limit": 4,
+            },
+            {"matches": [{"file": "app.py"}]},
+        ),
+        (
+            "detect_changes",
+            {"codegraph_depth": 4, "codegraph_base_branch": "develop"},
+            "detect_changes",
+            {"scope": "symbols", "depth": 4, "base_branch": "develop"},
+            {"changed_files": ["app.py"], "impacted_symbols": ["main"]},
+        ),
+        (
+            "manage_adr",
+            {"codegraph_adr_mode": "get"},
+            "manage_adr",
+            {"mode": "get"},
+            {"content": "# ADR"},
+        ),
+        (
+            "ingest_traces",
+            {"codegraph_traces": [{"method": "GET", "url": "/health"}]},
+            "ingest_traces",
+            {"traces": [{"method": "GET", "url": "/health"}]},
+            {"accepted": 1, "mutated": False},
+        ),
+    ],
+)
+def test_shared_library_graph_action_routes_native_mcp_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    options: dict[str, object],
+    expected_tool: str,
+    expected_payload: dict[str, object],
+    native_result: dict[str, object],
+) -> None:
+    project, _ = _project_database(tmp_path)
+    calls = {}
+
+    class FakeSharedLibraryBackend:
+        def __init__(self, path, *, cache_dir, quiet=True):
+            calls["backend"] = {"path": path, "cache_dir": cache_dir, "quiet": quiet}
+
+        def call(self, tool, payload):
+            calls["call"] = (tool, payload)
+            return native_result
+
+        def close(self):
+            calls["closed"] = True
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
+            "codegraph_action": action,
+            **options,
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload["action"] == action
+    assert payload["result"] == native_result
+    expected = {"project": project, **expected_payload}
+    assert calls["call"] == (expected_tool, expected)
+    assert calls["closed"] is True
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_tool", "native_result"),
+    [
+        ("list_projects", "list_projects", {"projects": [{"name": "demo"}]}),
+        ("index_status", "index_status", {"status": "ready"}),
+        ("delete_project", "delete_project", {"status": "deleted"}),
+    ],
+)
+def test_project_management_graph_actions_do_not_auto_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    expected_tool: str,
+    native_result: dict[str, object],
+) -> None:
+    calls = []
+
+    class FakeSharedLibraryBackend:
+        def __init__(self, path, *, cache_dir, quiet=True):
+            pass
+
+        def call(self, tool, payload):
+            calls.append((tool, payload))
+            return native_result
+
+        def close(self):
+            calls.append(("close", {}))
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
+            "codegraph_action": action,
+            "codegraph_project": "demo",
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload["result"] == native_result
+    expected_payload = {} if action == "list_projects" else {"project": "demo"}
+    assert calls == [(expected_tool, expected_payload), ("close", {})]
+
+
+def test_native_query_graph_action_does_not_use_sql_escape_hatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _project_database(tmp_path)
+    calls = []
+
+    class FakeSharedLibraryBackend:
+        def __init__(self, path, *, cache_dir, quiet=True):
+            pass
+
+        def call(self, tool, payload):
+            calls.append((tool, payload))
+            return {"columns": ["n"], "rows": []}
+
+        def close(self):
+            pass
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
+
+    scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
+            "codegraph_action": "query_graph",
+            "codegraph_cypher": "MATCH (n) RETURN n",
+            "codegraph_sql": "SELECT * FROM nodes",
+        },
+    )
+
+    assert calls == [
+        (
+            "query_graph",
+            {
+                "project": native_project_name(tmp_path),
+                "query": "MATCH (n) RETURN n",
+            },
+        )
+    ]
+
+
 def test_scrape_directory_can_traverse_graph_neighbors(tmp_path: Path) -> None:
     project, _ = _project_database(tmp_path)
     with sqlite3.connect(

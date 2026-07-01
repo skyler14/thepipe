@@ -116,8 +116,16 @@ emitting the full payload:
 ```bash
 thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "entities", "codegraph_query": "main"}' -f json
 thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "neighbors", "codegraph_entity": "main", "codegraph_direction": "outbound"}' -f json
-thepipe ./repo --options '{"code_relations": "graph", "codegraph_action": "sql", "codegraph_sql": "SELECT name FROM nodes LIMIT 20"}' -f json
+thepipe ./repo --options '{"code_relations": "graph", "codegraph_library": "/path/to/libthepipe_codegraph.dylib", "codegraph_action": "search_graph", "codegraph_query": "main"}' -f json
+thepipe ./repo --options '{"code_relations": "graph", "codegraph_library": "/path/to/libthepipe_codegraph.dylib", "codegraph_action": "query_graph", "codegraph_cypher": "MATCH (n) RETURN n LIMIT 20"}' -f json
 ```
+
+Native graph actions available through the sidecar or shared library are
+`index_repository`, `search_graph`, `query_graph`, `trace_path`,
+`get_code_snippet`, `get_graph_schema`, `get_architecture`, `search_code`,
+`list_projects`, `index_status`, `delete_project`, `detect_changes`,
+`manage_adr`, and `ingest_traces`. SQL-facing work belongs to database mode;
+codegraph mode uses graph actions and Cypher for graph-native queries.
 
 Neighbor actions reject ambiguous short entity names. Use a qualified name when
 multiple symbols share one name. They also suppress edges below
