@@ -941,6 +941,38 @@ The likely best split is:
 4. Direct parser/discover/registry wrappers are adopted only after they can
    delete Python code without reducing thepipe-specific behavior.
 
+Implemented Python-side direct-store ABI hooks:
+
+```c
+void *tp_store_open_query(const char *db_path);
+int tp_store_call(void *store, const char *action,
+                  const char *request_json, char **out_json);
+int tp_cypher_query(void *store, const char *request_json, char **out_json);
+void tp_store_close(void *store);
+```
+
+`SharedLibraryBackend.open_store()` uses those symbols when present. Current
+Python convenience methods map onto donor tool names: `summary` calls
+`index_status`, `search` calls `search_graph`, `neighbors` calls `trace_path`,
+`schema` calls `get_graph_schema`, `architecture` calls `get_architecture`, and
+`cypher` calls `query_graph`. The normal MCP `tp_context_call` path remains the
+fallback for older shared libraries and for actions that do not yet have a
+direct-store equivalent.
+
+Thepipe graph actions now prefer direct store calls for `search_graph`,
+`query_graph`, `get_graph_schema`, and `get_architecture` when:
+
+- a shared library is active;
+- the direct-store ABI symbols exist;
+- a repo-local deployment is discoverable;
+- `codegraph_direct_store` is not explicitly false.
+
+This keeps the sidecar/full-MCP behavior stable while letting newer shared
+libraries skip the external binary process for hot read/query paths. The current
+facade still reuses donor JSON envelopes internally; the Python adapter unwraps
+them. A later ABI can return raw JSON once the donor JSON shaping is extracted
+from `mcp.c`.
+
 ## Thepipe-Specific Interfaces To Add
 
 Comparator API is graph-native. `thepipe` needs projection APIs:

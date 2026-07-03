@@ -794,6 +794,117 @@ def test_native_query_graph_action_does_not_use_sql_escape_hatch(
     ]
 
 
+@pytest.mark.parametrize(
+    ("action", "options", "direct_call", "direct_result"),
+    [
+        (
+            "search_graph",
+            {"codegraph_query": "main", "codegraph_kind": "Function"},
+            ("search", {"project": None, "query": "main", "label": "Function", "limit": 200, "offset": 0}),
+            {"results": [{"name": "main"}]},
+        ),
+        (
+            "query_graph",
+            {"codegraph_cypher": "MATCH (n) RETURN n", "codegraph_limit": 5},
+            ("cypher", {"project": None, "query": "MATCH (n) RETURN n", "max_rows": 5}),
+            {"columns": ["n"], "rows": []},
+        ),
+        (
+            "get_graph_schema",
+            {},
+            ("schema", {"project": None}),
+            {"node_labels": []},
+        ),
+        (
+            "get_architecture",
+            {"codegraph_file": "src", "codegraph_aspects": ["routes"]},
+            ("architecture", {"project": None, "path": "src", "aspects": ["routes"]}),
+            {"routes": []},
+        ),
+    ],
+)
+def test_shared_library_native_actions_prefer_direct_store_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    options: dict[str, object],
+    direct_call: tuple[str, dict[str, object]],
+    direct_result: dict[str, object],
+) -> None:
+    project, db = _project_database(tmp_path)
+    direct_calls = []
+    expected_action, expected_payload = direct_call
+    expected_payload = {
+        key: (project if value is None and key == "project" else value)
+        for key, value in expected_payload.items()
+    }
+
+    class FakeDirectStore:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            direct_calls.append(("close", {}))
+
+        def search(self, project, **kwargs):
+            direct_calls.append(("search", {"project": project, **kwargs}))
+            return direct_result
+
+        def cypher(self, project, query, *, max_rows=None):
+            direct_calls.append(
+                ("cypher", {"project": project, "query": query, "max_rows": max_rows})
+            )
+            return direct_result
+
+        def schema(self, project):
+            direct_calls.append(("schema", {"project": project}))
+            return direct_result
+
+        def architecture(self, project, **kwargs):
+            direct_calls.append(("architecture", {"project": project, **kwargs}))
+            return direct_result
+
+    class FakeSharedLibraryBackend:
+        def __init__(self, path, *, cache_dir, quiet=True):
+            self.path = path
+
+        def has_direct_store_api(self):
+            return True
+
+        def open_store(self, db_path):
+            direct_calls.append(("open", {"db_path": str(db_path)}))
+            return FakeDirectStore()
+
+        def call(self, tool, payload):
+            raise AssertionError(f"unexpected MCP fallback call: {tool}")
+
+        def close(self):
+            direct_calls.append(("backend-close", {}))
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
+
+    chunks = scrape_directory(
+        str(tmp_path),
+        options={
+            "code_relations": "graph",
+            "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
+            "codegraph_action": action,
+            **options,
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload["result"] == direct_result
+    assert direct_calls == [
+        ("open", {"db_path": str(db)}),
+        (expected_action, expected_payload),
+        ("close", {}),
+        ("backend-close", {}),
+    ]
+
+
 def test_scrape_directory_can_traverse_graph_neighbors(tmp_path: Path) -> None:
     project, _ = _project_database(tmp_path)
     with sqlite3.connect(

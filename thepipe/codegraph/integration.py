@@ -47,6 +47,9 @@ NATIVE_GRAPH_ACTIONS = frozenset(
 PROJECT_MANAGEMENT_ACTIONS = frozenset(
     {"list_projects", "index_status", "delete_project"}
 )
+DIRECT_STORE_NATIVE_ACTIONS = frozenset(
+    {"search_graph", "query_graph", "get_graph_schema", "get_architecture"}
+)
 
 
 def process_codegraph(
@@ -213,6 +216,9 @@ def _run_native_graph_action(
 ) -> Any:
     action = _action(options)
     project = _project_for_action(root, options)
+    direct_result = _run_direct_store_action(root, options, client, project)
+    if direct_result is not None:
+        return direct_result
     if action in {"index_repository", "index"}:
         artifacts = client.index_repository(
             root,
@@ -332,6 +338,63 @@ def _run_native_graph_action(
     raise RuntimeError(f"unsupported codegraph_action: {action}")
 
 
+def _run_direct_store_action(
+    root: Path,
+    options: dict[str, Any],
+    client: CodegraphClient,
+    project: str,
+) -> Any | None:
+    action = _action(options)
+    if action not in DIRECT_STORE_NATIVE_ACTIONS:
+        return None
+    if not bool(options.get("codegraph_direct_store", True)):
+        return None
+    backend = client.backend
+    has_direct = getattr(backend, "has_direct_store_api", None)
+    open_store = getattr(backend, "open_store", None)
+    if has_direct is None or open_store is None or not has_direct():
+        return None
+    deployment = discover_project_deployment(root)
+    if deployment is None:
+        return None
+    with open_store(deployment.db_path) as store:
+        if action == "search_graph":
+            return store.search(
+                _require_project(project, action),
+                **_payload(
+                    query=_optional_str(options.get("codegraph_query")),
+                    label=_optional_str(options.get("codegraph_kind")),
+                    name_pattern=_optional_str(options.get("codegraph_name_pattern")),
+                    qn_pattern=_optional_str(options.get("codegraph_qn_pattern")),
+                    file_pattern=_optional_str(
+                        options.get("codegraph_file_pattern", options.get("codegraph_file"))
+                    ),
+                    relationship=_optional_str(options.get("codegraph_relationship")),
+                    semantic_query=_as_optional_list(options.get("codegraph_semantic_query")),
+                    limit=int(options.get("codegraph_limit", 200)),
+                    offset=int(options.get("codegraph_offset", 0)),
+                ),
+            )
+        if action == "query_graph":
+            query = options.get("codegraph_cypher", options.get("codegraph_query"))
+            if not query:
+                raise RuntimeError("codegraph_action='query_graph' requires codegraph_cypher")
+            return store.cypher(
+                _require_project(project, action),
+                str(query),
+                max_rows=_optional_int(options.get("codegraph_limit")),
+            )
+        if action == "get_graph_schema":
+            return store.schema(_require_project(project, action))
+        if action == "get_architecture":
+            return store.architecture(
+                _require_project(project, action),
+                path=_optional_str(options.get("codegraph_path", options.get("codegraph_file"))),
+                aspects=_as_optional_list(options.get("codegraph_aspects")),
+            )
+    return None
+
+
 def _project_for_action(root: Path, options: dict[str, Any]) -> str:
     explicit = options.get("codegraph_project")
     if explicit:
@@ -374,6 +437,10 @@ def _as_optional_list(value: Any) -> list[Any] | None:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def _payload(**values: Any) -> dict[str, Any]:
+    return {key: value for key, value in values.items() if value is not None}
 
 
 def _compact_actions(options: dict[str, Any]) -> bool:

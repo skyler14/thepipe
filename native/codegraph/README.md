@@ -19,18 +19,30 @@ Run `scripts/codegraph/build-shared-library.sh` on macOS to build the
 context-based ctypes library archive as well as the standard sidecar archive.
 This is equivalent to `BUILD_SHARED=1 scripts/codegraph/build-sidecar.sh` but is
 clearer for CI/release jobs. The shared library reuses the donor MCP dispatcher
-through `tp_context_call`; it does not expose donor C structs. Each context
-carries a repo-local cache directory. Calls temporarily install that directory
-under a global lock because the pinned donor still resolves `CBM_CACHE_DIR`
-process-wide.
+through `tp_context_call` for general tools. It also exposes a read-only graph
+store facade for hot graph reads. The facade opens an existing SQLite graph DB
+in donor query mode, discovers the DB's internal project name, then dispatches
+graph read actions in-process with `CBM_CACHE_DIR` temporarily pointed at that
+DB's directory. It does not expose donor C structs to Python yet. Calls
+temporarily install the cache directory under a global lock because the pinned
+donor still resolves `CBM_CACHE_DIR` process-wide.
 
 Shared-library ABI v1 exports only stable coarse-grained functions:
 
 - `tp_context_new(cache_dir)` / `tp_context_free(context)`;
 - `tp_context_call(context, tool, request_json, out_json)`;
 - `tp_context_set_quiet(context, quiet)`;
+- `tp_store_open_query(db_path)` / `tp_store_close(store)`;
+- `tp_store_call(store, action, request_json, out_json)`;
+- `tp_cypher_query(store, request_json, out_json)`;
 - `tp_version()` for the pinned donor version;
 - `tp_abi_version()` for the thepipe wrapper contract.
+
+`tp_store_*` is for query-style graph actions such as `search_graph`,
+`query_graph`, `get_graph_schema`, and `get_architecture`. It validates that
+the DB already exists and does not create missing project databases. Python
+still treats `tp_context_call` as the fallback for indexing, mutation, and tools
+that are not yet worth splitting into narrower C functions.
 
 The wrapper is quiet by default before donor initialization, so in-process use
 does not leak structured logs into the host Python process. `quiet=False`
