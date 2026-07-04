@@ -1,0 +1,4 @@
+UPSTREAM_REPO=https://github.com/DeusData/codebase-memory-mcp
+UPSTREAM_COMMIT=b075f0506ce4286219edd1bc3dccb196f2ed7cb0
+UPSTREAM_API_VERSION=0.10.0
+UPSTREAM_BUILD_TARGET=cbm
