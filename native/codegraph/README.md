@@ -5,7 +5,8 @@ builds. Generated grammar C files are build inputs fetched into a temporary
 checkout. They are not vendored into this repository or installed with the
 Python package.
 
-Run `scripts/codegraph/build-sidecar.sh`. It:
+Run `scripts/codegraph/build-sidecar.sh` on macOS/Linux, or
+`scripts/codegraph/build-sidecar.ps1` on Windows. It:
 
 1. fetches exactly `UPSTREAM_COMMIT`;
 2. builds the standard binary with optional libgit2 disabled for portability;
@@ -13,7 +14,17 @@ Run `scripts/codegraph/build-sidecar.sh`. It:
 4. writes a SHA-256 checksum;
 5. removes the large temporary checkout unless `KEEP_BUILD=1`.
 
-The generated archive belongs in release storage, not git.
+The generated archive belongs in release storage, not git. Expected release
+families are:
+
+- `codebase-memory-mcp-darwin-arm64-<commit>.tar.gz`
+- `codebase-memory-mcp-darwin-amd64-<commit>.tar.gz`
+- `codebase-memory-mcp-linux-amd64-<commit>.tar.gz`
+- `codebase-memory-mcp-linux-arm64-<commit>.tar.gz`
+- `codebase-memory-mcp-windows-amd64-<commit>.zip`
+
+The Windows archive member is `codebase-memory-mcp.exe`; the Python installer
+keeps the `.exe` suffix in the versioned install path.
 
 Run `scripts/codegraph/build-shared-library.sh` on macOS to build the
 context-based ctypes library archive as well as the standard sidecar archive.
@@ -61,5 +72,6 @@ Runtime installation supports either compiled artifact:
 Both paths install only the compiled artifact into the thepipe cache. Neither
 path installs raw generated grammar C source.
 
-Linux and Windows shared-library packaging remain gated. The sidecar is the
-portable fallback until PIC/linking and allocator tests pass on those targets.
+Shared-library artifacts are preferred where a verified build exists. Linux and
+Windows shared-library packaging remain gated. The sidecar is the portable
+fallback until PIC/linking and allocator tests pass on those targets.

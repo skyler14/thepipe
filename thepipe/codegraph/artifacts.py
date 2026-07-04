@@ -16,11 +16,15 @@ class ArtifactError(RuntimeError):
     pass
 
 
+def default_binary_name() -> str:
+    return "codebase-memory-mcp.exe" if os.name == "nt" else "codebase-memory-mcp"
+
+
 def default_binary_path(
     *,
     version: str,
     install_dir: str | Path | None = None,
-    binary_name: str = "codebase-memory-mcp",
+    binary_name: str | None = None,
 ) -> Path:
     """Return the default sidecar install path for a pinned runtime."""
     root = (
@@ -28,7 +32,9 @@ def default_binary_path(
         if install_dir is not None
         else Path.home() / ".cache" / "thepipe" / "bin"
     )
-    return root / f"{binary_name}-{version}"
+    name = binary_name or default_binary_name()
+    path = Path(name)
+    return root / f"{path.stem}-{version}{path.suffix}"
 
 
 def default_library_name() -> str:
@@ -114,19 +120,20 @@ def install_sidecar_archive(
     expected_sha256: str,
     required_version: str,
     install_dir: str | Path | None = None,
-    binary_name: str = "codebase-memory-mcp",
+    binary_name: str | None = None,
 ) -> Path:
     """Install a pinned sidecar archive into the default thepipe cache."""
+    member_name = binary_name or default_binary_name()
     return install_archive(
         archive,
         default_binary_path(
             version=required_version,
             install_dir=install_dir,
-            binary_name=binary_name,
+            binary_name=member_name,
         ),
         expected_sha256=expected_sha256,
         required_version=required_version,
-        binary_name=binary_name,
+        binary_name=member_name,
     )
 
 

@@ -1,5 +1,6 @@
 from .artifacts import (
     ArtifactError,
+    default_binary_name,
     default_binary_path,
     default_library_name,
     default_library_path,
@@ -94,6 +95,7 @@ __all__ = [
     "recommended_gitignore_entries",
     "sidecar_from_env",
     "default_binary_path",
+    "default_binary_name",
     "default_library_name",
     "default_library_path",
     "install_archive",

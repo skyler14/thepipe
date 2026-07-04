@@ -9,6 +9,7 @@ import pytest
 
 from thepipe.codegraph.artifacts import (
     ArtifactError,
+    default_binary_name,
     default_binary_path,
     default_library_path,
     install_archive,
@@ -109,6 +110,18 @@ def test_install_sidecar_archive_uses_versioned_cache_path(tmp_path: Path) -> No
     assert default_binary_path(version="0.10.0", install_dir=tmp_path) == (
         tmp_path / "codebase-memory-mcp-0.10.0"
     )
+
+
+def test_default_binary_path_preserves_windows_exe_suffix(tmp_path: Path) -> None:
+    assert default_binary_path(
+        version="0.10.0",
+        install_dir=tmp_path,
+        binary_name="codebase-memory-mcp.exe",
+    ) == tmp_path / "codebase-memory-mcp-0.10.0.exe"
+    assert default_binary_name() in {
+        "codebase-memory-mcp",
+        "codebase-memory-mcp.exe",
+    }
 
 
 def test_install_shared_library_archive_uses_versioned_cache_path(tmp_path: Path) -> None:
