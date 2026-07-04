@@ -130,14 +130,15 @@ TOOLS = [
                     "properties": {
                         "code_relations": {
                             "type": "string",
-                            "enum": ["limited", "map", "mapnn", "mapall", "mapnew"],
+                            "enum": ["limited", "map", "mapnn", "mapall", "mapnew", "graph"],
                             "description": (
                                 "Code analysis mode: "
                                 "'limited' = only requested files, "
                                 "'map' = all files with digests (or only include_patterns if provided), "
                                 "'mapnn' = digests with N1/N2 neighbor cutoff (recommended), "
                                 "'mapall' = full for patterns, digest for rest, "
-                                "'mapnew' = diff map (old vs new git revisions)"
+                                "'mapnew' = diff map (old vs new git revisions), "
+                                "'graph' = sidecar-backed persistent code graph"
                             )
                         },
                         "code_n1": {
@@ -159,6 +160,157 @@ TOOLS = [
                         "json_verbose": {
                             "type": "boolean",
                             "description": "Include imports, line-level symbol spans, call graph, logical region hashes, and mapnew file/hunk preview metadata in JSON output (-f json)"
+                        },
+                        "codegraph_binary": {
+                            "type": "string",
+                            "description": "Path to a pinned codegraph sidecar executable for code_relations='graph'"
+                        },
+                        "codegraph_archive": {
+                            "type": "string",
+                            "description": "Path to a pinned sidecar tar/zip archive to verify and install before graph indexing"
+                        },
+                        "codegraph_sha256": {
+                            "type": "string",
+                            "description": "Expected SHA-256 for codegraph_archive; required when codegraph_archive is set"
+                        },
+                        "codegraph_required_version": {
+                            "type": "string",
+                            "description": "Required sidecar runtime version for archive install (default: pinned thepipe codegraph runtime)"
+                        },
+                        "codegraph_install_dir": {
+                            "type": "string",
+                            "description": "Directory for the installed sidecar executable; defaults to ~/.cache/thepipe/bin"
+                        },
+                        "codegraph_library": {
+                            "type": "string",
+                            "description": "Path to a pinned codegraph shared library for code_relations='graph'"
+                        },
+                        "codegraph_library_archive": {
+                            "type": "string",
+                            "description": "Path to a pinned shared-library tar/zip archive to verify and install before graph indexing"
+                        },
+                        "codegraph_library_sha256": {
+                            "type": "string",
+                            "description": "Expected SHA-256 for codegraph_library_archive; required when codegraph_library_archive is set"
+                        },
+                        "codegraph_library_name": {
+                            "type": "string",
+                            "description": "Shared-library archive member name, e.g. libthepipe_codegraph.dylib"
+                        },
+                        "codegraph_index_mode": {
+                            "type": "string",
+                            "enum": ["fast", "moderate", "full", "cross-repo-intelligence"],
+                            "description": "Native codegraph indexing mode for code_relations='graph' (default: fast)"
+                        },
+                        "codegraph_refresh": {
+                            "type": "boolean",
+                            "description": "Whether graph mode should refresh the native index when a backend is supplied; defaults true for emit and false for read actions with an existing deployment"
+                        },
+                        "codegraph_git_exclude": {
+                            "type": "boolean",
+                            "description": "Add repo-local .thepipe/codegraph/cache/ to .git/info/exclude (default: true)"
+                        },
+                        "codegraph_timeout": {
+                            "type": "number",
+                            "description": "Seconds to wait for sidecar calls (default: 300 in graph integration)"
+                        },
+                        "codegraph_action": {
+                            "type": "string",
+                            "enum": [
+                                "emit",
+                                "summary",
+                                "files",
+                                "entities",
+                                "edges",
+                                "neighbors",
+                                "index_repository",
+                                "search_graph",
+                                "query_graph",
+                                "trace_path",
+                                "get_code_snippet",
+                                "get_graph_schema",
+                                "get_architecture",
+                                "search_code",
+                                "list_projects",
+                                "index_status",
+                                "delete_project",
+                                "detect_changes",
+                                "manage_adr",
+                                "ingest_traces"
+                            ],
+                            "description": "Use a graph deployment or native backend for targeted graph access; default is emit"
+                        },
+                        "codegraph_project": {
+                            "type": "string",
+                            "description": "Explicit native project name for native codegraph actions; inferred from repo deployment when omitted"
+                        },
+                        "codegraph_query": {
+                            "type": "string",
+                            "description": "Search text for entities/search_graph/search_code, or Cypher when codegraph_action='query_graph' and codegraph_cypher is omitted"
+                        },
+                        "codegraph_cypher": {
+                            "type": "string",
+                            "description": "Cypher graph query for codegraph_action='query_graph'"
+                        },
+                        "codegraph_pattern": {
+                            "type": "string",
+                            "description": "Code search pattern for codegraph_action='search_code'"
+                        },
+                        "codegraph_kind": {
+                            "type": "string",
+                            "description": "Entity/node label filter, e.g. Function or Class"
+                        },
+                        "codegraph_file": {
+                            "type": "string",
+                            "description": "File/path filter for entities/search_graph/get_architecture"
+                        },
+                        "codegraph_file_pattern": {
+                            "type": "string",
+                            "description": "Native file-pattern filter for search_graph/search_code"
+                        },
+                        "codegraph_qualified_name": {
+                            "type": "string",
+                            "description": "Qualified-name filter or snippet target"
+                        },
+                        "codegraph_entity": {
+                            "type": "string",
+                            "description": "Entity id, native id, name, or qualified name for neighbors/trace_path/snippet"
+                        },
+                        "codegraph_direction": {
+                            "type": "string",
+                            "enum": ["inbound", "outbound", "both"],
+                            "description": "Traversal direction for codegraph_action='neighbors'"
+                        },
+                        "codegraph_depth": {
+                            "type": "integer",
+                            "description": "Traversal depth for codegraph_action='neighbors'"
+                        },
+                        "codegraph_edge_types": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional edge type filter for neighbors/trace_path"
+                        },
+                        "codegraph_aspects": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Architecture aspects for codegraph_action='get_architecture'"
+                        },
+                        "codegraph_traces": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": "Trace objects for codegraph_action='ingest_traces'"
+                        },
+                        "codegraph_limit": {
+                            "type": "integer",
+                            "description": "Maximum rows/entities/edges returned by graph actions"
+                        },
+                        "codegraph_compact": {
+                            "type": "boolean",
+                            "description": "Strip bulky graph attributes from action output (default: true)"
+                        },
+                        "codegraph_verbose": {
+                            "type": "boolean",
+                            "description": "Include full graph action attributes; overrides compact output"
                         }
                     }
                 }
@@ -168,7 +320,8 @@ TOOLS = [
         "examples": [
             {"dir_path": "./src", "include_patterns": ["*.py", "*.tsx"]},
             {"dir_path": ".", "include_patterns": ["src/*.py"], "options": {"code_relations": "mapnn"}},
-            {"dir_path": ".", "include_patterns": ["main.py"], "options": {"code_relations": "mapnn", "code_n1": 2, "code_n2": 4}}
+            {"dir_path": ".", "include_patterns": ["main.py"], "options": {"code_relations": "mapnn", "code_n1": 2, "code_n2": 4}},
+            {"dir_path": ".", "options": {"code_relations": "graph", "codegraph_binary": "/path/to/codebase-memory-mcp"}}
         ]
     },
     {

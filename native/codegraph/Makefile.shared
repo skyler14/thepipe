@@ -1,0 +1,15 @@
+TP_SHIM ?= native/codegraph/tp_codegraph.c
+TP_INCLUDE ?= native/codegraph
+TP_VERSION ?= dev
+TP_SHARED_OUT ?= $(BUILD_DIR)/libthepipe_codegraph.dylib
+TP_SHARED_FLAG ?= -dynamiclib
+
+.PHONY: tp-shared
+
+tp-shared: $(OBJS_VENDORED_PROD)
+	$(CC) $(CFLAGS_PROD) -fPIC $(TP_SHARED_FLAG) \
+		-DTP_CODEGRAPH_VERSION=\"$(TP_VERSION)\" -I$(TP_INCLUDE) \
+		-o $(TP_SHARED_OUT) $(TP_SHIM) $(PROD_SRCS) \
+		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
+		$(OBJS_VENDORED_PROD) $(LDFLAGS)
+	@echo "Built: $(TP_SHARED_OUT)"

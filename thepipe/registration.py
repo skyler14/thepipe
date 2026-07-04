@@ -114,6 +114,9 @@ or prior context already reveals most of the file structure.
 
 # mapnew - diff map (old vs new git revisions)
 {thepipe_cmd} ./repo --options '{"code_relations": "mapnew"}' -f
+
+# graph - persistent sidecar-backed graph, only when a pinned sidecar is available
+{thepipe_cmd} ./repo --options '{"code_relations": "graph", "codegraph_binary": "/path/to/codebase-memory-mcp"}' -f json
 ```
 
 ## Code Analysis Parameters (`--options`)
@@ -137,6 +140,12 @@ or prior context already reveals most of the file structure.
 - `json_verbose`: Include imports, symbol spans, call graph, logical region hashes, and mapnew file/hunk preview metadata in JSON output (`-f json`)
 - `code_nf`: File-count threshold used by `auto`
 - `code_nt`: Token threshold used by `auto`
+- `codegraph_binary`: Pinned sidecar executable for `code_relations: "graph"`
+- `codegraph_archive` + `codegraph_sha256`: Verify and install a pinned sidecar archive before graph indexing
+- `codegraph_index_mode`: Native graph indexing mode (`fast`, `moderate`, `full`, `cross-repo-intelligence`)
+- `codegraph_refresh`: Re-index when a sidecar/backend is supplied (default: `true`)
+- `codegraph_git_exclude`: Add repo-local graph cache to `.git/info/exclude` (default: `true`)
+- `codegraph_timeout`: Sidecar timeout in seconds
 
 ## File Filtering
 
@@ -494,11 +503,13 @@ Use thepipe for file/URL/database extraction and codebase mapping.
 ```bash
 {thepipe_cmd} ./repo --options '{{"code_relations": "auto"}}' -f
 {thepipe_cmd} ./repo --options '{{"code_relations": "map"}}' -f
+{thepipe_cmd} ./repo --options '{{"code_relations": "graph", "codegraph_binary": "/path/to/codebase-memory-mcp"}}' -f json
 ```
 
 ### Notes
 - Use the absolute `thepipe` path above instead of relying on shell PATH.
 - Prefer `code_relations` modes for programming/repo analysis tasks.
+- Use `code_relations: "graph"` only when a pinned codegraph sidecar binary or verified archive is available.
 - Default output is markdown; use `-f json` only if explicitly requested.
 - For agentic runs, prefer `--llm-provider agent` (FIFO pipes) unless a complex workflow needs CLI output.
 {end_marker}

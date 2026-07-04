@@ -8,6 +8,7 @@ Supports code_relations modes: limited, map, mapnn, mapall, mapnew
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -1405,6 +1406,19 @@ def build_code_relations_json_payload(
     mode: str,
     repo_root: str,
 ) -> Dict[str, Any]:
+    for chunk in chunks:
+        meta = chunk.meta if isinstance(chunk.meta, dict) else {}
+        graph_payload = meta.get("code_relations_payload")
+        if isinstance(graph_payload, dict):
+            return graph_payload
+        if meta.get("artifact") == "codegraph_action":
+            try:
+                action_payload = json.loads(chunk.text or "{}")
+            except json.JSONDecodeError:
+                action_payload = None
+            if isinstance(action_payload, dict):
+                return action_payload
+
     if mode == "mapnew":
         return _build_mapnew_json_payload(chunks, repo_root)
 
