@@ -91,8 +91,8 @@ thepipe ./repo --options '{"code_relations": "auto"}' -f
 ### Persistent Code Graph Sidecar
 
 For deeper graph queries, `code_relations: "graph"` can use a pinned
-`codebase-memory-mcp` sidecar and projects the native SQLite graph back into
-thepipe chunks plus `code-relations/v2` JSON:
+`codebase-memory-mcp` sidecar or shared library and projects the native graph
+back into thepipe chunks plus `code-relations/v2` JSON:
 
 ```bash
 thepipe ./repo --options '{"code_relations": "graph", "codegraph_binary": "/path/to/codebase-memory-mcp"}' -f json
@@ -127,12 +127,9 @@ Native graph actions available through the sidecar or shared library are
 `manage_adr`, and `ingest_traces`. SQL-facing work belongs to database mode;
 codegraph mode uses graph actions and Cypher for graph-native queries.
 
-Neighbor actions reject ambiguous short entity names. Use a qualified name when
-multiple symbols share one name. They also suppress edges below
-`codegraph_min_confidence` (default `0.5`) and stop traversing through nodes above
-`codegraph_max_transit_degree` (default `25`). Suppressed-edge counts and pruned
-hubs remain visible in the response. Set either option to `null` to disable that
-filter.
+Convenience actions such as `summary`, `files`, `entities`, `edges`, and
+`neighbors` are thin wrappers over the same native actions and Cypher path; they
+do not expose a separate codegraph SQL path.
 
 Shared-library builds use the same graph contract through
 `codegraph_library` or `codegraph_library_archive` plus

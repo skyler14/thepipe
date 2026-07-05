@@ -3,7 +3,7 @@ from __future__ import annotations
 import ctypes
 import json
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 
 class SharedLibraryError(RuntimeError):
@@ -72,31 +72,6 @@ class SharedLibraryBackend:
         if self._tp_abi_version is not None:
             self._tp_abi_version.argtypes = []
             self._tp_abi_version.restype = ctypes.c_char_p
-        self._tp_store_open_query = getattr(self.library, "tp_store_open_query", None)
-        self._tp_store_call = getattr(self.library, "tp_store_call", None)
-        self._tp_store_close = getattr(self.library, "tp_store_close", None)
-        self._tp_cypher_query = getattr(self.library, "tp_cypher_query", None)
-        if self._tp_store_open_query is not None:
-            self._tp_store_open_query.argtypes = [ctypes.c_char_p]
-            self._tp_store_open_query.restype = ctypes.c_void_p
-        if self._tp_store_call is not None:
-            self._tp_store_call.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_char_p,
-                ctypes.c_char_p,
-                ctypes.POINTER(ctypes.c_void_p),
-            ]
-            self._tp_store_call.restype = ctypes.c_int
-        if self._tp_store_close is not None:
-            self._tp_store_close.argtypes = [ctypes.c_void_p]
-            self._tp_store_close.restype = None
-        if self._tp_cypher_query is not None:
-            self._tp_cypher_query.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_char_p,
-                ctypes.POINTER(ctypes.c_void_p),
-            ]
-            self._tp_cypher_query.restype = ctypes.c_int
 
     def _set_quiet(self, quiet: bool) -> None:
         if self._tp_context_set_quiet is None:
@@ -160,25 +135,6 @@ class SharedLibraryBackend:
             return None
         return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
 
-    def has_direct_store_api(self) -> bool:
-        return all(
-            symbol is not None
-            for symbol in (
-                self._tp_store_open_query,
-                self._tp_store_call,
-                self._tp_store_close,
-                self._tp_cypher_query,
-            )
-        )
-
-    def open_store(self, db_path: str | Path) -> SharedLibraryStore:
-        if not self.has_direct_store_api():
-            raise SharedLibraryError("codegraph library is missing direct store ABI")
-        handle = self._tp_store_open_query(str(db_path).encode("utf-8"))
-        if not handle:
-            raise SharedLibraryError(f"codegraph library could not open graph DB: {db_path}")
-        return SharedLibraryStore(self, handle, Path(db_path))
-
     def close(self) -> None:
         if self._context:
             self.library.tp_context_free(self._context)
@@ -222,175 +178,3 @@ def _unwrap_mcp(envelope: dict[str, Any], *, tool: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"text": text}
     return decoded if isinstance(decoded, dict) else {"value": decoded}
-
-
-class SharedLibraryStore:
-    """Read-only direct-store handle for optional low-level codegraph ABI calls."""
-
-    def __init__(
-        self, backend: SharedLibraryBackend, handle: int, db_path: Path
-    ) -> None:
-        self.backend = backend
-        self.handle = handle
-        self.db_path = db_path
-
-    def call(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        if not self.handle:
-            raise SharedLibraryError("codegraph direct store handle is closed")
-        output = ctypes.c_void_p()
-        request = json.dumps(
-            payload or {},
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        status = self.backend._tp_store_call(
-            self.handle,
-            action.encode("utf-8"),
-            request,
-            ctypes.byref(output),
-        )
-        return self._decode_output(status, output, operation=f"store {action}")
-
-    def summary(self, project: str) -> dict[str, Any]:
-        return self.call("index_status", {"project": project})
-
-    def search(
-        self,
-        project: str,
-        *,
-        query: str | None = None,
-        label: str | None = None,
-        name_pattern: str | None = None,
-        qn_pattern: str | None = None,
-        file_pattern: str | None = None,
-        relationship: str | None = None,
-        semantic_query: Sequence[str] | None = None,
-        limit: int | None = None,
-        offset: int | None = None,
-    ) -> dict[str, Any]:
-        return self.call(
-            "search_graph",
-            _payload(
-                project=project,
-                query=query,
-                label=label,
-                name_pattern=name_pattern,
-                qn_pattern=qn_pattern,
-                file_pattern=file_pattern,
-                relationship=relationship,
-                semantic_query=(
-                    list(semantic_query) if semantic_query is not None else None
-                ),
-                limit=limit,
-                offset=offset,
-            ),
-        )
-
-    def neighbors(
-        self,
-        project: str,
-        *,
-        entity: int | str,
-        direction: str = "both",
-        depth: int = 1,
-        edge_types: Sequence[str] | None = None,
-        limit: int | None = None,
-    ) -> dict[str, Any]:
-        return self.call(
-            "trace_path",
-            _payload(
-                project=project,
-                function=str(entity),
-                direction=direction,
-                depth=depth,
-                edge_types=list(edge_types) if edge_types is not None else None,
-                limit=limit,
-            ),
-        )
-
-    def schema(self, project: str) -> dict[str, Any]:
-        return self.call("get_graph_schema", {"project": project})
-
-    def architecture(
-        self,
-        project: str,
-        *,
-        path: str | None = None,
-        aspects: Sequence[str] | None = None,
-    ) -> dict[str, Any]:
-        return self.call(
-            "get_architecture",
-            _payload(
-                project=project,
-                path=path,
-                aspects=list(aspects) if aspects is not None else None,
-            ),
-        )
-
-    def cypher(
-        self, project: str, query: str, *, max_rows: int | None = None
-    ) -> dict[str, Any]:
-        if not self.handle:
-            raise SharedLibraryError("codegraph direct store handle is closed")
-        output = ctypes.c_void_p()
-        request = json.dumps(
-            _payload(project=project, query=query, max_rows=max_rows),
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        status = self.backend._tp_cypher_query(
-            self.handle,
-            request,
-            ctypes.byref(output),
-        )
-        return self._decode_output(status, output, operation="cypher query")
-
-    def _decode_output(
-        self, status: int, output: ctypes.c_void_p, *, operation: str
-    ) -> dict[str, Any]:
-        if not output.value:
-            raise SharedLibraryError(
-                f"codegraph library returned status {status} without output"
-            )
-        try:
-            raw = ctypes.string_at(output.value).decode("utf-8")
-        finally:
-            self.backend.library.tp_string_free(output)
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise SharedLibraryError(
-                f"codegraph library returned invalid JSON for {operation}"
-            ) from exc
-        if status:
-            if isinstance(decoded, dict):
-                detail = decoded.get("error") or decoded.get("message")
-            else:
-                detail = None
-            raise SharedLibraryError(
-                str(detail or f"codegraph direct {operation} failed with status {status}")
-            )
-        if isinstance(decoded, dict):
-            return _unwrap_mcp(decoded, tool=operation)
-        return {"value": decoded}
-
-    def close(self) -> None:
-        if self.handle:
-            self.backend._tp_store_close(self.handle)
-            self.handle = 0
-
-    def __enter__(self) -> SharedLibraryStore:
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        self.close()
-
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except Exception:
-            pass
-
-
-def _payload(**values: Any) -> dict[str, Any]:
-    return {key: value for key, value in values.items() if value is not None}

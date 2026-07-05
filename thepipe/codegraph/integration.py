@@ -7,11 +7,9 @@ from typing import Any
 
 from thepipe.core import Chunk
 
-from .access import CodegraphGraph
 from .artifacts import install_shared_library_archive, install_sidecar_archive
 from .client import CodeGraphBackend, CodegraphClient
-from .database import CodegraphDatabase
-from .outputs import CodegraphArtifacts, build_database_artifacts
+from .outputs import CodegraphArtifacts
 from .sharedlib import SharedLibraryBackend
 from .sidecar import PINNED_RUNTIME_VERSION, SidecarBackend
 from .storage import (
@@ -22,13 +20,15 @@ from .storage import (
     project_cache_dir,
 )
 
-LOCAL_GRAPH_ACTIONS = frozenset(
-    {"summary", "files", "entities", "edges", "neighbors", "sql"}
-)
 NATIVE_GRAPH_ACTIONS = frozenset(
     {
         "index_repository",
         "index",
+        "summary",
+        "files",
+        "entities",
+        "edges",
+        "neighbors",
         "search_graph",
         "query_graph",
         "trace_path",
@@ -47,11 +47,6 @@ NATIVE_GRAPH_ACTIONS = frozenset(
 PROJECT_MANAGEMENT_ACTIONS = frozenset(
     {"list_projects", "index_status", "delete_project"}
 )
-DIRECT_STORE_NATIVE_ACTIONS = frozenset(
-    {"search_graph", "query_graph", "get_graph_schema", "get_architecture"}
-)
-
-
 def process_codegraph(
     repo_root: str | Path,
     *,
@@ -74,19 +69,22 @@ def process_codegraph(
                 registry=registry,
                 git_exclude=bool(options.get("codegraph_git_exclude", True)),
             )
+            artifacts: CodegraphArtifacts | None = None
             if _should_refresh(root, options):
-                client.index_repository(
+                artifacts = client.index_repository(
                     root,
                     mode=str(options.get("codegraph_index_mode", "fast")),
                     persistence=bool(options.get("codegraph_persistence", False)),
                 )
             if _action(options) != "emit":
                 return [_action_chunk(root, options, client=client)]
-            artifacts = client.load_artifacts(root)
+            if artifacts is None:
+                artifacts = client.load_artifacts(root)
         else:
-            if _action(options) != "emit":
-                return [_action_chunk(root, options)]
-            artifacts = _load_detected_artifacts(root)
+            raise RuntimeError(
+                "code_relations='graph' requires codegraph_binary, "
+                "codegraph_library, codegraph_archive, or codegraph_library_archive"
+            )
     finally:
         if owned_backend:
             close = getattr(backend, "close", None)
@@ -120,7 +118,7 @@ def _action_chunk(
         meta={
             "artifact": "codegraph_action",
             "schema_version": "thepipe-codegraph-action/v1",
-            "source": "codegraph-sqlite",
+            "source": "codegraph-native",
             "action": payload["action"],
         },
     )
@@ -130,83 +128,22 @@ def _run_graph_action(
     root: Path, options: dict[str, Any], *, client: CodegraphClient | None = None
 ) -> dict[str, Any]:
     action = _action(options)
-    if action in NATIVE_GRAPH_ACTIONS:
-        if client is None:
-            raise RuntimeError(
-                f"codegraph_action='{action}' requires codegraph_binary, "
-                "codegraph_library, codegraph_archive, or codegraph_library_archive"
-            )
-        result = _run_native_graph_action(root, options, client)
-        if _compact_actions(options):
-            result = _compact_result(result)
-        return {
-            "schema_version": "thepipe-codegraph-action/v1",
-            "source": "codegraph-native",
-            "repo_root": str(root),
-            "project": _project_for_action(root, options),
-            "action": "index_repository" if action == "index" else action,
-            "result": result,
-        }
-    if action not in LOCAL_GRAPH_ACTIONS:
+    if action not in NATIVE_GRAPH_ACTIONS:
         raise RuntimeError(f"unsupported codegraph_action: {action}")
-    with CodegraphGraph.open_repo(root) as graph:
-        if action == "summary":
-            result: Any = graph.summary()
-        elif action == "files":
-            result = graph.files()[: int(options.get("codegraph_limit", 200))]
-        elif action == "entities":
-            result = graph.find_entities(
-                query=options.get("codegraph_query"),
-                kind=options.get("codegraph_kind"),
-                file_path=options.get("codegraph_file"),
-                qualified_name=options.get("codegraph_qualified_name"),
-                limit=int(options.get("codegraph_limit", 50)),
-            )
-        elif action == "edges":
-            result = graph.edges()[: int(options.get("codegraph_limit", 200))]
-        elif action == "neighbors":
-            entity = options.get("codegraph_entity")
-            if entity is None:
-                raise RuntimeError(
-                    "codegraph_action='neighbors' requires codegraph_entity"
-                )
-            edge_types = options.get("codegraph_edge_types")
-            if isinstance(edge_types, str):
-                edge_types = [edge_types]
-            min_confidence = options.get("codegraph_min_confidence", 0.5)
-            max_transit_degree = options.get("codegraph_max_transit_degree", 25)
-            result = graph.neighbors(
-                entity,
-                direction=str(options.get("codegraph_direction", "both")),
-                depth=int(options.get("codegraph_depth", 1)),
-                edge_types=edge_types,
-                min_confidence=(
-                    None if min_confidence is None else float(min_confidence)
-                ),
-                max_transit_degree=(
-                    None
-                    if max_transit_degree is None
-                    else int(max_transit_degree)
-                ),
-                limit=int(options.get("codegraph_limit", 200)),
-            )
-        elif action == "sql":
-            sql = options.get("codegraph_sql")
-            if not sql:
-                raise RuntimeError("codegraph_action='sql' requires codegraph_sql")
-            result = graph.query_sql(
-                str(sql),
-                options.get("codegraph_sql_params"),
-                max_rows=int(options.get("codegraph_limit", 200)),
-            )
+    if client is None:
+        raise RuntimeError(
+            f"codegraph_action='{action}' requires codegraph_binary, "
+            "codegraph_library, codegraph_archive, or codegraph_library_archive"
+        )
+    result = _run_native_graph_action(root, options, client)
     if _compact_actions(options):
         result = _compact_result(result)
     return {
         "schema_version": "thepipe-codegraph-action/v1",
-        "source": "codegraph-sqlite",
+        "source": "codegraph-native",
         "repo_root": str(root),
-        "project": graph.project,
-        "action": action,
+        "project": _project_for_action(root, options),
+        "action": "index_repository" if action == "index" else action,
         "result": result,
     }
 
@@ -216,9 +153,6 @@ def _run_native_graph_action(
 ) -> Any:
     action = _action(options)
     project = _project_for_action(root, options)
-    direct_result = _run_direct_store_action(root, options, client, project)
-    if direct_result is not None:
-        return direct_result
     if action in {"index_repository", "index"}:
         artifacts = client.index_repository(
             root,
@@ -233,6 +167,55 @@ def _run_native_graph_action(
         return client.index_status(_require_project(project, action))
     if action == "delete_project":
         return client.delete_project(_require_project(project, action))
+    if action == "summary":
+        return client.index_status(_require_project(project, action))
+    if action == "files":
+        return _cypher_rows(
+            client.query_graph(
+                _require_project(project, action),
+                (
+                    "MATCH (f:File) RETURN f.file_path AS path, "
+                    "f.name AS name, f.qualified_name AS qualified_name "
+                    f"LIMIT {int(options.get('codegraph_limit', 200))}"
+                ),
+                max_rows=int(options.get("codegraph_limit", 200)),
+            )
+        )
+    if action == "entities":
+        result = client.search_graph(
+            _require_project(project, action),
+            query=_optional_str(options.get("codegraph_query")),
+            label=_optional_str(options.get("codegraph_kind")),
+            qn_pattern=_optional_str(options.get("codegraph_qualified_name")),
+            file_pattern=_optional_str(options.get("codegraph_file")),
+            limit=int(options.get("codegraph_limit", 50)),
+            offset=int(options.get("codegraph_offset", 0)),
+        )
+        return result.get("results", result)
+    if action == "edges":
+        return _cypher_rows(
+            client.query_graph(
+                _require_project(project, action),
+                (
+                    "MATCH (a)-[r]->(b) RETURN r.type AS kind, "
+                    "a.qualified_name AS from, b.qualified_name AS to "
+                    f"LIMIT {int(options.get('codegraph_limit', 200))}"
+                ),
+                max_rows=int(options.get("codegraph_limit", 200)),
+            )
+        )
+    if action == "neighbors":
+        entity = options.get("codegraph_entity", options.get("codegraph_function"))
+        if not entity:
+            raise RuntimeError("codegraph_action='neighbors' requires codegraph_entity")
+        return client.trace_path(
+            _require_project(project, action),
+            str(entity),
+            direction=str(options.get("codegraph_direction", "both")),
+            depth=int(options.get("codegraph_depth", 1)),
+            mode=str(options.get("codegraph_trace_mode", "calls")),
+            edge_types=_as_optional_list(options.get("codegraph_edge_types")),
+        )
     if action == "search_graph":
         return client.search_graph(
             _require_project(project, action),
@@ -338,63 +321,6 @@ def _run_native_graph_action(
     raise RuntimeError(f"unsupported codegraph_action: {action}")
 
 
-def _run_direct_store_action(
-    root: Path,
-    options: dict[str, Any],
-    client: CodegraphClient,
-    project: str,
-) -> Any | None:
-    action = _action(options)
-    if action not in DIRECT_STORE_NATIVE_ACTIONS:
-        return None
-    if not bool(options.get("codegraph_direct_store", True)):
-        return None
-    backend = client.backend
-    has_direct = getattr(backend, "has_direct_store_api", None)
-    open_store = getattr(backend, "open_store", None)
-    if has_direct is None or open_store is None or not has_direct():
-        return None
-    deployment = discover_project_deployment(root)
-    if deployment is None:
-        return None
-    with open_store(deployment.db_path) as store:
-        if action == "search_graph":
-            return store.search(
-                _require_project(project, action),
-                **_payload(
-                    query=_optional_str(options.get("codegraph_query")),
-                    label=_optional_str(options.get("codegraph_kind")),
-                    name_pattern=_optional_str(options.get("codegraph_name_pattern")),
-                    qn_pattern=_optional_str(options.get("codegraph_qn_pattern")),
-                    file_pattern=_optional_str(
-                        options.get("codegraph_file_pattern", options.get("codegraph_file"))
-                    ),
-                    relationship=_optional_str(options.get("codegraph_relationship")),
-                    semantic_query=_as_optional_list(options.get("codegraph_semantic_query")),
-                    limit=int(options.get("codegraph_limit", 200)),
-                    offset=int(options.get("codegraph_offset", 0)),
-                ),
-            )
-        if action == "query_graph":
-            query = options.get("codegraph_cypher", options.get("codegraph_query"))
-            if not query:
-                raise RuntimeError("codegraph_action='query_graph' requires codegraph_cypher")
-            return store.cypher(
-                _require_project(project, action),
-                str(query),
-                max_rows=_optional_int(options.get("codegraph_limit")),
-            )
-        if action == "get_graph_schema":
-            return store.schema(_require_project(project, action))
-        if action == "get_architecture":
-            return store.architecture(
-                _require_project(project, action),
-                path=_optional_str(options.get("codegraph_path", options.get("codegraph_file"))),
-                aspects=_as_optional_list(options.get("codegraph_aspects")),
-            )
-    return None
-
-
 def _project_for_action(root: Path, options: dict[str, Any]) -> str:
     explicit = options.get("codegraph_project")
     if explicit:
@@ -461,6 +387,24 @@ def _compact_result(value: Any) -> Any:
             if key != "attributes"
         }
     return value
+
+
+def _cypher_rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+    columns = result.get("columns", [])
+    rows = result.get("rows", [])
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return []
+    projected: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        projected.append(
+            {
+                str(column): row[index] if index < len(row) else None
+                for index, column in enumerate(columns)
+            }
+        )
+    return projected
 
 
 def _backend_from_options(
@@ -543,23 +487,6 @@ def _backend_from_options(
             timeout=float(options.get("codegraph_timeout", 300)),
         )
     return None
-
-
-def _load_detected_artifacts(root: Path) -> CodegraphArtifacts:
-    deployment = discover_project_deployment(root)
-    if deployment is None:
-        raise RuntimeError(
-            "graph mode needs an existing deployment or explicit "
-            "codegraph_binary/codegraph_library/codegraph_archive/"
-            "codegraph_library_archive"
-        )
-    with CodegraphDatabase(deployment.db_path) as database:
-        database.validate_schema()
-        return build_database_artifacts(
-            database,
-            deployment.project_name,
-            repo_root=str(root),
-        )
 
 
 def _chunks_with_summary(artifacts: CodegraphArtifacts) -> list[Chunk]:
