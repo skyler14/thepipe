@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import importlib.util
 import gzip
+import re
 import sqlite3
 import types
 from pathlib import Path
@@ -20,12 +21,23 @@ JUPYSQL_AVAILABLE = importlib.util.find_spec("jupysql") is not None
 
 
 class _SQLiteOdbcCursor:
-    def __init__(self, connection):
+    def __init__(self, connection, *, limit_unsupported=False):
         self._connection = connection
         self._cursor = connection.cursor()
         self.description = None
+        self.limit_unsupported = limit_unsupported
 
     def execute(self, query, params=None):
+        if self.limit_unsupported and " LIMIT " in f" {query.upper()} ":
+            raise sqlite3.OperationalError("LIMIT is not supported by this ODBC driver")
+        fetch_match = re.search(r"\s+FETCH\s+FIRST\s+(\d+)\s+ROWS\s+ONLY\s*$", query, re.IGNORECASE)
+        if fetch_match:
+            query = re.sub(
+                r"\s+FETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\s*$",
+                f" LIMIT {fetch_match.group(1)}",
+                query,
+                flags=re.IGNORECASE,
+            )
         if params is None:
             self._cursor.execute(query)
         elif isinstance(params, tuple):
@@ -66,11 +78,15 @@ class _SQLiteOdbcCursor:
 
 
 class _SQLiteOdbcConnection:
-    def __init__(self, path):
+    def __init__(self, path, *, limit_unsupported=False):
         self._connection = sqlite3.connect(path)
+        self.limit_unsupported = limit_unsupported
 
     def cursor(self):
-        return _SQLiteOdbcCursor(self._connection)
+        return _SQLiteOdbcCursor(
+            self._connection,
+            limit_unsupported=self.limit_unsupported,
+        )
 
     def commit(self):
         return self._connection.commit()
@@ -430,6 +446,72 @@ class TestODBCHandling(unittest.TestCase):
             self.assertIn("Bob", process_query_chunk.text)
         finally:
             os.unlink(db_path)
+
+    def test_odbc_preview_falls_back_when_limit_is_not_supported(self):
+        from thepipe.database_utils import DatabaseManager
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+
+        seed = sqlite3.connect(db_path)
+        try:
+            seed.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, customer TEXT)")
+            seed.execute("INSERT INTO orders (customer) VALUES ('Alice')")
+            seed.commit()
+        finally:
+            seed.close()
+
+        def fake_import(name):
+            if name != "pyodbc":
+                raise ImportError(name)
+            return types.SimpleNamespace(
+                connect=lambda connect_string, autocommit=True: _SQLiteOdbcConnection(
+                    db_path,
+                    limit_unsupported=True,
+                )
+            )
+
+        connect_url = f"odbc://?connect={quote(f'DRIVER=SQLite3;Database={db_path}', safe='')}"
+
+        try:
+            with mock.patch("thepipe.database_utils.importlib.import_module", side_effect=fake_import):
+                manager = DatabaseManager(connect_url, verbose=False)
+                preview_chunk = manager.get_preview()
+                manager.close()
+
+            self.assertIn("Alice", preview_chunk.text)
+            self.assertNotIn("Error getting preview", preview_chunk.text)
+        finally:
+            os.unlink(db_path)
+
+    def test_odbc_schema_uses_schema_qualified_table_metadata(self):
+        from thepipe.database_utils import DatabaseManager
+
+        manager = DatabaseManager.__new__(DatabaseManager)
+        manager.db_type = "odbc"
+        manager._odbc_connection = object()
+        manager.verbose = False
+        manager._duckdb_read_warning = None
+
+        table_row = types.SimpleNamespace(
+            table_cat="catalog",
+            table_schem="sales",
+            table_name="orders",
+            table_type="TABLE",
+        )
+        column_row = types.SimpleNamespace(
+            column_name="total",
+            type_name="DECIMAL",
+            nullable=True,
+            column_def=None,
+        )
+
+        with mock.patch.object(manager, "_odbc_table_records", return_value=[table_row]), \
+             mock.patch.object(manager, "_get_odbc_columns", return_value=[column_row]) as columns:
+            chunk = manager.get_schema()
+
+        self.assertIn("### Table: sales.orders", chunk.text)
+        columns.assert_called_once_with(table_row)
 
 
 if __name__ == '__main__':

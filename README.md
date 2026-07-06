@@ -161,6 +161,10 @@ thepipe "duckdb:///analytics.duckdb" --db "SELECT * FROM table"
 thepipe "odbc://?connect=DRIVER%3DSQLite3%3BDatabase%3D%2Ftmp%2Fdemo.db" --db "SELECT * FROM table"
 ```
 
+Raw ODBC uses optional `pyodbc`; install it plus the target platform ODBC driver
+or driver manager, then pass the driver-specific connection string URL-encoded
+as `connect=...`.
+
 ### Data File Formats
 
 | Format | Extensions | Backend |

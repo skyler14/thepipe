@@ -249,7 +249,32 @@ class DatabaseManager:
     def _quote_identifier(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'
 
-    def _list_odbc_tables(self) -> List[str]:
+    def _odbc_table_name(self, table: Any) -> str:
+        if isinstance(table, str):
+            return table
+        return str(getattr(table, "table_name", "") or "")
+
+    def _odbc_table_schema(self, table: Any) -> Optional[str]:
+        schema = getattr(table, "table_schem", None)
+        return str(schema) if schema else None
+
+    def _odbc_table_catalog(self, table: Any) -> Optional[str]:
+        catalog = getattr(table, "table_cat", None)
+        return str(catalog) if catalog else None
+
+    def _odbc_table_display_name(self, table: Any) -> str:
+        name = self._odbc_table_name(table)
+        schema = self._odbc_table_schema(table)
+        return f"{schema}.{name}" if schema else name
+
+    def _odbc_table_reference(self, table: Any) -> str:
+        name = self._odbc_table_name(table)
+        schema = self._odbc_table_schema(table)
+        if schema:
+            return f"{self._quote_identifier(schema)}.{self._quote_identifier(name)}"
+        return self._quote_identifier(name)
+
+    def _odbc_table_records(self) -> List[Any]:
         if not self._odbc_connection:
             return []
 
@@ -259,13 +284,16 @@ class DatabaseManager:
             seen = set()
             for row in cursor.tables():
                 table_name = getattr(row, "table_name", None)
+                table_schema = getattr(row, "table_schem", None)
+                table_catalog = getattr(row, "table_cat", None)
                 table_type = str(getattr(row, "table_type", "") or "").upper()
-                if not table_name or table_name in seen:
+                key = (table_catalog, table_schema, table_name)
+                if not table_name or key in seen:
                     continue
                 if table_type and table_type not in {"TABLE", "VIEW"}:
                     continue
-                seen.add(table_name)
-                tables.append(table_name)
+                seen.add(key)
+                tables.append(row)
             return tables
         finally:
             try:
@@ -273,13 +301,23 @@ class DatabaseManager:
             except Exception:
                 pass
 
-    def _get_odbc_columns(self, table: str) -> List[Any]:
+    def _list_odbc_tables(self) -> List[str]:
+        return [self._odbc_table_display_name(table) for table in self._odbc_table_records()]
+
+    def _get_odbc_columns(self, table: Any) -> List[Any]:
         if not self._odbc_connection:
             return []
 
         cursor = self._odbc_connection.cursor()
         try:
-            return list(cursor.columns(table=table))
+            kwargs = {"table": self._odbc_table_name(table)}
+            schema = self._odbc_table_schema(table)
+            catalog = self._odbc_table_catalog(table)
+            if schema:
+                kwargs["schema"] = schema
+            if catalog:
+                kwargs["catalog"] = catalog
+            return list(cursor.columns(**kwargs))
         finally:
             try:
                 cursor.close()
@@ -314,6 +352,23 @@ class DatabaseManager:
                 cursor.close()
             except Exception:
                 pass
+
+    def _execute_odbc_preview_query(self, table_reference: str, max_rows: int) -> pd.DataFrame:
+        candidates = [
+            f"SELECT * FROM {table_reference} LIMIT {max_rows}",
+            f"SELECT * FROM {table_reference} FETCH FIRST {max_rows} ROWS ONLY",
+            f"SELECT TOP {max_rows} * FROM {table_reference}",
+        ]
+        errors = []
+        for query in candidates:
+            try:
+                result = self._execute_odbc_query(query)
+                if isinstance(result, pd.DataFrame):
+                    return result
+                return pd.DataFrame()
+            except Exception as exc:
+                errors.append(str(exc))
+        raise ValueError("; ".join(errors))
 
     def _convert_jdbc_url(self, jdbc_url: str) -> str:
         """Convert JDBC URL to SQLAlchemy-compatible format.
@@ -459,14 +514,14 @@ class DatabaseManager:
                 print(f"[thepipe] Getting schema for {self.db_type} database")
 
             if self._is_odbc():
-                tables = self._list_odbc_tables()
+                tables = self._odbc_table_records()
                 schema_info = "## Database Schema\n\n"
 
                 if not tables:
                     schema_info += "*No tables found*\n"
 
                 for table in tables:
-                    schema_info += f"### Table: {table}\n\n"
+                    schema_info += f"### Table: {self._odbc_table_display_name(table)}\n\n"
                     schema_info += "| Column | Type | Nullable | Default |\n"
                     schema_info += "|--------|------|----------|---------|\n"
                     try:
@@ -610,23 +665,22 @@ class DatabaseManager:
             preview_text = "## Data Preview\n\n"
 
             if self._is_odbc():
-                tables = self._list_odbc_tables()
+                tables = self._odbc_table_records()
                 if not tables:
                     preview_text += "*No tables found*\n"
 
                 for table in tables:
-                    quoted_table = self._quote_identifier(table)
-                    preview_text += f"### Table: {table}\n\n"
+                    table_reference = self._odbc_table_reference(table)
+                    preview_text += f"### Table: {self._odbc_table_display_name(table)}\n\n"
                     try:
-                        count_df = self._execute_odbc_query(f"SELECT COUNT(*) AS count FROM {quoted_table}")
+                        count_df = self._execute_odbc_query(f"SELECT COUNT(*) AS count FROM {table_reference}")
                         if isinstance(count_df, pd.DataFrame) and not count_df.empty:
                             preview_text += f"Row count: {int(count_df['count'].iloc[0]):,}\n\n"
                     except Exception as e:
                         preview_text += f"*Error getting row count: {str(e)}*\n\n"
 
                     try:
-                        # ponytail: generic ODBC preview uses LIMIT; add driver-specific TOP/FETCH FIRST fallback only when a real backend needs it.
-                        sample_df = self._execute_odbc_query(f"SELECT * FROM {quoted_table} LIMIT {max_rows}")
+                        sample_df = self._execute_odbc_preview_query(table_reference, max_rows)
                         if isinstance(sample_df, pd.DataFrame) and not sample_df.empty:
                             preview_text += "Sample data:\n\n```\n"
                             preview_text += sample_df.to_string()
