@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Port the comparator codegraph backend into `thepipe` in stages without dumping the
-whole comparator source tree into this repo. The first fork uses the comparator
-full binary as a sidecar. Python normalizes that API into `thepipe` outputs.
+Port the upstream codegraph backend into `thepipe` in stages without dumping the
+whole upstream source tree into this repo. The first fork uses the upstream full
+binary as a sidecar. Python normalizes that API into `thepipe` outputs.
 Later stages move the same contract to a shared library, then retire inferior
 Python codegraph pieces.
 
-This spec uses comparator source paths relative to the comparator repo root, not
+This spec uses upstream source paths relative to the upstream repo root, not
 temporary local paths.
 
 ## Implementation Status
@@ -67,7 +67,7 @@ Still gated:
 
 ## Source Findings
 
-Scoped `thepipe` map over comparator `src/` found:
+Scoped `thepipe` map over upstream `src/` found:
 
 - 119 related files.
 - 1439 functions.
@@ -75,7 +75,7 @@ Scoped `thepipe` map over comparator `src/` found:
 - 93% token reduction.
 - Core source size around 2.4 MB.
 
-Full comparator checkout map was intentionally stopped because generated grammar
+Full upstream checkout map was intentionally stopped because generated grammar
 source dominates the tree and made repo-wide mapping too slow. That is part of
 the design constraint: generated grammar C files are build material, not source
 we want copied into this repo.
@@ -211,12 +211,12 @@ class CodeGraphBackend:
 Implementations:
 
 - `PythonCodeGraphBackend`: current/fallback path.
-- `SidecarCodeGraphBackend`: full comparator binary, first native path.
+- `SidecarCodeGraphBackend`: full upstream binary, first native path.
 - `SharedLibCodeGraphBackend`: later `ctypes` path over shared library.
 
 ## Sidecar Mode
 
-Use comparator binary first because it already exposes tools through CLI:
+Use the upstream binary first because it already exposes tools through CLI:
 
 ```text
 codebase-memory-mcp cli [--json] <tool_name> <json_args>
@@ -231,7 +231,7 @@ Python wrapper rules:
 - request raw JSON where possible,
 - parse MCP text envelope,
 - normalize into stable dataclasses,
-- never expose comparator stderr as structured JSON,
+- never expose native backend stderr as structured JSON,
 - pin version and checksum,
 - treat schema changes as adapter migrations.
 
@@ -340,7 +340,7 @@ Go/no-go for shared-library default in Python package contexts:
 
 ## Grammar Strategy
 
-Comparator generated grammar C files are not runtime source. They are build
+Generated grammar C files are not runtime source. They are build
 inputs compiled into binary/library artifacts.
 
 Do not commit generated grammar source into this repo. Instead:
@@ -355,7 +355,7 @@ Packs:
 - `core`: Python, JS, TS, TSX, Go, Rust, C, C++, Java, C#, Swift, Kotlin, PHP,
   HTML, CSS.
 - `infra`: YAML, JSON, Dockerfile, HCL, TOML, K8s-related parsers.
-- `full`: all supported comparator grammars.
+- `full`: all supported upstream grammars.
 
 ## Storage Layout
 
@@ -830,7 +830,7 @@ Inputs:
 - `project` required.
 - `traces` required.
 
-Current comparator handler only acknowledges; runtime edge creation is not yet
+Current upstream handler only acknowledges; runtime edge creation is not yet
 implemented.
 
 Thepipe interface:
@@ -933,7 +933,7 @@ compact/default outputs should be produced from those native results.
 
 ## Thepipe-Specific Interfaces To Add
 
-Comparator API is graph-native. `thepipe` needs projection APIs:
+The native codegraph API is graph-native. `thepipe` needs projection APIs:
 
 ### `emit_chunks_from_graph`
 
@@ -1177,10 +1177,10 @@ Keep:
 
 ## Open Questions
 
-- Which comparator release/commit is pinned first?
+- Which upstream release/commit is pinned first?
 - Is first sidecar distributed by separate extra package or installer command?
 - Which grammar pack is first native library target?
 - Do we expose `query_graph` to all users or gate behind advanced flag?
-- Should repo-local `.thepipe/codegraph.sqlite` be default, or comparator cache
+- Should repo-local `.thepipe/codegraph.sqlite` be default, or upstream cache
   default with manifest pointer first?
 - Do we store snippets in our overlay DB, or always read source on demand?

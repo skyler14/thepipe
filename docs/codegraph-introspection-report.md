@@ -14,7 +14,7 @@ I exercised the new graph functionality against this repo itself:
   `query_graph`;
 - sidecar archive install path;
 - shared-library archive install path;
-- old Python `code_relations: "map"` as the comparator baseline.
+- old Python `code_relations: "map"` as the legacy baseline.
 
 Token counts use `thepipe.core.calculate_tokens`, which is the repo's current
 `len(text) / 4` estimator for text chunks.
