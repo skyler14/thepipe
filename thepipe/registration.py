@@ -217,9 +217,8 @@ or prior context already reveals most of the file structure.
 - JDBC MySQL: `jdbc:mysql://host:3306/db` (auto-converted)
 - JDBC PostgreSQL: `jdbc:postgresql://host:5432/db` (auto-converted)
 
-Raw ODBC requires optional `pyodbc` and the target system ODBC driver/driver
-manager; thepipe passes the URL-decoded `connect=` string directly to
-`pyodbc.connect`.
+Raw ODBC requires `pyodbc` and the target system ODBC driver/driver manager;
+thepipe passes the URL-decoded `connect=` string directly to `pyodbc.connect`.
 
 ## Data File View Names (`--db`)
 

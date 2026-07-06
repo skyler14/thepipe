@@ -20,6 +20,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 JUPYSQL_AVAILABLE = importlib.util.find_spec("jupysql") is not None
 
 
+def _sqlite_odbc_driver() -> str | None:
+    candidates = [
+        "/opt/homebrew/lib/libsqlite3odbc.dylib",
+        "/usr/local/lib/libsqlite3odbc.dylib",
+        "/opt/homebrew/lib/libsqlite3odbc.so",
+        "/usr/local/lib/libsqlite3odbc.so",
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 class _SQLiteOdbcCursor:
     def __init__(self, connection, *, limit_unsupported=False):
         self._connection = connection
@@ -389,6 +402,12 @@ class TestODBCHandling(unittest.TestCase):
     def test_odbc_query_schema_and_preview(self):
         from thepipe.database_utils import DatabaseManager, process_database
 
+        if importlib.util.find_spec("pyodbc") is None:
+            self.skipTest("requires pyodbc")
+        driver = _sqlite_odbc_driver()
+        if driver is None:
+            self.skipTest("requires sqliteodbc driver")
+
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
             db_path = f.name
 
@@ -401,31 +420,18 @@ class TestODBCHandling(unittest.TestCase):
         finally:
             seed.close()
 
-        calls = []
-
-        def fake_import(name):
-            if name != "pyodbc":
-                raise ImportError(name)
-            return types.SimpleNamespace(
-                connect=lambda connect_string, autocommit=True: (
-                    calls.append((connect_string, autocommit)) or _SQLiteOdbcConnection(db_path)
-                )
-            )
-
-        connect_url = f"odbc://?connect={quote(f'DRIVER=SQLite3;Database={db_path}', safe='')}"
+        connect_string = f"DRIVER={driver};Database={db_path}"
+        connect_url = f"odbc://?connect={quote(connect_string, safe='')}"
 
         try:
-            with mock.patch("thepipe.database_utils.importlib.import_module", side_effect=fake_import):
-                manager = DatabaseManager(connect_url, verbose=False)
-                schema_chunk = manager.get_schema()
-                preview_chunk = manager.get_preview()
-                query_chunks = manager.execute_query(
-                    'SELECT customer, total FROM "orders" ORDER BY total'
-                )
-                manager.close()
+            manager = DatabaseManager(connect_url, verbose=False)
+            schema_chunk = manager.get_schema()
+            preview_chunk = manager.get_preview()
+            query_chunks = manager.execute_query(
+                'SELECT customer, total FROM "orders" ORDER BY total'
+            )
+            manager.close()
 
-            self.assertEqual(calls[0][0], f"DRIVER=SQLite3;Database={db_path}")
-            self.assertTrue(calls[0][1])
             self.assertIn("### Table: orders", schema_chunk.text)
             self.assertIn("| customer | TEXT |", schema_chunk.text)
             self.assertIn("Row count: 2", preview_chunk.text)
@@ -434,12 +440,11 @@ class TestODBCHandling(unittest.TestCase):
             self.assertIn("Alice", query_chunk.text)
             self.assertIn("Bob", query_chunk.text)
 
-            with mock.patch("thepipe.database_utils.importlib.import_module", side_effect=fake_import):
-                process_chunks = process_database(
-                    connection_info=connect_url,
-                    query='SELECT customer, total FROM "orders" ORDER BY total',
-                    verbose=False,
-                )
+            process_chunks = process_database(
+                connection_info=connect_url,
+                query='SELECT customer, total FROM "orders" ORDER BY total',
+                verbose=False,
+            )
 
             process_query_chunk = next(chunk for chunk in process_chunks if "query" in chunk.path)
             self.assertIn("Alice", process_query_chunk.text)

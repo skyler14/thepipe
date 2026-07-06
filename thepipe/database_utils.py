@@ -434,7 +434,7 @@ class DatabaseManager:
                     pyodbc = importlib.import_module("pyodbc")
                 except ImportError as e:
                     raise ImportError(
-                        "ODBC support requires optional dependency `pyodbc`. "
+                        "ODBC support requires dependency `pyodbc`. "
                         "Install it and ensure the target ODBC driver is available."
                     ) from e
                 self._odbc_connection = pyodbc.connect(connect_string, autocommit=True)
