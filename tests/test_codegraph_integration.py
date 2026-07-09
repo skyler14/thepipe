@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import json
 from pathlib import Path
 
@@ -8,6 +7,7 @@ import pytest
 
 from thepipe.analyzer.integration import build_code_relations_json_payload
 from thepipe.codegraph.integration import process_codegraph
+from thepipe.codegraph.outputs import CodegraphArtifacts
 from thepipe.codegraph.storage import (
     CodegraphDeployment,
     native_project_name,
@@ -21,44 +21,7 @@ def _project_database(repo: Path) -> tuple[str, Path]:
     project = native_project_name(repo)
     db = project_db_path(repo, project)
     db.parent.mkdir(parents=True)
-    with sqlite3.connect(db) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE projects (name TEXT, indexed_at TEXT, root_path TEXT);
-            CREATE TABLE file_hashes (
-                project TEXT, rel_path TEXT, sha256 TEXT, mtime_ns INTEGER, size INTEGER
-            );
-            CREATE TABLE nodes (
-                id INTEGER, project TEXT, label TEXT, name TEXT, qualified_name TEXT,
-                file_path TEXT, start_line INTEGER, end_line INTEGER, properties TEXT
-            );
-            CREATE TABLE edges (
-                id INTEGER, project TEXT, source_id INTEGER, target_id INTEGER,
-                type TEXT, properties TEXT
-            );
-            CREATE TABLE project_summaries (
-                project TEXT, summary TEXT, source_hash TEXT,
-                created_at TEXT, updated_at TEXT
-            );
-            """
-        )
-        connection.execute(
-            "INSERT INTO projects VALUES (?, '2026-01-01', ?)",
-            (project, str(repo)),
-        )
-        connection.execute(
-            "INSERT INTO file_hashes VALUES (?, 'app.py', 'abc', 1, 20)",
-            (project,),
-        )
-        connection.execute(
-            """
-            INSERT INTO nodes VALUES (
-                1, ?, 'Function', 'main', ?, 'app.py', 1, 2,
-                '{"signature":"def main()"}'
-            )
-            """,
-            (project, f"{project}.app.main"),
-        )
+    db.touch()
     write_manifest(
         CodegraphDeployment(
             repo_root=repo,
@@ -69,18 +32,26 @@ def _project_database(repo: Path) -> tuple[str, Path]:
     return project, db
 
 
-def test_graph_mode_loads_detected_database_into_normal_chunks(tmp_path: Path) -> None:
-    project, _ = _project_database(tmp_path)
+def _artifacts(repo: Path, *, project: str | None = None) -> CodegraphArtifacts:
+    project_name = project or native_project_name(repo)
+    payload = {
+        "schema_version": "code-relations/v2",
+        "source": "codegraph-native",
+        "repo_root": str(repo),
+        "project": project_name,
+        "summary": {"files": 1, "nodes": 1, "edges": 0},
+        "files": [{"path": "app.py", "qualified_name": f"{project_name}.app"}],
+        "entities": [{"name": "main", "qualified_name": f"{project_name}.app.main"}],
+        "edges": [],
+    }
+    return CodegraphArtifacts(payload=payload, digest="graph digest", chunks=[])
 
-    chunks = process_codegraph(tmp_path, options={})
 
-    assert chunks[0].path == "__summary__"
-    assert chunks[0].meta["artifact"] == "codegraph_summary"
-    assert chunks[1].path == "app.py"
-    assert "def main()" in chunks[1].text
-    payload = build_code_relations_json_payload(chunks, "graph", str(tmp_path))
-    assert payload["schema_version"] == "code-relations/v2"
-    assert payload["project"] == project
+def test_graph_mode_refuses_backendless_deployment_reads(tmp_path: Path) -> None:
+    _project_database(tmp_path)
+
+    with pytest.raises(RuntimeError, match="requires codegraph_binary"):
+        process_codegraph(tmp_path, options={})
 
 
 def test_graph_mode_requires_deployment_or_explicit_backend(tmp_path: Path) -> None:
@@ -131,17 +102,12 @@ def test_graph_mode_uses_explicit_shared_library_with_quiet_option(
 
         def index_repository(self, root, *, mode, persistence):
             calls["index"] = {"mode": mode, "persistence": persistence}
-            _project_database(root)
+            project, _ = _project_database(root)
+            return _artifacts(root, project=project)
 
         def load_artifacts(self, root):
-            from thepipe.codegraph.outputs import CodegraphArtifacts
-
-            chunks = process_codegraph(root, options={})
-            return CodegraphArtifacts(
-                payload=chunks[0].meta["code_relations_payload"],
-                digest="graph digest",
-                chunks=chunks[1:],
-            )
+            project, _ = _project_database(root)
+            return _artifacts(root, project=project)
 
     from thepipe.codegraph import integration
 
@@ -204,19 +170,12 @@ def test_graph_mode_installs_verified_sidecar_archive(
 
         def index_repository(self, root, *, mode, persistence):
             calls["index"] = {"root": root, "mode": mode, "persistence": persistence}
+            project, _ = _project_database(root)
+            return _artifacts(root, project=project)
 
         def load_artifacts(self, root):
-            from thepipe.codegraph.outputs import CodegraphArtifacts
-
             project, _ = _project_database(root)
-            chunks = process_codegraph(root, options={})
-            payload = chunks[0].meta["code_relations_payload"]
-            assert payload["project"] == project
-            return CodegraphArtifacts(
-                payload=payload,
-                digest="graph digest",
-                chunks=chunks[1:],
-            )
+            return _artifacts(root, project=project)
 
     from thepipe.codegraph import integration
 
@@ -290,19 +249,12 @@ def test_graph_mode_installs_verified_shared_library_archive(
 
         def index_repository(self, root, *, mode, persistence):
             calls["index"] = {"root": root, "mode": mode, "persistence": persistence}
+            project, _ = _project_database(root)
+            return _artifacts(root, project=project)
 
         def load_artifacts(self, root):
-            from thepipe.codegraph.outputs import CodegraphArtifacts
-
             project, _ = _project_database(root)
-            chunks = process_codegraph(root, options={})
-            payload = chunks[0].meta["code_relations_payload"]
-            assert payload["project"] == project
-            return CodegraphArtifacts(
-                payload=payload,
-                digest="graph digest",
-                chunks=chunks[1:],
-            )
+            return _artifacts(root, project=project)
 
     from thepipe.codegraph import integration
 
@@ -376,21 +328,47 @@ def test_graph_mode_rejects_wrong_shared_library_archive_version(
 def test_scrape_directory_routes_explicit_graph_mode(tmp_path: Path) -> None:
     _project_database(tmp_path)
 
-    chunks = scrape_directory(
-        str(tmp_path),
-        options={"code_relations": "graph"},
-    )
+    with pytest.raises(RuntimeError, match="requires codegraph_binary"):
+        scrape_directory(
+            str(tmp_path),
+            options={"code_relations": "graph"},
+        )
 
-    assert chunks[0].meta["schema_version"] == "code-relations/v2"
 
-
-def test_scrape_directory_can_query_detected_graph_entities(tmp_path: Path) -> None:
+def test_scrape_directory_entities_action_uses_native_search_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _project_database(tmp_path)
+    calls = []
+
+    class FakeSharedLibraryBackend:
+        def __init__(self, path, *, cache_dir, quiet=True):
+            pass
+
+        def call(self, tool, payload):
+            calls.append((tool, payload))
+            return {
+                "results": [
+                    {
+                        "name": "main",
+                        "qualified_name": f"{native_project_name(tmp_path)}.app.main",
+                        "attributes": {"signature": "def main()"},
+                    }
+                ]
+            }
+
+        def close(self):
+            pass
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
 
     chunks = scrape_directory(
         str(tmp_path),
         options={
             "code_relations": "graph",
+            "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
             "codegraph_action": "entities",
             "codegraph_query": "main",
         },
@@ -402,15 +380,51 @@ def test_scrape_directory_can_query_detected_graph_entities(tmp_path: Path) -> N
     assert payload["schema_version"] == "thepipe-codegraph-action/v1"
     assert payload["result"][0]["qualified_name"].endswith(".app.main")
     assert "attributes" not in payload["result"][0]
+    assert calls == [
+        (
+            "search_graph",
+            {
+                "project": native_project_name(tmp_path),
+                "query": "main",
+                "limit": 50,
+                "offset": 0,
+            },
+        )
+    ]
 
 
-def test_graph_actions_can_return_verbose_attributes(tmp_path: Path) -> None:
+def test_graph_actions_can_return_verbose_native_attributes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _project_database(tmp_path)
+
+    class FakeSharedLibraryBackend:
+        def __init__(self, path, *, cache_dir, quiet=True):
+            pass
+
+        def call(self, tool, payload):
+            return {
+                "results": [
+                    {
+                        "name": "main",
+                        "qualified_name": "demo.app.main",
+                        "attributes": {"signature": "def main()"},
+                    }
+                ]
+            }
+
+        def close(self):
+            pass
+
+    from thepipe.codegraph import integration
+
+    monkeypatch.setattr(integration, "SharedLibraryBackend", FakeSharedLibraryBackend)
 
     chunks = scrape_directory(
         str(tmp_path),
         options={
             "code_relations": "graph",
+            "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
             "codegraph_action": "entities",
             "codegraph_query": "main",
             "codegraph_verbose": True,
@@ -443,6 +457,9 @@ def test_graph_read_action_uses_existing_deployment_without_refresh(
         def index_repository(self, root, *, mode, persistence):
             calls["indexed"] = True
 
+        def index_status(self, project):
+            return {"nodes": 1, "edges": 0}
+
     from thepipe.codegraph import integration
 
     monkeypatch.setattr(integration, "SidecarBackend", lambda *a, **k: FakeBackend())
@@ -458,6 +475,7 @@ def test_graph_read_action_uses_existing_deployment_without_refresh(
 
     payload = json.loads(chunks[0].text)
     assert payload["action"] == "summary"
+    assert payload["result"] == {"nodes": 1, "edges": 0}
     assert "indexed" not in calls
     assert calls["closed"] is True
 
@@ -479,7 +497,22 @@ def test_graph_read_action_refreshes_when_no_deployment(
 
         def index_repository(self, root, *, mode, persistence):
             calls["indexed"] = True
-            _project_database(root)
+            from thepipe.codegraph.outputs import CodegraphArtifacts
+
+            return CodegraphArtifacts(
+                payload={
+                    "schema_version": "code-relations/v1",
+                    "source": "codegraph-sidecar",
+                    "summary": {"nodes": 1},
+                    "files": [],
+                    "entities": [],
+                    "edges": [],
+                },
+                chunks=[],
+            )
+
+        def index_status(self, project):
+            return {"nodes": 1}
 
     from thepipe.codegraph import integration
 
@@ -502,12 +535,17 @@ def test_graph_read_action_refreshes_when_no_deployment(
 
 def test_graph_action_payload_survives_json_projection(tmp_path: Path) -> None:
     _project_database(tmp_path)
-    chunks = scrape_directory(
-        str(tmp_path),
-        options={
-            "code_relations": "graph",
-            "codegraph_action": "summary",
-        },
+    chunks = process_codegraph(
+        tmp_path,
+        options={"codegraph_action": "summary"},
+        backend=type(
+            "Backend",
+            (),
+            {
+                "kind": "fake",
+                "call": lambda self, tool, payload: {"nodes": 1},
+            },
+        )(),
     )
 
     payload = build_code_relations_json_payload(chunks, "graph", str(tmp_path))
@@ -518,43 +556,73 @@ def test_graph_action_payload_survives_json_projection(tmp_path: Path) -> None:
 
 
 def test_graph_files_action_respects_limit(tmp_path: Path) -> None:
-    project, _ = _project_database(tmp_path)
-    with sqlite3.connect(
-        tmp_path / ".thepipe" / "codegraph" / "cache" / f"{project}.db"
-    ) as connection:
-        connection.execute(
-            "INSERT INTO file_hashes VALUES (?, 'extra.py', 'def', 1, 20)",
-            (project,),
-        )
+    _project_database(tmp_path)
+    calls = []
 
-    chunks = scrape_directory(
-        str(tmp_path),
+    class FakeBackend:
+        kind = "fake"
+
+        def call(self, tool, payload):
+            calls.append((tool, payload))
+            return {"columns": ["path"], "rows": [["app.py"]], "total": 1}
+
+    chunks = process_codegraph(
+        tmp_path,
         options={
-            "code_relations": "graph",
             "codegraph_action": "files",
             "codegraph_limit": 1,
         },
+        backend=FakeBackend(),
     )
 
     payload = json.loads(chunks[0].text)
-    assert len(payload["result"]) == 1
+    assert payload["result"] == [{"path": "app.py"}]
+    assert calls == [
+        (
+            "query_graph",
+            {
+                "project": native_project_name(tmp_path),
+                "query": (
+                    "MATCH (f:File) RETURN f.file_path AS path, "
+                    "f.name AS name, f.qualified_name AS qualified_name LIMIT 1"
+                ),
+                "max_rows": 1,
+            },
+        )
+    ]
 
 
-def test_scrape_directory_can_run_read_only_graph_sql(tmp_path: Path) -> None:
+def test_query_graph_action_is_the_cypher_replacement(tmp_path: Path) -> None:
     _project_database(tmp_path)
+    calls = []
 
-    chunks = scrape_directory(
-        str(tmp_path),
+    class FakeBackend:
+        kind = "fake"
+
+        def call(self, tool, payload):
+            calls.append((tool, payload))
+            return {"columns": ["name"], "rows": [["main"]]}
+
+    chunks = process_codegraph(
+        tmp_path,
         options={
-            "code_relations": "graph",
-            "codegraph_action": "sql",
-            "codegraph_sql": "SELECT name FROM nodes ORDER BY id",
-            "codegraph_limit": 1,
+            "codegraph_action": "query_graph",
+            "codegraph_cypher": "MATCH (n:Function) RETURN n.name AS name",
         },
+        backend=FakeBackend(),
     )
 
     payload = json.loads(chunks[0].text)
-    assert payload["result"]["rows"] == [{"name": "main"}]
+    assert payload["result"] == {"columns": ["name"], "rows": [["main"]]}
+    assert calls == [
+        (
+            "query_graph",
+            {
+                "project": native_project_name(tmp_path),
+                "query": "MATCH (n:Function) RETURN n.name AS name",
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -750,7 +818,7 @@ def test_project_management_graph_actions_do_not_auto_index(
     assert calls == [(expected_tool, expected_payload), ("close", {})]
 
 
-def test_native_query_graph_action_does_not_use_sql_escape_hatch(
+def test_native_query_graph_action_uses_cypher_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -779,7 +847,6 @@ def test_native_query_graph_action_does_not_use_sql_escape_hatch(
             "codegraph_library": "/tmp/libthepipe_codegraph.dylib",
             "codegraph_action": "query_graph",
             "codegraph_cypher": "MATCH (n) RETURN n",
-            "codegraph_sql": "SELECT * FROM nodes",
         },
     )
 
@@ -795,91 +862,63 @@ def test_native_query_graph_action_does_not_use_sql_escape_hatch(
 
 
 @pytest.mark.parametrize(
-    ("action", "options", "direct_call", "direct_result"),
+    ("action", "options", "native_call", "native_result"),
     [
         (
             "search_graph",
             {"codegraph_query": "main", "codegraph_kind": "Function"},
-            ("search", {"project": None, "query": "main", "label": "Function", "limit": 200, "offset": 0}),
+            (
+                "search_graph",
+                {"project": None, "query": "main", "label": "Function", "limit": 200, "offset": 0},
+            ),
             {"results": [{"name": "main"}]},
         ),
         (
             "query_graph",
             {"codegraph_cypher": "MATCH (n) RETURN n", "codegraph_limit": 5},
-            ("cypher", {"project": None, "query": "MATCH (n) RETURN n", "max_rows": 5}),
+            ("query_graph", {"project": None, "query": "MATCH (n) RETURN n", "max_rows": 5}),
             {"columns": ["n"], "rows": []},
         ),
         (
             "get_graph_schema",
             {},
-            ("schema", {"project": None}),
+            ("get_graph_schema", {"project": None}),
             {"node_labels": []},
         ),
         (
             "get_architecture",
             {"codegraph_file": "src", "codegraph_aspects": ["routes"]},
-            ("architecture", {"project": None, "path": "src", "aspects": ["routes"]}),
+            ("get_architecture", {"project": None, "path": "src", "aspects": ["routes"]}),
             {"routes": []},
         ),
     ],
 )
-def test_shared_library_native_actions_prefer_direct_store_when_available(
+def test_shared_library_native_actions_use_context_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     action: str,
     options: dict[str, object],
-    direct_call: tuple[str, dict[str, object]],
-    direct_result: dict[str, object],
+    native_call: tuple[str, dict[str, object]],
+    native_result: dict[str, object],
 ) -> None:
-    project, db = _project_database(tmp_path)
-    direct_calls = []
-    expected_action, expected_payload = direct_call
+    project, _ = _project_database(tmp_path)
+    calls = []
+    expected_tool, expected_payload = native_call
     expected_payload = {
         key: (project if value is None and key == "project" else value)
         for key, value in expected_payload.items()
     }
 
-    class FakeDirectStore:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            direct_calls.append(("close", {}))
-
-        def search(self, project, **kwargs):
-            direct_calls.append(("search", {"project": project, **kwargs}))
-            return direct_result
-
-        def cypher(self, project, query, *, max_rows=None):
-            direct_calls.append(
-                ("cypher", {"project": project, "query": query, "max_rows": max_rows})
-            )
-            return direct_result
-
-        def schema(self, project):
-            direct_calls.append(("schema", {"project": project}))
-            return direct_result
-
-        def architecture(self, project, **kwargs):
-            direct_calls.append(("architecture", {"project": project, **kwargs}))
-            return direct_result
-
     class FakeSharedLibraryBackend:
         def __init__(self, path, *, cache_dir, quiet=True):
             self.path = path
 
-        def has_direct_store_api(self):
-            return True
-
-        def open_store(self, db_path):
-            direct_calls.append(("open", {"db_path": str(db_path)}))
-            return FakeDirectStore()
-
         def call(self, tool, payload):
-            raise AssertionError(f"unexpected MCP fallback call: {tool}")
+            calls.append((tool, payload))
+            return native_result
 
         def close(self):
-            direct_calls.append(("backend-close", {}))
+            calls.append(("backend-close", {}))
 
     from thepipe.codegraph import integration
 
@@ -896,88 +935,51 @@ def test_shared_library_native_actions_prefer_direct_store_when_available(
     )
 
     payload = json.loads(chunks[0].text)
-    assert payload["result"] == direct_result
-    assert direct_calls == [
-        ("open", {"db_path": str(db)}),
-        (expected_action, expected_payload),
-        ("close", {}),
+    assert payload["result"] == native_result
+    assert calls == [
+        (expected_tool, expected_payload),
         ("backend-close", {}),
     ]
 
 
 def test_scrape_directory_can_traverse_graph_neighbors(tmp_path: Path) -> None:
     project, _ = _project_database(tmp_path)
-    with sqlite3.connect(
-        tmp_path / ".thepipe" / "codegraph" / "cache" / f"{project}.db"
-    ) as connection:
-        connection.execute(
-            """
-            INSERT INTO nodes VALUES (
-                2, ?, 'Function', 'helper', ?, 'helper.py', 1, 2, '{}'
-            )
-            """,
-            (project, f"{project}.helper.helper"),
-        )
-        connection.execute(
-            "INSERT INTO file_hashes VALUES (?, 'helper.py', 'def', 1, 20)",
-            (project,),
-        )
-        connection.execute(
-            "INSERT INTO edges VALUES (1, ?, 1, 2, 'CALLS', '{}')",
-            (project,),
-        )
+    calls = []
 
-    chunks = scrape_directory(
-        str(tmp_path),
+    class FakeBackend:
+        kind = "fake"
+
+        def call(self, tool, payload):
+            calls.append((tool, payload))
+            return {
+                "nodes": [{"name": "main"}, {"name": "helper"}],
+                "edges": [{"kind": "CALLS"}],
+            }
+
+    chunks = process_codegraph(
+        tmp_path,
         options={
-            "code_relations": "graph",
             "codegraph_action": "neighbors",
             "codegraph_entity": "main",
             "codegraph_direction": "outbound",
         },
+        backend=FakeBackend(),
     )
 
     payload = json.loads(chunks[0].text)
     assert [node["name"] for node in payload["result"]["nodes"]] == ["main", "helper"]
     assert payload["result"]["edges"][0]["kind"] == "CALLS"
-
-
-def test_graph_neighbor_action_applies_confidence_filter(tmp_path: Path) -> None:
-    project, db = _project_database(tmp_path)
-    with sqlite3.connect(db) as connection:
-        connection.executemany(
-            """
-            INSERT INTO nodes VALUES (
-                ?, ?, 'Function', ?, ?, 'helper.py', 1, 2, '{}'
-            )
-            """,
-            [
-                (2, project, "certain", f"{project}.helper.certain"),
-                (3, project, "uncertain", f"{project}.helper.uncertain"),
-            ],
+    assert calls == [
+        (
+            "trace_path",
+            {
+                "project": project,
+                "function_name": "main",
+                "direction": "outbound",
+                "depth": 1,
+                "mode": "calls",
+                "risk_labels": False,
+                "include_tests": False,
+            },
         )
-        connection.executemany(
-            "INSERT INTO edges VALUES (?, ?, 1, ?, 'CALLS', ?)",
-            [
-                (1, project, 2, '{"confidence":0.9}'),
-                (2, project, 3, '{"confidence":0.2}'),
-            ],
-        )
-
-    chunks = scrape_directory(
-        str(tmp_path),
-        options={
-            "code_relations": "graph",
-            "codegraph_action": "neighbors",
-            "codegraph_entity": "main",
-            "codegraph_direction": "outbound",
-            "codegraph_min_confidence": 0.5,
-        },
-    )
-
-    payload = json.loads(chunks[0].text)
-    assert [node["name"] for node in payload["result"]["nodes"]] == [
-        "main",
-        "certain",
     ]
-    assert payload["result"]["filtered_edges"] == 1

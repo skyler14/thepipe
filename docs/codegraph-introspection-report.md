@@ -10,11 +10,11 @@ I exercised the new graph functionality against this repo itself:
 
 - full graph emit from an existing deployment;
 - sidecar-backed graph indexing;
-- local graph actions: `summary`, `files`, `entities`, `edges`, `neighbors`,
-  `sql`;
+- native graph actions: `summary`, `files`, `entities`, `edges`, `neighbors`,
+  `query_graph`;
 - sidecar archive install path;
 - shared-library archive install path;
-- old Python `code_relations: "map"` as the comparator baseline.
+- old Python `code_relations: "map"` as the legacy baseline.
 
 Token counts use `thepipe.core.calculate_tokens`, which is the repo's current
 `len(text) / 4` estimator for text chunks.
@@ -60,7 +60,7 @@ Result:
 - 781,391 estimated tokens;
 - schema: `code-relations/v2`.
 
-### Local Graph Actions
+### Native Graph Actions
 
 All local action package calls used:
 
@@ -77,7 +77,7 @@ Measured package path:
 | `entities` | `query=codegraph`, `limit=5` | 0.0299s | 1,791 | 447 |
 | `edges` | `limit=5` | 0.0272s | 1,142 | 285 |
 | `neighbors` | `process_codegraph`, depth 1, limit 10 | 0.0346s | 17,690 | 4,422 |
-| `sql` | top files, limit 5 | 0.0014s | 517 | 129 |
+| `query_graph` | top files Cypher, limit 5 | 0.0014s | 517 | 129 |
 
 Measured CLI path:
 
@@ -88,7 +88,7 @@ Measured CLI path:
 | `entities`, limit 5 | 3.360s | 2,483 | 620 |
 | `edges`, limit 5 | 3.381s | 1,568 | 392 |
 | `neighbors`, limit 10 | 3.322s | 24,612 | 6,153 |
-| `sql`, limit 5 | 3.566s | 739 | 184 |
+| `query_graph`, limit 5 | 3.566s | 739 | 184 |
 
 CLI startup/import dominates small graph actions. Package calls are the right
 path for agent/server reuse.
@@ -183,13 +183,10 @@ Tests added:
    Limit 10 emitted 17,690 package bytes because each node carried full
    attributes. Fixed after this report: compact graph action output now strips
    attributes by default unless `codegraph_verbose=true`. The same neighbor
-   query measured 4,436 bytes after compacting. A later quality pass also added
+   query measured 4,436 bytes after compacting. A later quality pass should add
    confidence filtering, high-degree transit-hub pruning, shortest-hop labels,
-   and explicit omission diagnostics. Package/CLI defaults are confidence `0.5`
-   and transit degree `25`; either can be disabled with `null`.
-
-   Ambiguous short entity names now fail with qualified-name candidates instead
-   of selecting whichever matching node SQLite returned first.
+   and explicit omission diagnostics to the native `trace_path` surface rather
+   than reimplementing traversal in Python.
 
 2. CLI action latency is high for tiny reads.
 
@@ -246,8 +243,8 @@ Tests added:
 
 4. Add a report-style action later, not now.
 
-   Current `summary` + `sql` already covers most inspection. A custom
-   `health`/`diagnostics` action is only worth it after repeated manual SQL.
+   Current `summary` + `query_graph` already covers most inspection. A custom
+   `health`/`diagnostics` action is only worth it after repeated manual Cypher.
 
 5. Do not add skill defaults yet.
 

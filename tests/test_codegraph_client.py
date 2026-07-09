@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -23,6 +21,13 @@ class FakeBackend:
 
     def call(self, tool: str, payload: dict[str, object]) -> dict[str, object]:
         self.calls.append((tool, payload))
+        if tool == "index_repository":
+            return {
+                "project": native_project_name(Path(str(payload["repo_path"]))),
+                "indexed": True,
+            }
+        if tool == "query_graph":
+            return {"columns": [], "rows": []}
         return {"summary": {"indexed": True}, "files": [], "entities": [], "edges": []}
 
 
@@ -37,7 +42,7 @@ def test_index_repository_uses_native_schema_and_returns_artifacts(tmp_path: Pat
         target_projects=["shared-api"],
     )
 
-    assert backend.calls == [
+    assert backend.calls[:1] == [
         (
             "index_repository",
             {
@@ -48,7 +53,12 @@ def test_index_repository_uses_native_schema_and_returns_artifacts(tmp_path: Pat
             },
         )
     ]
-    assert artifacts.payload["summary"] == {"indexed": True}
+    assert [tool for tool, _ in backend.calls[1:]] == [
+        "query_graph",
+        "query_graph",
+        "query_graph",
+    ]
+    assert artifacts.payload["summary"]["indexed"] is True
     assert artifacts.payload["mode"] == "map"
 
 
@@ -173,7 +183,10 @@ def test_client_maps_public_methods_to_native_tools(
 
     result = getattr(client, method)(*args, **kwargs)
 
-    assert result["summary"] == {"indexed": True}
+    if method == "query_graph":
+        assert result == {"columns": [], "rows": []}
+    else:
+        assert result["summary"] == {"indexed": True}
     assert backend.calls == [(tool, payload)]
 
 
@@ -203,38 +216,21 @@ def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Pa
             return "0.10.0"
 
         def call(self, tool: str, payload: dict[str, object]) -> dict[str, object]:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(self.cache_dir / f"{project}.db") as connection:
-                connection.executescript(
-                    """
-                    CREATE TABLE projects (name TEXT, indexed_at TEXT, root_path TEXT);
-                    CREATE TABLE file_hashes (
-                        project TEXT, rel_path TEXT, sha256 TEXT, mtime_ns INTEGER, size INTEGER
-                    );
-                    CREATE TABLE nodes (
-                        id INTEGER, project TEXT, label TEXT, name TEXT, qualified_name TEXT,
-                        file_path TEXT, start_line INTEGER, end_line INTEGER, properties TEXT
-                    );
-                    CREATE TABLE edges (
-                        id INTEGER, project TEXT, source_id INTEGER, target_id INTEGER,
-                        type TEXT, properties TEXT
-                    );
-                    CREATE TABLE project_summaries (
-                        project TEXT, summary TEXT, source_hash TEXT,
-                        created_at TEXT, updated_at TEXT
-                    );
-                    """
-                )
-                connection.execute(
-                    "INSERT INTO projects VALUES (?, '2026-01-01', ?)",
-                    (project, str(repo)),
-                )
-            return {
-                "project": project,
-                "status": "indexed",
-                "nodes": 12,
-                "edges": 9,
-            }
+            if tool == "index_repository":
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                (self.cache_dir / f"{project}.db").touch()
+                return {
+                    "project": project,
+                    "status": "indexed",
+                    "nodes": 12,
+                    "edges": 9,
+                    "schema_fingerprint": "a" * 64,
+                }
+            if tool == "index_status":
+                return {"project": project, "nodes": 12, "edges": 9}
+            if tool == "query_graph":
+                return {"columns": [], "rows": []}
+            raise AssertionError(f"unexpected tool: {tool}")
 
     registry = MasterRegistry(tmp_path / "master.sqlite")
     client = CodegraphClient(IndexingBackend(), registry=registry)
@@ -247,7 +243,7 @@ def test_successful_local_index_records_manifest_and_master_pointer(tmp_path: Pa
     assert deployment.entity_count == 12
     assert deployment.edge_count == 9
     assert deployment.backend_version == "0.10.0"
-    assert len(deployment.schema_fingerprint) == 64
+    assert deployment.schema_fingerprint == "a" * 64
     assert registry.list() == [deployment]
 
     artifacts = client.load_artifacts(repo)

@@ -9,14 +9,7 @@ from .artifacts import (
     install_sidecar_archive,
     sha256_file,
 )
-from .access import CodegraphAccessError, CodegraphGraph
 from .client import CodeGraphBackend, CodegraphClient
-from .database import (
-    CodegraphDatabase,
-    EdgeRecord,
-    NodeRecord,
-    SchemaError,
-)
 from .integration import process_codegraph
 from .sidecar import (
     GRAMMAR_ARTIFACT_POLICY,
@@ -31,7 +24,6 @@ from .sharedlib import SharedLibraryBackend, SharedLibraryError
 from .outputs import (
     CodegraphArtifacts,
     build_codegraph_artifacts,
-    build_database_artifacts,
     code_relations_v1,
 )
 from .storage import (
@@ -56,13 +48,9 @@ from .storage import (
 
 __all__ = [
     "CodegraphArtifacts",
-    "CodegraphAccessError",
     "CodeGraphBackend",
-    "CodegraphDatabase",
-    "CodegraphGraph",
     "CodegraphClient",
     "CodegraphDeployment",
-    "EdgeRecord",
     "GRAMMAR_ARTIFACT_POLICY",
     "PINNED_RUNTIME_VERSION",
     "PINNED_UPSTREAM_COMMIT",
@@ -75,12 +63,9 @@ __all__ = [
     "SharedLibraryError",
     "ArtifactError",
     "MasterRegistry",
-    "NodeRecord",
-    "SchemaError",
     "assess_database_size",
     "database_size",
     "build_codegraph_artifacts",
-    "build_database_artifacts",
     "code_relations_v1",
     "discover_project_deployment",
     "ensure_git_excluded",

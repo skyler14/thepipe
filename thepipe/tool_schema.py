@@ -328,7 +328,8 @@ TOOLS = [
         "name": "scrape_database",
         "description": (
             "Query databases using SQL or natural language. Supports DuckDB, SQLite, "
-            "PostgreSQL, MySQL. Can convert natural language to SQL using LLM. "
+            "PostgreSQL, MySQL, and raw ODBC. Can convert natural language to SQL using LLM "
+            "for known dialects. "
             "Use mode='schema' for structure, mode='preview' for sample data."
         ),
         "parameters": {
@@ -344,7 +345,7 @@ TOOLS = [
                 },
                 "db_type": {
                     "type": "string",
-                    "enum": ["duckdb", "sqlite", "postgresql", "mysql"],
+                    "enum": ["duckdb", "sqlite", "postgresql", "mysql", "odbc"],
                     "description": "Database type (auto-detected if omitted)"
                 },
                 "mode": {
@@ -358,6 +359,7 @@ TOOLS = [
         "examples": [
             {"filepath": "data.db", "mode": "schema"},
             {"filepath": "sales.duckdb", "query": "SELECT * FROM orders LIMIT 10"},
+            {"filepath": "odbc://?connect=DRIVER%3DSQLite3%3BDatabase%3D%2Ftmp%2Fdemo.db", "query": "SELECT * FROM orders"},
             {"filepath": "data.db", "query": "What were top 5 products last month?"}
         ]
     },

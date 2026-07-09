@@ -3,11 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from .database import CodegraphDatabase
 from .outputs import (
     CodegraphArtifacts,
     build_codegraph_artifacts,
-    build_database_artifacts,
 )
 from .storage import (
     CodegraphDeployment,
@@ -16,6 +14,7 @@ from .storage import (
     discover_project_deployment,
     ensure_git_excluded,
     manifest_path,
+    native_project_name,
     write_manifest,
 )
 
@@ -68,7 +67,13 @@ class CodegraphClient:
             ),
         )
         self._record_local_deployment(root, native)
-        return build_codegraph_artifacts(native, mode="map", repo_root=str(root))
+        project = str(native.get("project") or native_project_name(root))
+        return self._project_artifacts(
+            root,
+            project,
+            mode="map",
+            summary=native,
+        )
 
     def list_projects(self) -> dict[str, Any]:
         return self.backend.call("list_projects", {})
@@ -271,15 +276,64 @@ class CodegraphClient:
     def load_artifacts(self, repo_root: str | Path) -> CodegraphArtifacts:
         root = Path(repo_root).resolve()
         deployment = discover_project_deployment(root)
-        if deployment is None:
-            raise FileNotFoundError(f"no codegraph deployment found for {root}")
-        with CodegraphDatabase(deployment.db_path) as database:
-            database.validate_schema()
-            return build_database_artifacts(
-                database,
-                deployment.project_name,
-                repo_root=str(root),
+        project = (
+            deployment.project_name
+            if deployment is not None and deployment.project_name
+            else native_project_name(root)
+        )
+        return self._project_artifacts(root, project, mode="graph")
+
+    def _project_artifacts(
+        self,
+        root: Path,
+        project: str,
+        *,
+        mode: str,
+        summary: dict[str, Any] | None = None,
+    ) -> CodegraphArtifacts:
+        summary_payload = summary if summary is not None else self.index_status(project)
+        files = _rows(
+            self.query_graph(
+                project,
+                (
+                    "MATCH (f:File) RETURN f.file_path AS path, "
+                    "f.name AS name, f.qualified_name AS qualified_name LIMIT 100000"
+                ),
+                max_rows=100000,
             )
+        )
+        entities = _rows(
+            self.query_graph(
+                project,
+                (
+                    "MATCH (n) RETURN n.label AS kind, n.name AS name, "
+                    "n.qualified_name AS qualified_name, n.file_path AS path, "
+                    "n.start_line AS start_line, n.end_line AS end_line LIMIT 100000"
+                ),
+                max_rows=100000,
+            )
+        )
+        edges = _rows(
+            self.query_graph(
+                project,
+                (
+                    "MATCH (a)-[r]->(b) RETURN r.type AS kind, "
+                    "a.qualified_name AS from, b.qualified_name AS to LIMIT 100000"
+                ),
+                max_rows=100000,
+            )
+        )
+        return build_codegraph_artifacts(
+            {
+                "project": project,
+                "summary": summary_payload,
+                "files": files,
+                "entities": entities,
+                "edges": edges,
+            },
+            mode=mode,
+            repo_root=str(root),
+        )
 
     def _record_local_deployment(
         self, repo_root: Path, native: dict[str, Any]
@@ -291,9 +345,6 @@ class CodegraphClient:
         db_path = Path(cache_dir) / f"{project}.db"
         if not db_path.is_file():
             return
-        with CodegraphDatabase(db_path) as database:
-            schema_fingerprint = database.validate_schema()
-            database_summary = database.summary(project)
         backend_version = str(native.get("backend_version", ""))
         version = getattr(self.backend, "version", None)
         if not backend_version and callable(version):
@@ -308,10 +359,10 @@ class CodegraphClient:
             project_name=project,
             backend_kind=str(getattr(self.backend, "kind", "sidecar")),
             backend_version=backend_version,
-            schema_fingerprint=schema_fingerprint,
+            schema_fingerprint=str(native.get("schema_fingerprint", "")),
             artifact_path=artifact if artifact.is_file() else None,
             size_bytes=database_size(db_path),
-            file_count=int(database_summary["files"]),
+            file_count=int(native.get("files", 0)),
             entity_count=int(native.get("nodes", 0)),
             edge_count=int(native.get("edges", 0)),
         )
@@ -319,3 +370,18 @@ class CodegraphClient:
             ensure_git_excluded(repo_root)
         write_manifest(deployment)
         self.registry.upsert(deployment, status=str(native.get("status", "ready")))
+
+
+def _rows(result: dict[str, Any]) -> list[dict[str, Any]]:
+    columns = result.get("columns", [])
+    rows = result.get("rows", [])
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return []
+    return [
+        {
+            str(column): row[index] if isinstance(row, list) and index < len(row) else None
+            for index, column in enumerate(columns)
+        }
+        for row in rows
+        if isinstance(row, list)
+    ]

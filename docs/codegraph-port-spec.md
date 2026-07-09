@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Port the comparator codegraph backend into `thepipe` in stages without dumping the
-whole comparator source tree into this repo. The first fork uses the comparator
-full binary as a sidecar. Python normalizes that API into `thepipe` outputs.
+Port the upstream codegraph backend into `thepipe` in stages without dumping the
+whole upstream source tree into this repo. The first fork uses the upstream full
+binary as a sidecar. Python normalizes that API into `thepipe` outputs.
 Later stages move the same contract to a shared library, then retire inferior
 Python codegraph pieces.
 
-This spec uses comparator source paths relative to the comparator repo root, not
+This spec uses upstream source paths relative to the upstream repo root, not
 temporary local paths.
 
 ## Implementation Status
@@ -16,13 +16,12 @@ temporary local paths.
 Implemented on `codex/codegraph-sidecar`:
 
 - complete Python facade for all 14 donor MCP tools;
-- read-only local graph accessor for deployed SQLite graphs;
+- native graph action facade for deployed graph stores;
 - hardened sidecar process boundary with timeout, cache isolation, MCP
   normalization, and version checks;
 - SHA-256 verified atomic archive installation;
 - repo-local manifest plus pointer-only SQLite master registry;
 - DB/WAL/SHM accounting, soft-cap reporting, and explicit global LRU pruning;
-- read-only donor SQLite adapter, integrity check, and schema fingerprint;
 - `code-relations/v2`, v1 compatibility, compact digest, and per-file chunks;
 - pinned temporary source build that packages only compiled artifacts;
 - context-based ctypes ABI and C shim over `cbm_mcp_handle_tool`;
@@ -68,7 +67,7 @@ Still gated:
 
 ## Source Findings
 
-Scoped `thepipe` map over comparator `src/` found:
+Scoped `thepipe` map over upstream `src/` found:
 
 - 119 related files.
 - 1439 functions.
@@ -76,7 +75,7 @@ Scoped `thepipe` map over comparator `src/` found:
 - 93% token reduction.
 - Core source size around 2.4 MB.
 
-Full comparator checkout map was intentionally stopped because generated grammar
+Full upstream checkout map was intentionally stopped because generated grammar
 source dominates the tree and made repo-wide mapping too slow. That is part of
 the design constraint: generated grammar C files are build material, not source
 we want copied into this repo.
@@ -125,9 +124,8 @@ Do not add sidecar-first instructions to skill files yet. Notes to add later:
 - use native graph actions such as `search_graph`, `query_graph`, `trace_path`,
   `get_code_snippet`, and `get_architecture` when a sidecar/shared library is
   available;
-- keep SQL-oriented functionality in database mode. The graph implementation has
-  a legacy read-only SQLite escape hatch for compatibility, but it is not the
-  recommended code-mode interface;
+- keep SQL-oriented functionality in database mode. Codegraph mode uses native
+  graph actions and Cypher, not SQL;
 - keep `.thepipe/codegraph/cache/` git-ignored unless explicitly requested;
 - fall back to `code_relations: "map"` when no deployment or sidecar exists.
 
@@ -213,12 +211,12 @@ class CodeGraphBackend:
 Implementations:
 
 - `PythonCodeGraphBackend`: current/fallback path.
-- `SidecarCodeGraphBackend`: full comparator binary, first native path.
+- `SidecarCodeGraphBackend`: full upstream binary, first native path.
 - `SharedLibCodeGraphBackend`: later `ctypes` path over shared library.
 
 ## Sidecar Mode
 
-Use comparator binary first because it already exposes tools through CLI:
+Use the upstream binary first because it already exposes tools through CLI:
 
 ```text
 codebase-memory-mcp cli [--json] <tool_name> <json_args>
@@ -233,7 +231,7 @@ Python wrapper rules:
 - request raw JSON where possible,
 - parse MCP text envelope,
 - normalize into stable dataclasses,
-- never expose comparator stderr as structured JSON,
+- never expose native backend stderr as structured JSON,
 - pin version and checksum,
 - treat schema changes as adapter migrations.
 
@@ -342,7 +340,7 @@ Go/no-go for shared-library default in Python package contexts:
 
 ## Grammar Strategy
 
-Comparator generated grammar C files are not runtime source. They are build
+Generated grammar C files are not runtime source. They are build
 inputs compiled into binary/library artifacts.
 
 Do not commit generated grammar source into this repo. Instead:
@@ -357,7 +355,7 @@ Packs:
 - `core`: Python, JS, TS, TSX, Go, Rust, C, C++, Java, C#, Swift, Kotlin, PHP,
   HTML, CSS.
 - `infra`: YAML, JSON, Dockerfile, HCL, TOML, K8s-related parsers.
-- `full`: all supported comparator grammars.
+- `full`: all supported upstream grammars.
 
 ## Storage Layout
 
@@ -832,7 +830,7 @@ Inputs:
 - `project` required.
 - `traces` required.
 
-Current comparator handler only acknowledges; runtime edge creation is not yet
+Current upstream handler only acknowledges; runtime edge creation is not yet
 implemented.
 
 Thepipe interface:
@@ -867,8 +865,7 @@ From `src/store/store.h`, Python/shared-library API needs wrappers for:
 - utility: risk labels, glob/LIKE hints, test path detection.
 
 Shared library should not expose all C structs directly. It should expose JSON
-requests and JSON responses, plus a small raw SQL read-only escape hatch only if
-absolutely needed for projection speed.
+requests and JSON responses through the native graph action contract.
 
 ### Native C Hook Candidates Beyond MCP Dispatch
 
@@ -881,7 +878,7 @@ binding directly to donor structs that may churn. The next stage should add
 select lower-level C wrappers only where they beat the MCP JSON layer in speed,
 ergonomics, or safety.
 
-High-value direct wrappers:
+Potential direct wrappers after the context-call layer is stable:
 
 - `src/pipeline/pipeline.h`
   - `cbm_pipeline_new`, `cbm_pipeline_run`, `cbm_pipeline_set_persistence`,
@@ -889,23 +886,9 @@ High-value direct wrappers:
     `cbm_pipeline_project_name`;
   - use for progress-aware indexing, cleaner cancellation, and richer refresh
     diagnostics than the current tool-envelope response.
-- `src/store/store.h`
-  - `cbm_store_open_path_query`, `cbm_store_check_integrity`,
-    `cbm_store_checkpoint`, `cbm_store_get_file_hashes`;
-  - use for fast freshness checks, manifest repair, read-only projections, and
-    repo-size policy without asking the MCP layer to format large JSON.
-- `src/store/store.h`
-  - `cbm_store_search`, `cbm_store_bfs`, `cbm_store_get_schema`,
-    `cbm_store_get_schema_counts`, `cbm_store_get_architecture`,
-    `cbm_store_vector_search`;
-  - use for compact thepipe-native outputs where Python controls pagination,
-    token budgeting, confidence filtering, and graph collapse.
-- `src/store/store.h`
-  - `cbm_store_find_node_by_qn`, `cbm_store_find_nodes_by_name`,
-    `cbm_store_find_nodes_by_file_overlap`, `cbm_store_node_neighbor_names`,
-    `cbm_store_node_degree`;
-  - use for snippet lookup, mapnew changed-region mapping, and ambiguity
-    workflows without shelling out to donor CLI behavior.
+- donor store metadata helpers:
+  - use only for freshness and size-policy metadata. Do not expose DB-handle
+    reads as a Python graph query path.
 - `src/cypher/cypher.h`
   - lexer/parser/executor APIs;
   - keep Cypher in codegraph mode as the graph query grammar. Do not confuse it
@@ -929,53 +912,28 @@ Do not bind everything at once. Each direct wrapper needs:
 
 - a C shim with opaque context ownership and explicit free functions;
 - ctypes tests against sidecar-equivalent JSON behavior;
-- stress tests for invalid UTF-8, long paths, missing DBs, and concurrent reads;
+- stress tests for invalid UTF-8, long paths, and concurrent operation;
 - a fallback to MCP JSON dispatch for unsupported platforms or ABI mismatch;
 - version lock metadata tied to the donor commit in the archive manifest.
 
 The likely best split is:
 
 1. MCP JSON dispatch remains the broad compatibility layer.
-2. Direct store wrappers power thepipe compact/projection/read paths.
+2. Native `query_graph`/Cypher powers codegraph projections and graph reads.
 3. Direct pipeline wrappers power refresh/index lifecycle.
 4. Direct parser/discover/registry wrappers are adopted only after they can
    delete Python code without reducing thepipe-specific behavior.
 
-Implemented Python-side direct-store ABI hooks:
-
-```c
-void *tp_store_open_query(const char *db_path);
-int tp_store_call(void *store, const char *action,
-                  const char *request_json, char **out_json);
-int tp_cypher_query(void *store, const char *request_json, char **out_json);
-void tp_store_close(void *store);
-```
-
-`SharedLibraryBackend.open_store()` uses those symbols when present. Current
-Python convenience methods map onto donor tool names: `summary` calls
-`index_status`, `search` calls `search_graph`, `neighbors` calls `trace_path`,
-`schema` calls `get_graph_schema`, `architecture` calls `get_architecture`, and
-`cypher` calls `query_graph`. The normal MCP `tp_context_call` path remains the
-fallback for older shared libraries and for actions that do not yet have a
-direct-store equivalent.
-
-Thepipe graph actions now prefer direct store calls for `search_graph`,
-`query_graph`, `get_graph_schema`, and `get_architecture` when:
-
-- a shared library is active;
-- the direct-store ABI symbols exist;
-- a repo-local deployment is discoverable;
-- `codegraph_direct_store` is not explicitly false.
-
-This keeps the sidecar/full-MCP behavior stable while letting newer shared
-libraries skip the external binary process for hot read/query paths. The current
-facade still reuses donor JSON envelopes internally; the Python adapter unwraps
-them. A later ABI can return raw JSON once the donor JSON shaping is extracted
-from `mcp.c`.
+Intentionally not implemented: a Python-facing DB-handle graph query ABI that
+bypasses the native graph action surface. The earlier local reader experiment
+was removed because it created a second query contract next to Cypher. Thepipe
+graph actions should call `tp_context_call` tools such as `search_graph`,
+`query_graph`, `trace_path`, `get_graph_schema`, and `get_architecture`;
+compact/default outputs should be produced from those native results.
 
 ## Thepipe-Specific Interfaces To Add
 
-Comparator API is graph-native. `thepipe` needs projection APIs:
+The native codegraph API is graph-native. `thepipe` needs projection APIs:
 
 ### `emit_chunks_from_graph`
 
@@ -1016,33 +974,39 @@ Returns:
 
 ### `access_graph`
 
-Implemented as `CodegraphGraph` and `codegraph_action`.
+Implemented as `codegraph_action` wrappers over native MCP/shared-library calls.
+Repo-local graph storage may exist, but Python graph reads go through native
+actions and Cypher.
 
 ```python
-CodegraphGraph.open_repo(repo).find_entities(query="main", kind="Function")
-CodegraphGraph.open_repo(repo).neighbors("main", direction="outbound", depth=1)
+scrape_directory(repo, options={
+    "code_relations": "graph",
+    "codegraph_action": "entities",
+    "codegraph_query": "main",
+})
+scrape_directory(repo, options={
+    "code_relations": "graph",
+    "codegraph_action": "query_graph",
+    "codegraph_cypher": "MATCH (n:Function) RETURN n.name LIMIT 20",
+})
 ```
 
 CLI/package actions:
 
-- `summary`: project/file/entity/edge counts;
-- `files`: indexed file hashes/sizes;
-- `entities`: bounded local entity search;
-- `edges`: bounded edge list;
-- `neighbors`: bounded BFS around an entity.
+- `summary`: native project status/counts;
+- `files`: bounded file projection through Cypher;
+- `entities`: bounded native graph search;
+- `edges`: bounded edge projection through Cypher;
+- `neighbors`: bounded native `trace_path` around an entity.
 
 `neighbors` quality controls:
 
-- short names must resolve uniquely; ambiguous names fail with qualified-name
-  candidates instead of silently selecting the first row;
-- `codegraph_min_confidence` defaults to `0.5` for package/CLI actions and drops
-  only edges carrying a lower numeric confidence;
-- `codegraph_max_transit_degree` defaults to `25` and returns high-degree hubs
-  without expanding through them;
-- each returned node includes its shortest `hop`;
-- `filtered_edges` and `pruned_hubs` make quality reduction explicit;
-- either filter accepts `null` to preserve every indexed edge or traverse every
-  hub.
+- ambiguity handling, confidence, hub pruning, and hop annotations belong in the
+  native `trace_path` implementation;
+- Python should pass explicit entity, direction, depth, mode, and edge-type
+  options through without reimplementing traversal;
+- future quality knobs should be added to the native API first, then surfaced as
+  typed options in `thepipe`.
 
 Motivation: native resolution deliberately preserves uncertain edges, and common
 symbols such as `close`, `query`, or `Chunk` can connect unrelated regions. A
@@ -1213,10 +1177,10 @@ Keep:
 
 ## Open Questions
 
-- Which comparator release/commit is pinned first?
+- Which upstream release/commit is pinned first?
 - Is first sidecar distributed by separate extra package or installer command?
 - Which grammar pack is first native library target?
 - Do we expose `query_graph` to all users or gate behind advanced flag?
-- Should repo-local `.thepipe/codegraph.sqlite` be default, or comparator cache
+- Should repo-local `.thepipe/codegraph.sqlite` be default, or upstream cache
   default with manifest pointer first?
 - Do we store snippets in our overlay DB, or always read source on demand?
