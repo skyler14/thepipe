@@ -392,22 +392,23 @@ become graph nodes by default.
 
 ## What "Graph Store" Means
 
-Current codegraph persistence is a SQLite database. It stores projects, file
-hashes, nodes, edges, summaries, and related properties. Native C code owns
-indexing and Cypher-like graph queries; Python currently reads the donor SQLite
-schema through a read-only adapter.
+Current codegraph persistence is backed by a native-owned store. It stores
+projects, file hashes, nodes, edges, summaries, and related properties. Native C
+code owns indexing and graph queries; Python graph reads should go through the
+native action surface, especially Cypher-backed `query_graph`, rather than
+reading private codegraph tables.
 
 It is not a special in-memory native data structure, and "use the graph store"
 does not mean replacing databases with C structures.
 
 For database metadata, future options are:
 
-1. Separate SQLite metadata graph using the same action/output conventions.
+1. Separate metadata graph using the same action/output conventions.
 2. A namespaced overlay database owned by thepipe.
-3. Generic sidecar/shared-library ingestion added to donor ABI.
+3. Generic sidecar/shared-library ingestion added to the native graph ABI.
 
-Do not write database metadata directly into private donor tables. Begin with the
-smallest stable SQLite representation. Consider native ingestion only after
+Do not write database metadata directly into private codegraph tables. Begin
+with the smallest stable representation. Consider native ingestion only after
 measured metadata scale or query latency requires it.
 
 ## Existing Output Contract
@@ -500,6 +501,7 @@ disk, and staleness risk. Personal mode can explicitly loosen retention.
 ## Open Questions
 
 - Exact `DatabaseSnapshot` versioned schema.
+- Exact read-only Cypher subset for database metadata graph queries.
 - How source identity should work for rotating credentials and replicas.
 - Default thresholds for `fresh`, `aging`, and `stale` statistics.
 - Which summary statistics are portable enough for baseline support.
