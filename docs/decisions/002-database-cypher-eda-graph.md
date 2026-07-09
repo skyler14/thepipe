@@ -10,6 +10,13 @@ database drivers. The goal is to build a compact, durable metadata graph that
 helps an agent decide what to inspect, what to query, what has changed, and what
 context should be sent to a model.
 
+Although this starts with database mode, the same graph shape should eventually
+cover structured data files that thepipe already understands: CSV, JSON, JSONL,
+XML, Parquet, Arrow/Feather, spreadsheets, notebooks, archives, and unpacked
+document containers such as DOCX/XLSX/PPTX internals. Ponytail rule: only add a
+source once it can reuse the same snapshot and graph pipeline; do not build a
+parallel graph stack per format.
+
 Cypher is the candidate query grammar for that metadata graph because it is a
 widely learned graph query language, maps naturally to schema topology, and is
 more compact than large JSON relationship dumps for many graph-shaped questions.
@@ -31,6 +38,9 @@ relationship questions without re-crawling the source.
 - Do not require codegraph installation for ordinary database mode.
 - Do not require graph construction before simple `schema`, `preview`, or
   explicit SQL operations can run.
+- Do not route every structured file through the native codegraph parser stack
+  just because grammars exist. Use native Python/DuckDB/XML/zip tools first;
+  optional grammar packs are an accelerator for formats they already parse well.
 
 ## Separation of Query Languages
 
@@ -74,6 +84,12 @@ Baseline node labels:
 - `Finding`: agent-readable observation, warning, trend, or anomaly.
 - `Query`: executed query shape, normalized and fingerprinted.
 - `Directive`: user-approved scratch knowledge or project-specific note.
+- `Document`: structured document container such as DOCX, XLSX, PPTX, notebook,
+  XML document, or archive member set.
+- `Sheet`: spreadsheet worksheet or table-like tab.
+- `Field`: semi-structured object field for JSON/XML/document trees.
+- `RecordShape`: inferred shape for JSONL, nested JSON arrays, XML repeated
+  elements, or dataframe-like records.
 
 Baseline edge types:
 
@@ -88,6 +104,10 @@ Baseline edge types:
 - `LIKELY_RELATED` for heuristic relationships.
 - `SUPERSEDES` for snapshot/version lineage.
 - `HAS_DIRECTIVE`.
+- `HAS_DOCUMENT`, `HAS_SHEET`, `HAS_FIELD`, `HAS_RECORD_SHAPE`.
+- `CONTAINS_NODE` for nested XML/JSON/document structure.
+- `UNPACKED_FROM` for archive and office-document container lineage.
+- `NORMALIZED_AS` for projections into DuckDB views/dataframes.
 
 Raw row values should appear only as short-lived sample payloads or redacted
 profile examples under an explicit retention policy.
@@ -148,6 +168,57 @@ chunks alone would preserve text but lose too much executable structure:
 freshness, object IDs, relationship confidence, profile provenance, omission
 records, retention policy, and graph queryability. Chunks should be regenerated
 from the graph/snapshot whenever possible.
+
+## Structured Data Graph Intake
+
+Use the same graph middleware for sources that are not SQL databases but have
+stable internal structure.
+
+Initial source families:
+
+- relational databases through current database adapters;
+- DuckDB-readable data files: CSV, JSON, JSONL, Parquet, ORC, Arrow/Feather;
+- spreadsheets: workbook, sheet, header row, table/range, column;
+- XML: document, repeated element shapes, attributes, text-bearing fields;
+- JSON: object paths, arrays, repeated record shapes, scalar fields;
+- ZIP/archive and Office containers: member graph plus selected parsed members;
+- notebooks: cells, outputs, referenced data files, dataframe-looking outputs.
+
+Minimal extraction strategy:
+
+1. Prefer existing thepipe parsers and stdlib/container formats.
+2. Normalize table-like sources to `Source -> Table/View -> Column`.
+3. Normalize nested sources to `Document -> RecordShape/Field`.
+4. Add `NORMALIZED_AS` edges when a nested/file source is made queryable through
+   DuckDB `source_data` or a dataframe.
+5. Persist only topology, profiles, findings, and omissions by default.
+
+Native grammar packs from codegraph may help for JSON, XML, YAML, TOML, and
+similar formats, but they should remain optional. The default implementation can
+get a long way with `json`, `xml.etree.ElementTree`, `zipfile`, DuckDB, pandas,
+and existing thepipe extractors.
+
+Useful Cypher examples:
+
+```cypher
+MATCH (d:Document)-[:HAS_FIELD]->(f:Field)
+WHERE f.path CONTAINS "customer"
+RETURN d.path, f.path, f.type
+LIMIT 25
+```
+
+```cypher
+MATCH (s:Sheet)-[:HAS_COLUMN]->(c:Column)
+RETURN s.name, count(c) AS columns
+ORDER BY columns DESC
+LIMIT 20
+```
+
+```cypher
+MATCH (src:Source)-[:NORMALIZED_AS]->(t:Table)-[:HAS_PROFILE]->(p:Profile)
+RETURN src.path, t.name, p.freshness
+LIMIT 50
+```
 
 ## Cypher Interface
 
@@ -387,6 +458,8 @@ The graph builder must tolerate uneven metadata support:
 - ODBC: metadata APIs first, dialect fallbacks second.
 - PostgreSQL/MySQL/MSSQL: information schema plus dialect-specific extensions.
 - Dataframes/archives: synthetic source/table/column nodes.
+- JSON/XML/spreadsheets/notebooks: synthetic document, sheet, record-shape, and
+  field nodes, with table projections only when a stable tabular view exists.
 
 Every adapter should return partial snapshots with diagnostics rather than
 claiming unsupported data is absent.
@@ -432,6 +505,7 @@ Unit fixtures:
 
 - SQLite database with primary keys, foreign keys, indexes, views.
 - DuckDB file-source fixtures for CSV, JSONL, Parquet.
+- JSON, XML, XLSX, DOCX-internal XML, ZIP archive, and notebook shape fixtures.
 - ODBC SQLite fixture using a real driver when available.
 - Mock ODBC metadata rows for catalog/schema edge cases.
 - Wide table, empty table, weird identifiers, reserved words.
@@ -454,6 +528,7 @@ Behavior tests:
 - write SQL is rejected under read-only policy;
 - heuristic relationships carry confidence and evidence;
 - large-source budgets produce omissions, not crashes.
+- structured files can emit graph topology without persisting raw values.
 
 Integration tests:
 
@@ -470,13 +545,15 @@ Integration tests:
 3. Add read-only guardrails and mutation tests.
 4. Build one-pass introspection for SQLite and DuckDB file sources.
 5. Add ODBC snapshot adapter with real-driver fixture coverage.
-6. Add repo-local storage, manifest, git exclude, and user registry.
-7. Add compact snapshot digest and chunk projection.
-8. Add a small read-only Cypher engine or embedded graph query dependency.
-9. Add relationship heuristics and confidence/evidence reporting.
-10. Add bounded EDA profiling and profile freshness.
-11. Add relevant table selection driven by query intent.
-12. Add cross-domain exported facts for codegraph integration.
+6. Add structured-file snapshot adapters for JSON/XML/spreadsheet/archive
+   topology using existing parsers before considering grammar packs.
+7. Add repo-local storage, manifest, git exclude, and user registry.
+8. Add compact snapshot digest and chunk projection.
+9. Add a small read-only Cypher engine or embedded graph query dependency.
+10. Add relationship heuristics and confidence/evidence reporting.
+11. Add bounded EDA profiling and profile freshness.
+12. Add relevant table selection driven by query intent.
+13. Add cross-domain exported facts for codegraph integration.
 
 The implementation should stay incremental. Each phase must delete duplicated
 database formatting or repeated crawl logic where possible, not add another
@@ -494,3 +571,5 @@ parallel path.
 - How much PII detection belongs in first-contact profiling.
 - Whether optional committed snapshots should require redaction manifests.
 - How cross-domain code/database graph joins should be queried once both exist.
+- Which structured-file formats need native grammar packs versus existing Python
+  parsers and DuckDB normalization.

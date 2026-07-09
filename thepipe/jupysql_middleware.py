@@ -5,6 +5,11 @@ JupySQL Middleware Module for thepipe
 This module provides a unified interface to database systems through JupySQL.
 It simplifies database interactions by providing a consistent API that works
 across different database technologies and connection types.
+
+TODO(jupysql-removal): retire this module after database adapter parity is
+green. Keep only the useful contract: query/execute/close with pandas
+DataFrame results. Do not preserve runtime `pip install jupysql`, global
+ConnectionManager state, or string-replacement parameter binding.
 """
 
 from typing import Union, Optional, Any, Dict, List
@@ -139,6 +144,9 @@ class Database:
         pandas.DataFrame
             The result set as a DataFrame
         """
+        # TODO(jupysql-removal): adapter replacement must pass params to the
+        # underlying driver/SQLAlchemy instead of relying on JupySQL namespace
+        # mutation or manual SQL string replacement.
         # Handle query parameters if provided
         if params:
             sql = self._bind_params(sql, params)
@@ -170,6 +178,8 @@ class Database:
         --------
         The result of the query, typically a pandas DataFrame or ResultSet
         """
+        # TODO(jupysql-removal): preserve DDL execution for DuckDB source_data
+        # view creation, but route parameters through the real driver.
         # Handle query parameters if provided
         if params:
             sql = self._bind_params(sql, params)

@@ -17,6 +17,9 @@ from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# TODO(jupysql-removal): these tests assert DuckDB file-source behavior, not
+# notebook SQL behavior. Once native DuckDBAdapter exists, gate on duckdb or
+# make these unconditional instead of requiring JupySQL.
 JUPYSQL_AVAILABLE = importlib.util.find_spec("jupysql") is not None
 
 

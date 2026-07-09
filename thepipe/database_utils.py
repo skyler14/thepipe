@@ -1,6 +1,5 @@
 """
-Enhanced database utilities module that integrates with JupySQL middleware.
-This module provides a clean interface for database operations in thepipe.
+Enhanced database utilities module for database operations in thepipe.
 """
 
 from typing import Dict, List, Optional, Any, Union, Tuple
@@ -16,7 +15,11 @@ from urllib.parse import parse_qs, urlparse
 
 from .core import Chunk
 
-# Import the JupySQL middleware
+# TODO(jupysql-removal): replace this import with a tiny local adapter module.
+# Required contract: query(sql, params=None) -> pandas.DataFrame,
+# execute(sql, params=None), close(). DuckDB/file sources should use native
+# duckdb; sqlite/postgres/mysql/mssql should use SQLAlchemy; raw ODBC should
+# keep the direct pyodbc path below.
 from .jupysql_middleware import Database
 from .database_analysis import execute_fallback, format_analysis_for_llm, get_all_tables, get_auto_analysis, get_schema_for_all_tables, fix_sql_syntax
 # Constants
@@ -31,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """
-    Manager class that handles database operations through JupySQL middleware.
+    Manager class that handles database operations.
     Provides a unified interface for thepipe to interact with databases.
     """
     
@@ -226,6 +229,9 @@ class DatabaseManager:
     def _new_duckdb_file_source_db(self):
         if self._duckdb_config_dict is None:
             raise ValueError("DuckDB file-source config is not initialized")
+        # TODO(jupysql-removal): return a native DuckDB adapter here. This must
+        # keep the in-memory `duckdb://` behavior and support CREATE VIEW
+        # source_data AS SELECT * FROM read_*() for CSV/JSONL/Parquet/ORC/etc.
         return Database("duckdb://", config_dict=self._duckdb_config_dict)
 
     def _prepend_duckdb_read_warning(self, text: str) -> str:
@@ -407,9 +413,12 @@ class DatabaseManager:
             return jdbc_url
     
     def _connect(self):
-        """Establish connection to the database using JupySQL middleware."""
+        """Establish connection to the database."""
         try:
-            # Configure JupySQL middleware options
+            # TODO(jupysql-removal): this config currently mirrors the wrapper's
+            # autopandas/autocommit behavior. The replacement should make
+            # read-only and transaction behavior explicit instead of inheriting
+            # JupySQL autocommit defaults.
             config_dict = {
                 "autopandas": True,
                 "autopolars": False,
@@ -450,6 +459,8 @@ class DatabaseManager:
                 if self.verbose:
                     print(f"[thepipe] Connecting to DuckDB: {connection_str}")
                     
+                # TODO(jupysql-removal): use native DuckDB for .duckdb files and
+                # duckdb:// URLs, returning pandas DataFrames from query().
                 self.db = Database(connection_str, config_dict=config_dict)
             else:
                 # Standard database connection
@@ -460,6 +471,8 @@ class DatabaseManager:
                     connection_str = self._create_connection_string(
                         self.connection_info, self.db_type)
                 
+                # TODO(jupysql-removal): keep this URL normalization in the
+                # SQLAlchemy adapter factory; tests already cover these forms.
                 # Normalize connection URLs to SQLAlchemy format
                 # mysql:// -> mysql+pymysql://
                 if connection_str.startswith("mysql://"):
@@ -477,6 +490,9 @@ class DatabaseManager:
                 if self.verbose:
                     print(f"[thepipe] Connecting to database with connection string: {connection_str}")
                     
+                # TODO(jupysql-removal): replace with SQLAlchemyAdapter. It must
+                # preserve DataFrame outputs, real parameter binding, close(),
+                # and current schema/preview/query chunk formatting.
                 self.db = Database(connection_str, config_dict=config_dict)
             
             if self.verbose:
