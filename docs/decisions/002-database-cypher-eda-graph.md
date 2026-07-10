@@ -82,8 +82,14 @@ Baseline node labels:
 - `Profile`: bounded EDA/profile snapshot for a source/table/column.
 - `Sample`: optional, bounded, expiring sample reference.
 - `Finding`: agent-readable observation, warning, trend, or anomaly.
+- `Insight`: reusable conclusion produced by prior EDA or agent work, with
+  provenance, freshness, confidence, and retention policy.
 - `Query`: executed query shape, normalized and fingerprinted.
+- `Operation`: crawl, query, profile, refresh, or analysis run that produced
+  profiles, findings, insights, samples, or omissions.
 - `Directive`: user-approved scratch knowledge or project-specific note.
+- `CitationAnchor`: stable pointer to source content, row-free samples,
+  document region, sheet range, XML path, JSON path, or chunk projection.
 - `Document`: structured document container such as DOCX, XLSX, PPTX, notebook,
   XML document, or archive member set.
 - `Sheet`: spreadsheet worksheet or table-like tab.
@@ -100,7 +106,10 @@ Baseline edge types:
 - `DERIVED_FROM` for dataframe/archive derived views.
 - `HAS_PROFILE`, `PROFILED_COLUMN`.
 - `HAS_FINDING`, `EVIDENCED_BY`.
+- `HAS_INSIGHT`, `PRODUCED_BY`, `USED_AS_EVIDENCE`.
 - `QUERY_READS`, `QUERY_FILTERS`, `QUERY_GROUPS`, `QUERY_JOINS`.
+- `HAS_OPERATION`, `REFRESHED_BY`, `PINNED`, `EXPIRES`, `REVOKED_BY`.
+- `HAS_CITATION_ANCHOR`, `CITES`.
 - `LIKELY_RELATED` for heuristic relationships.
 - `SUPERSEDES` for snapshot/version lineage.
 - `HAS_DIRECTIVE`.
@@ -133,6 +142,11 @@ The graph is built from a versioned snapshot, not directly from ad hoc markdown.
     "schema_fingerprint": "sha256:...",
     "profile_fingerprint": "sha256:..."
   },
+  "retention": {
+    "policy": "memory|repo|user|pinned",
+    "purge_after": "2026-08-08T00:00:00Z",
+    "renewable": true
+  },
   "objects": {
     "tables": [],
     "views": [],
@@ -143,6 +157,9 @@ The graph is built from a versioned snapshot, not directly from ad hoc markdown.
   },
   "profiles": [],
   "findings": [],
+  "insights": [],
+  "operations": [],
+  "citation_anchors": [],
   "diagnostics": [],
   "omissions": []
 }
@@ -174,6 +191,13 @@ from the graph/snapshot whenever possible.
 Use the same graph middleware for sources that are not SQL databases but have
 stable internal structure.
 
+The intent differs by source family. Database/dataframe graph mode is mainly
+for analysis provenance, reusable insights, topology, and refresh. Document/XML
+graph mode is mainly for structure-aware content storage and retrieval: layout,
+regions, paths, anchors, and logical units that make later RAG/citation systems
+easier to feed. Thepipe should prepare those graph-ready units, not become the
+RAG engine itself.
+
 Initial source families:
 
 - relational databases through current database adapters;
@@ -192,6 +216,12 @@ Minimal extraction strategy:
 4. Add `NORMALIZED_AS` edges when a nested/file source is made queryable through
    DuckDB `source_data` or a dataframe.
 5. Persist only topology, profiles, findings, and omissions by default.
+
+For document-like sources, persist citation-ready anchors and structure first;
+content payloads should remain chunk projections or separately retained excerpts
+with explicit policy. Examples: DOCX paragraph/run/table anchors, sheet/range
+anchors, XML paths, JSON paths, archive member paths, slide placeholders, and
+notebook cell IDs.
 
 Native grammar packs from codegraph may help for JSON, XML, YAML, TOML, and
 similar formats, but they should remain optional. The default implementation can
@@ -294,6 +324,46 @@ The graph should support three durability tiers:
 Ancient detailed records should compact into durable summaries and trends.
 Detailed profiles and samples should age out before schema topology and verified
 findings.
+
+## Insight Provenance And Retention
+
+Database graph mode should remember enough past work to make future questions
+faster even when the caller has no prior chat context.
+
+Default persisted memory:
+
+- operation records: what was crawled, queried, profiled, refreshed, omitted;
+- query fingerprints and referenced tables/columns, not raw result sets;
+- bounded profile summaries and stale/fresh status;
+- findings and insights with confidence, evidence links, and produced-by edges;
+- citation anchors or sample references only when policy permits them.
+
+Retention controls:
+
+- unpinned operation detail can be purged by TTL or size budget;
+- pinned insights survive purge until explicitly revoked;
+- pinned insights may optionally renew their freshness when related metadata or
+  profiles refresh cleanly;
+- purged evidence should leave an omission/provenance stub so future agents know
+  an insight existed but cannot inspect the full discovery trail;
+- personal mode may retain more detail, but default mode should favor topology,
+  summaries, and provenance over raw data.
+
+Cypher should make both current topology and past reasoning queryable:
+
+```cypher
+MATCH (i:Insight)-[:USED_AS_EVIDENCE]->(f:Finding)<-[:HAS_FINDING]-(t:Table)
+WHERE i.pinned = true
+RETURN i.summary, t.name, i.freshness, i.confidence
+LIMIT 20
+```
+
+```cypher
+MATCH (op:Operation)-[:QUERY_READS]->(t:Table)
+WHERE op.kind = "profile" AND op.status = "partial"
+RETURN op.started_at, t.name, op.omission_reason
+LIMIT 50
+```
 
 ## Useful Cypher Patterns
 
@@ -420,6 +490,8 @@ Default repo-local layout:
     snapshots/
     graph/
     profiles/
+    insights/
+    operations/
     samples/
     tmp/
 ```
@@ -437,7 +509,8 @@ Retention policy:
 - metadata can live longest;
 - profiles expire sooner than schema;
 - raw samples are off by default and expire fastest;
-- findings may be compacted into durable summaries;
+- findings and operations may be compacted into durable insights;
+- pinned insights are permanent until revoked or explicitly unpinned;
 - old detailed records can be squashed into trend snapshots.
 
 ### Privacy and Security
@@ -446,7 +519,9 @@ Retention policy:
 - Treat table/column names as potentially sensitive.
 - Never persist raw rows unless a policy explicitly permits it.
 - Mark heuristic edges and findings as hypotheses.
+- Mark generated insights with evidence, operation provenance, and confidence.
 - Record who/what created a directive or finding when available.
+- Allow pinned insights to be revoked without deleting the whole graph.
 - Support a "no persist" mode for regulated or temporary work.
 
 ### Driver Diversity
@@ -525,6 +600,8 @@ Behavior tests:
 - `if_stale` refreshes only when TTL/fingerprint requires it;
 - repo-local graph store is git-ignored but auto-discoverable;
 - raw samples are not persisted in default policy;
+- unpinned operation detail can be purged while pinned insights remain;
+- revoked pinned insights no longer appear in default planning context;
 - write SQL is rejected under read-only policy;
 - heuristic relationships carry confidence and evidence;
 - large-source budgets produce omissions, not crashes.
@@ -552,8 +629,10 @@ Integration tests:
 9. Add a small read-only Cypher engine or embedded graph query dependency.
 10. Add relationship heuristics and confidence/evidence reporting.
 11. Add bounded EDA profiling and profile freshness.
-12. Add relevant table selection driven by query intent.
-13. Add cross-domain exported facts for codegraph integration.
+12. Add operation/insight provenance with pin, revoke, purge, and renew policy.
+13. Add relevant table selection driven by query intent and retained insights.
+14. Add citation anchors for structured document/XML/spreadsheet sources.
+15. Add cross-domain exported facts for codegraph integration.
 
 The implementation should stay incremental. Each phase must delete duplicated
 database formatting or repeated crawl logic where possible, not add another
@@ -573,3 +652,7 @@ parallel path.
 - How cross-domain code/database graph joins should be queried once both exist.
 - Which structured-file formats need native grammar packs versus existing Python
   parsers and DuckDB normalization.
+- How pinned insights should renew when their supporting profiles are aging but
+  schema fingerprints are still unchanged.
+- Whether citation anchors should be global graph nodes or projection-only IDs
+  generated during chunk emission.
