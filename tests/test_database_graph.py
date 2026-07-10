@@ -24,6 +24,7 @@ def test_database_graph_persists_operations_by_default(tmp_path):
     assert data["operations"][0]["kind"] == "query"
     assert data["operations"][0]["query"] == "SELECT name FROM users"
     assert data["operations"][0]["result_fingerprint"]
+    assert data["sources"][0]["tables"] == [{"name": "users", "columns": ["id", "name"]}]
 
 
 def test_database_graph_adds_repo_local_git_exclude(tmp_path, monkeypatch):

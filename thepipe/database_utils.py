@@ -62,6 +62,27 @@ class DatabaseManager:
         self._duckdb_read_mode = self._resolve_duckdb_read_mode()
         self._duckdb_read_warning: Optional[str] = None
         self._connect()
+
+    def graph_source_snapshot(self) -> Optional[Dict[str, Any]]:
+        try:
+            if self._is_odbc():
+                tables = []
+                for table in self._odbc_table_records():
+                    name = self._odbc_table_name(table)
+                    columns = [column.get("name") for column in self._odbc_column_records(name)]
+                    tables.append({"name": name, "columns": [c for c in columns if c]})
+                return {"source_id": str(self.connection_info), "tables": tables}
+            tables = []
+            for table in get_all_tables(self.db, self.db_type, self.verbose):
+                try:
+                    frame = self.db.query(f"SELECT * FROM {self._quote_identifier(str(table))} LIMIT 1")
+                    columns = list(frame.columns) if hasattr(frame, "columns") else []
+                except Exception:
+                    columns = []
+                tables.append({"name": str(table), "columns": columns})
+            return {"source_id": str(self.connection_info), "tables": tables}
+        except Exception:
+            return None
         
     def _detect_database_type(self, source: Union[str, Dict]) -> str:
         """Detect database type from connection string or configuration."""
@@ -1702,6 +1723,11 @@ def process_database(
                     str(options.get("database_graph_group", "default")),
                     list(options.get("database_graph_sources", [])),
                 )
+        elif graph_enabled(options):
+            graph_ledger = ledger_from_options(connection_info, options)
+            graph_source = db_manager.graph_source_snapshot()
+            if graph_ledger and graph_source:
+                graph_ledger.record_sources(str(options.get("database_graph_group", "default")), [graph_source])
         
         # Get schema information
         if verbose:
