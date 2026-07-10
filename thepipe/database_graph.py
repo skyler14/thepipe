@@ -21,6 +21,8 @@ class DatabaseGraphLedger:
         self.persist = persist and self.path is not None
         self.data: Dict[str, Any] = {
             "schema_version": "database-graph-ledger/v1",
+            "dataset_groups": [],
+            "sources": [],
             "operations": [],
             "join_candidates": [],
         }
@@ -44,6 +46,35 @@ class DatabaseGraphLedger:
         self.data.setdefault("operations", []).append(operation)
         self.save()
         return operation
+
+    def record_sources(self, group_name: str, sources: List[Dict[str, Any]]) -> None:
+        source_ids = [str(source.get("source_id", "source")) for source in sources]
+        group = {"name": group_name, "sources": source_ids}
+        groups = self.data.setdefault("dataset_groups", [])
+        if group not in groups:
+            groups.append(group)
+        known_sources = self.data.setdefault("sources", [])
+        for source in sources:
+            if source not in known_sources:
+                known_sources.append(source)
+        for candidate in find_join_candidates(sources):
+            if candidate not in self.data.setdefault("join_candidates", []):
+                self.data["join_candidates"].append(candidate)
+        self.save()
+
+    def query(self, cypher: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        text = cypher.lower()
+        if limit is None:
+            limit = _extract_limit(cypher)
+        if "operation" in text:
+            rows = list(self.data.get("operations", []))
+        elif "cross_source_join" in text or "joincandidate" in text:
+            rows = list(self.data.get("join_candidates", []))
+        elif "datasetgroup" in text:
+            rows = list(self.data.get("dataset_groups", []))
+        else:
+            rows = []
+        return rows[:limit] if limit is not None else rows
 
     def save(self) -> None:
         if not self.persist or not self.path:
@@ -69,6 +100,16 @@ def ledger_from_options(source: Any, options: Dict[str, Any]) -> Optional[Databa
     if store == "memory":
         persist = False
     return DatabaseGraphLedger(options.get("database_graph_path") or default_graph_path(source), persist=persist)
+
+
+def _extract_limit(cypher: str) -> Optional[int]:
+    parts = cypher.lower().rsplit("limit", 1)
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[1].strip().split()[0])
+    except (IndexError, ValueError):
+        return None
 
 
 def dataframe_records_json(result: Any) -> Optional[str]:

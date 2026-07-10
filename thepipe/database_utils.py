@@ -14,7 +14,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 from .core import Chunk
-from .database_graph import fingerprint, ledger_from_options
+from .database_graph import fingerprint, graph_enabled, ledger_from_options
 
 # TODO(jupysql-removal): replace this import with a tiny local adapter module.
 # Required contract: query(sql, params=None) -> pandas.DataFrame,
@@ -1687,6 +1687,13 @@ def process_database(
             verbose=verbose,
             options=options  # Pass full options here
         )
+        if graph_enabled(options) and options.get("database_graph_sources"):
+            graph_ledger = ledger_from_options(connection_info, options)
+            if graph_ledger:
+                graph_ledger.record_sources(
+                    str(options.get("database_graph_group", "default")),
+                    list(options.get("database_graph_sources", [])),
+                )
         
         # Get schema information
         if verbose:
