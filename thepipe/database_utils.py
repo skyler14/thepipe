@@ -1703,6 +1703,8 @@ def process_database(
             if not graph_path:
                 raise ValueError("database graph mode requires `database_graph_path`")
             ledger = DatabaseGraphLedger(graph_path)
+            for structured_source in options.get("database_graph_structured_sources", []):
+                ledger.record_structured_source(structured_source)
             rows = ledger.query(str(options.get("database_graph_query", "MATCH (op:Operation) RETURN op")))
             return [Chunk(path="database://graph/query", text=json.dumps(rows, indent=2, sort_keys=True))]
 

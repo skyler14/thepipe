@@ -3,6 +3,7 @@ import zipfile
 
 from thepipe.structured_graph import extract_citation_anchors, extract_record_shapes
 from thepipe.database_graph import DatabaseGraphLedger
+from thepipe.database_utils import process_database
 
 
 def test_extract_json_record_shapes_and_anchors(tmp_path):
@@ -52,3 +53,22 @@ def test_ledger_records_structured_source(tmp_path):
     shapes = ledger.query("MATCH (s:RecordShape) RETURN s LIMIT 10")
     assert {row["path"] for row in rows} >= {"$.customers", "$.customers[0].email"}
     assert shapes == [{"source_id": str(path), "path": "$.customers[]", "fields": ["email", "id"], "kind": "json-array"}]
+
+
+def test_process_database_graph_mode_records_structured_sources(tmp_path):
+    source = tmp_path / "customers.json"
+    source.write_text(json.dumps({"customers": [{"id": 1}]}))
+    graph = tmp_path / "graph.json"
+
+    chunks = process_database(
+        "unused",
+        mode="graph",
+        options={
+            "database_graph_path": str(graph),
+            "database_graph_structured_sources": [str(source)],
+            "database_graph_query": "MATCH (s:RecordShape) RETURN s LIMIT 5",
+        },
+    )
+
+    assert chunks[0].path == "database://graph/query"
+    assert "$.customers[]" in chunks[0].text
