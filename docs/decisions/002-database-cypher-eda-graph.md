@@ -71,6 +71,7 @@ tables and relationships, then use SQL to inspect or aggregate actual data.
 Baseline node labels:
 
 - `Source`: one database, dataframe file, archive, or connection target.
+- `DatasetGroup`: explicit analysis scope spanning multiple sources.
 - `Catalog`: database catalog when available.
 - `Schema`: logical schema/namespace.
 - `Table`: physical table.
@@ -79,6 +80,7 @@ Baseline node labels:
 - `Index`: database index.
 - `Constraint`: primary key, unique key, check, or foreign key constraint.
 - `Relationship`: inferred relationship when no declared foreign key exists.
+- `JoinCandidate`: possible join path across tables, files, schemas, or sources.
 - `Profile`: bounded EDA/profile snapshot for a source/table/column.
 - `Sample`: optional, bounded, expiring sample reference.
 - `Finding`: agent-readable observation, warning, trend, or anomaly.
@@ -108,6 +110,7 @@ Baseline edge types:
 - `HAS_FINDING`, `EVIDENCED_BY`.
 - `HAS_INSIGHT`, `PRODUCED_BY`, `USED_AS_EVIDENCE`.
 - `QUERY_READS`, `QUERY_FILTERS`, `QUERY_GROUPS`, `QUERY_JOINS`.
+- `GROUPS_SOURCE`, `CROSS_SOURCE_JOIN`, `SAME_ENTITY_AS`, `MAY_JOIN_ON`.
 - `HAS_OPERATION`, `REFRESHED_BY`, `PINNED`, `EXPIRES`, `REVOKED_BY`.
 - `HAS_CITATION_ANCHOR`, `CITES`.
 - `LIKELY_RELATED` for heuristic relationships.
@@ -120,6 +123,12 @@ Baseline edge types:
 
 Raw row values should appear only as short-lived sample payloads or redacted
 profile examples under an explicit retention policy.
+
+Multi-source analysis is first-class. A `DatasetGroup` can connect multiple
+databases, file-backed datasets, spreadsheets, and document-derived tables that
+participate in one investigation. Cross-source edges must carry evidence and
+confidence because matching `customer_id` in two systems is a hypothesis until
+validated by type, cardinality, overlap, or user directive.
 
 ## Minimal Snapshot ABI
 
@@ -252,6 +261,12 @@ LIMIT 50
 
 ## Cypher Interface
 
+EDA should use the graph during the run, not only after it. Even when no durable
+store is written, the active session should maintain a Cypher-queryable
+operation graph so planning can ask "did we already inspect this table shape?",
+"which query established this insight?", and "what source can join to this
+one?" before issuing another SQL call.
+
 Proposed options for database mode:
 
 ```json
@@ -261,6 +276,7 @@ Proposed options for database mode:
   "database_graph_refresh": "never|if_missing|if_stale|always",
   "database_graph_scope": "metadata|profiles|findings|samples",
   "database_graph_store": "repo|user|memory",
+  "database_graph_persist": true,
   "database_graph_git_exclude": true
 }
 ```
@@ -317,9 +333,16 @@ database graph here" without copying the graph into a master store.
 
 The graph should support three durability tiers:
 
-- `memory`: no persistence, useful for sensitive or throwaway work.
+- `memory`: no persistence, useful for sensitive, throwaway, or explicit
+  bypass-storage work.
 - `repo`: default for project work; git-ignored, auto-discoverable.
 - `user`: cross-project registry and optional shared cache, size-managed.
+
+Persistent storage is the default because it is what makes savings, insights,
+pins, and provenance survive into later runs. Storage can still be bypassed by
+explicit opt-out. In bypass mode, graph-shaped planning, operation tracking, and
+Cypher queries run against an in-memory graph for a single EDA session, avoiding
+durable writes while still preventing repeated SQL calls within the active run.
 
 Ancient detailed records should compact into durable summaries and trends.
 Detailed profiles and samples should age out before schema topology and verified
@@ -334,6 +357,8 @@ Default persisted memory:
 
 - operation records: what was crawled, queried, profiled, refreshed, omitted;
 - query fingerprints and referenced tables/columns, not raw result sets;
+- reusable discovery-query fingerprints so EDA does not repeat SQL calls when
+  source/profile freshness still satisfies policy;
 - bounded profile summaries and stale/fresh status;
 - findings and insights with confidence, evidence links, and produced-by edges;
 - citation anchors or sample references only when policy permits them.
@@ -363,6 +388,20 @@ MATCH (op:Operation)-[:QUERY_READS]->(t:Table)
 WHERE op.kind = "profile" AND op.status = "partial"
 RETURN op.started_at, t.name, op.omission_reason
 LIMIT 50
+```
+
+```cypher
+MATCH (g:DatasetGroup)-[:GROUPS_SOURCE]->(s:Source)-[:HAS_TABLE|HAS_SCHEMA*1..2]->(t:Table)
+WHERE g.name = "quarterly_revenue_investigation"
+RETURN s.display_name, t.name
+LIMIT 50
+```
+
+```cypher
+MATCH (a:Column)-[j:CROSS_SOURCE_JOIN]->(b:Column)
+WHERE j.confidence >= 0.8
+RETURN a.qualified_name, b.qualified_name, j.evidence
+LIMIT 25
 ```
 
 ## Useful Cypher Patterns
@@ -443,22 +482,33 @@ LIMIT 10
    availability, remote/local cost, and user query intent. Broad metadata comes
    before expensive profiling.
 
-7. **Bounded profiling**
+7. **Operation lookup and recording**
+   Before running a discovery query, check whether a prior `Operation` with the
+   same source fingerprint, normalized query/profile shape, and freshness policy
+   already produced usable metadata. If reused, emit a new lightweight operation
+   that points to the earlier evidence instead of repeating the SQL call. If run,
+   record the normalized SQL/query intent, touched objects, runtime, row/sample
+   limits, omissions, and result fingerprint.
+
+8. **Bounded profiling**
    Compute portable statistics first: row count where cheap, null count, distinct
    estimate, min/max for numeric/date columns, top values for low-cardinality
    text, length ranges, and basic distribution sketches where supported.
 
-8. **Finding synthesis**
+9. **Finding synthesis**
    Derive observations from profiles and relationships: likely dimensions/facts,
    candidate keys, date grain, sparse columns, enum-like columns, broken
    referential hints, duplicate keys, and possible PII flags.
 
-9. **Persist projection**
-   Write the snapshot and graph projection according to store policy. Repo-local
-   stores live under a git-ignored `.thepipe/` path by default but remain
-   discoverable by the tool.
+10. **Persist or bypass projection**
+    Write the snapshot and graph projection according to store policy. Repo-local
+    stores live under a git-ignored `.thepipe/` path by default but remain
+    discoverable by the tool. Storage is the default. If the caller explicitly
+    chooses store policy `memory` or `database_graph_persist=false`, keep the
+    graph-shaped operation ledger in-process and emit projections without
+    durable storage.
 
-10. **Emit compact outputs**
+11. **Emit compact outputs**
     Do not dump the whole graph unless explicitly requested. Default outputs
     should include source summary, important tables, selected relationships,
     diagnostics, freshness state, and the next useful queries.
@@ -583,6 +633,8 @@ Unit fixtures:
 - JSON, XML, XLSX, DOCX-internal XML, ZIP archive, and notebook shape fixtures.
 - ODBC SQLite fixture using a real driver when available.
 - Mock ODBC metadata rows for catalog/schema edge cases.
+- Multi-source fixture with two databases or one database plus one file-backed
+  dataset, including at least one cross-source join candidate.
 - Wide table, empty table, weird identifiers, reserved words.
 - Missing metadata permissions and partial driver support.
 
@@ -601,6 +653,8 @@ Behavior tests:
 - repo-local graph store is git-ignored but auto-discoverable;
 - raw samples are not persisted in default policy;
 - unpinned operation detail can be purged while pinned insights remain;
+- repeated discovery calls reuse fresh operation metadata instead of repeating
+  SQL, unless forced by refresh policy;
 - revoked pinned insights no longer appear in default planning context;
 - write SQL is rejected under read-only policy;
 - heuristic relationships carry confidence and evidence;
@@ -630,9 +684,11 @@ Integration tests:
 10. Add relationship heuristics and confidence/evidence reporting.
 11. Add bounded EDA profiling and profile freshness.
 12. Add operation/insight provenance with pin, revoke, purge, and renew policy.
-13. Add relevant table selection driven by query intent and retained insights.
-14. Add citation anchors for structured document/XML/spreadsheet sources.
-15. Add cross-domain exported facts for codegraph integration.
+13. Add operation reuse for repeated EDA discovery queries.
+14. Add multi-source `DatasetGroup` and cross-source join candidate discovery.
+15. Add relevant table selection driven by query intent and retained insights.
+16. Add citation anchors for structured document/XML/spreadsheet sources.
+17. Add cross-domain exported facts for codegraph integration.
 
 The implementation should stay incremental. Each phase must delete duplicated
 database formatting or repeated crawl logic where possible, not add another
@@ -650,6 +706,8 @@ parallel path.
 - How much PII detection belongs in first-contact profiling.
 - Whether optional committed snapshots should require redaction manifests.
 - How cross-domain code/database graph joins should be queried once both exist.
+- Whether multi-source joins should execute through one engine, staged temp
+  tables, or agent-planned per-source SQL plus local reconciliation.
 - Which structured-file formats need native grammar packs versus existing Python
   parsers and DuckDB normalization.
 - How pinned insights should renew when their supporting profiles are aging but
