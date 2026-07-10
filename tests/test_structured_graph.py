@@ -55,6 +55,17 @@ def test_ledger_records_structured_source(tmp_path):
     assert shapes == [{"source_id": str(path), "path": "$.customers[]", "fields": ["email", "id"], "kind": "json-array"}]
 
 
+def test_ledger_queries_structured_source_properties(tmp_path):
+    path = tmp_path / "customers.json"
+    path.write_text(json.dumps({"customers": [{"id": 1, "email": "a@example.com"}]}))
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+    ledger.record_structured_source(path)
+
+    rows = ledger.query('MATCH (s:RecordShape) WHERE s.path CONTAINS "customers" RETURN s.source_id, s.path, s.kind LIMIT 5')
+
+    assert rows == [{"s.source_id": str(path), "s.path": "$.customers[]", "s.kind": "json-array"}]
+
+
 def test_process_database_graph_mode_records_structured_sources(tmp_path):
     source = tmp_path / "customers.json"
     source.write_text(json.dumps({"customers": [{"id": 1}]}))

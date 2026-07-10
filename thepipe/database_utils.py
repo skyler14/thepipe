@@ -68,9 +68,9 @@ class DatabaseManager:
             if self._is_odbc():
                 tables = []
                 for table in self._odbc_table_records():
-                    name = self._odbc_table_name(table)
-                    columns = [column.get("name") for column in self._odbc_column_records(name)]
-                    tables.append({"name": name, "columns": [c for c in columns if c]})
+                    name = self._odbc_table_display_name(table)
+                    columns = [str(getattr(column, "column_name", "") or "") for column in self._get_odbc_columns(table)]
+                    tables.append({"name": name, "columns": [column for column in columns if column]})
                 return {"source_id": str(self.connection_info), "tables": tables}
             tables = []
             for table in get_all_tables(self.db, self.db_type, self.verbose):

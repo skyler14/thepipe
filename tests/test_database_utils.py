@@ -452,6 +452,24 @@ class TestODBCHandling(unittest.TestCase):
             process_query_chunk = next(chunk for chunk in process_chunks if "query" in chunk.path)
             self.assertIn("Alice", process_query_chunk.text)
             self.assertIn("Bob", process_query_chunk.text)
+
+            graph_path = Path(db_path).with_suffix(".graph.json")
+            process_database(
+                connection_info=connect_url,
+                query='SELECT customer, total FROM "orders" ORDER BY total',
+                verbose=False,
+                options={"database_graph": "auto", "database_graph_path": str(graph_path)},
+            )
+            graph_chunks = process_database(
+                connection_info="unused",
+                mode="graph",
+                options={
+                    "database_graph_path": str(graph_path),
+                    "database_graph_query": 'MATCH (s:Source)-[:HAS_TABLE]->(t:Table)-[:HAS_COLUMN]->(c:Column) WHERE c.name CONTAINS "customer" RETURN t.name, c.name LIMIT 5',
+                },
+            )
+            self.assertIn('"t.name": "orders"', graph_chunks[0].text)
+            self.assertIn('"c.name": "customer"', graph_chunks[0].text)
         finally:
             os.unlink(db_path)
 

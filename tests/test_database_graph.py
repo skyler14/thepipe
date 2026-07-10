@@ -160,6 +160,76 @@ def test_ledger_query_supports_operation_and_join_candidate_reads(tmp_path):
     assert joins[0]["column"] == "customer_id"
 
 
+def test_ledger_projects_sources_tables_columns_and_relationships(tmp_path):
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+    ledger.record_sources(
+        "revenue",
+        [
+            {"source_id": "crm", "kind": "sqlite", "tables": [{"name": "customers", "columns": ["customer_id"]}]},
+            {"source_id": "warehouse", "tables": [{"name": "orders", "columns": ["customer_id", "total"]}]},
+        ],
+    )
+
+    graph = ledger.to_property_graph()
+
+    assert graph["schema_version"] == "thepipe-property-graph/v1"
+    assert {tuple(node["labels"]) for node in graph["nodes"]} >= {("Source",), ("Table",), ("Column",), ("DatasetGroup",)}
+    assert {edge["type"] for edge in graph["edges"]} >= {"HAS_SOURCE", "HAS_TABLE", "HAS_COLUMN", "CROSS_SOURCE_JOIN"}
+
+
+def test_ledger_cypher_supports_source_table_column_traversal(tmp_path):
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+    ledger.record_sources(
+        "revenue",
+        [{"source_id": "crm", "tables": [{"name": "customers", "columns": ["customer_id", "email"]}]}],
+    )
+
+    rows = ledger.query('MATCH (s:Source)-[:HAS_TABLE]->(t:Table)-[:HAS_COLUMN]->(c:Column) WHERE c.name CONTAINS "email" RETURN s.source_id, t.name, c.name LIMIT 5')
+
+    assert rows == [{"s.source_id": "crm", "t.name": "customers", "c.name": "email"}]
+
+
+def test_ledger_cypher_supports_insight_property_returns_and_boolean_where(tmp_path):
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+    insight = ledger.pin_insight("users table is small")
+
+    rows = ledger.query("MATCH (i:Insight) WHERE i.pinned = true RETURN i.summary, i.insight_id LIMIT 10")
+
+    assert rows == [{"i.summary": "users table is small", "i.insight_id": insight["insight_id"]}]
+
+
+def test_ledger_cypher_supports_join_candidate_relationship_return(tmp_path):
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+    ledger.record_sources(
+        "revenue",
+        [
+            {"source_id": "crm", "tables": [{"name": "customers", "columns": ["customer_id"]}]},
+            {"source_id": "warehouse", "tables": [{"name": "orders", "columns": ["customer_id"]}]},
+        ],
+    )
+
+    rows = ledger.query("MATCH (a:Column)-[j:CROSS_SOURCE_JOIN]->(b:Column) RETURN a.qualified_name, j.confidence, b.qualified_name LIMIT 5")
+
+    assert rows == [
+        {
+            "a.qualified_name": "crm.customers.customer_id",
+            "j.confidence": 0.8,
+            "b.qualified_name": "warehouse.orders.customer_id",
+        }
+    ]
+
+
+def test_ledger_cypher_rejects_unsupported_queries(tmp_path):
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+
+    try:
+        ledger.query("CREATE (n:Source {name: 'bad'})")
+    except ValueError as exc:
+        assert "unsupported database graph query" in str(exc)
+    else:
+        raise AssertionError("unsupported Cypher should fail explicitly")
+
+
 def test_process_database_records_option_sources(tmp_path):
     db_path = tmp_path / "demo.sqlite"
     conn = sqlite3.connect(db_path)
@@ -239,6 +309,31 @@ def test_process_database_graph_mode_queries_ledger_without_db_connect(tmp_path,
 
     assert chunks[0].path == "database://graph/query"
     assert "SELECT 1" in chunks[0].text
+
+
+def test_process_database_graph_mode_supports_cypher_traversal(tmp_path, monkeypatch):
+    graph_path = tmp_path / "graph.json"
+    ledger = DatabaseGraphLedger(str(graph_path))
+    ledger.record_sources(
+        "revenue",
+        [{"source_id": "crm", "tables": [{"name": "customers", "columns": ["customer_id", "email"]}]}],
+    )
+
+    def fail_connect(*args, **kwargs):
+        raise AssertionError("graph query should not connect to DB")
+
+    monkeypatch.setattr("thepipe.database_utils.DatabaseManager", fail_connect)
+    chunks = process_database(
+        "unused",
+        mode="graph",
+        options={
+            "database_graph_path": str(graph_path),
+            "database_graph_query": 'MATCH (s:Source)-[:HAS_TABLE]->(t:Table)-[:HAS_COLUMN]->(c:Column) WHERE c.name CONTAINS "email" RETURN s.source_id, t.name, c.name LIMIT 5',
+        },
+    )
+
+    payload = json.loads(chunks[0].text)
+    assert payload == [{"s.source_id": "crm", "t.name": "customers", "c.name": "email"}]
 
 
 def test_tool_schema_exposes_database_graph_mode():
