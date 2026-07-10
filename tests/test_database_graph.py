@@ -26,6 +26,23 @@ def test_database_graph_persists_operations_by_default(tmp_path):
     assert data["operations"][0]["result_fingerprint"]
 
 
+def test_database_graph_adds_repo_local_git_exclude(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git" / "info").mkdir(parents=True)
+    monkeypatch.chdir(repo)
+    db_path = tmp_path / "demo.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE users (id INTEGER)")
+    conn.commit()
+    conn.close()
+
+    process_database(f"sqlite:///{db_path}", query="SELECT id FROM users", options={"database_graph": "auto"})
+
+    exclude = repo / ".git" / "info" / "exclude"
+    assert ".thepipe/database/" in exclude.read_text()
+
+
 def test_database_graph_memory_bypass_does_not_write_file(tmp_path):
     db_path = tmp_path / "demo.sqlite"
     conn = sqlite3.connect(db_path)

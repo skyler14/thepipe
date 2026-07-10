@@ -148,11 +148,24 @@ class DatabaseGraphLedger:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, indent=2, sort_keys=True), encoding="utf-8")
+        _ensure_git_exclude()
 
 
 def default_graph_path(source: Any) -> str:
     root = Path.cwd() / ".thepipe" / "database" / "graph"
     return str(root / (fingerprint(str(source))[:16] + ".json"))
+
+
+def _ensure_git_exclude() -> None:
+    exclude = Path.cwd() / ".git" / "info" / "exclude"
+    if not exclude.parent.exists():
+        return
+    entry = ".thepipe/database/"
+    current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    if entry in current.splitlines():
+        return
+    suffix = "" if current.endswith("\n") or not current else "\n"
+    exclude.write_text(current + suffix + entry + "\n", encoding="utf-8")
 
 
 def graph_enabled(options: Dict[str, Any]) -> bool:
