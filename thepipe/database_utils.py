@@ -14,6 +14,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 from .core import Chunk
+from .database_graph import fingerprint, ledger_from_options
 
 # TODO(jupysql-removal): replace this import with a tiny local adapter module.
 # Required contract: query(sql, params=None) -> pandas.DataFrame,
@@ -844,6 +845,29 @@ class DatabaseManager:
         Returns:
             List of Chunk objects with query results
         """
+        graph_ledger = ledger_from_options(self.connection_info, self.options)
+        source_fingerprint = fingerprint(str(self.connection_info))
+        query_fingerprint = fingerprint({"query": query, "params": params})
+        if graph_ledger:
+            cached_operation = graph_ledger.find_operation(
+                source_fingerprint=source_fingerprint,
+                query_fingerprint=query_fingerprint,
+            )
+            if cached_operation and cached_operation.get("result_json") is not None:
+                result_text = f"## SQL Query\n\n```sql\n{query}\n```\n\n"
+                result_text += "## Results (cached)\n\n"
+                result_text += "Reused cached database graph operation.\n\n"
+                result_text += "```json\n"
+                result_text += cached_operation["result_json"]
+                result_text += "\n```"
+                return [
+                    self.get_schema(),
+                    Chunk(
+                        path=f"database://{self.db_type}/query",
+                        text=self._prepend_duckdb_read_warning(result_text),
+                    ),
+                ]
+
         if self._is_odbc():
             schema_chunk = self.get_schema()
             chunks = [schema_chunk]
@@ -972,15 +996,33 @@ class DatabaseManager:
 
                 if not result.empty:
                     # Convert to JSON for consistent formatting
+                    result_json = result.to_json(orient='records', indent=2)
                     result_text += "```json\n"
-                    result_text += result.to_json(orient='records', indent=2)
+                    result_text += result_json
                     result_text += "\n```"
                 else:
+                    result_json = "[]"
                     result_text += "*No rows returned*"
             else:
+                result_json = None
                 # Non-DataFrame result (e.g., for non-SELECT queries)
                 result_text += f"## Results\n\n"
                 result_text += "Query executed successfully."
+
+            if graph_ledger:
+                graph_ledger.record_operation(
+                    {
+                        "kind": "query",
+                        "status": "ok",
+                        "source_fingerprint": source_fingerprint,
+                        "query_fingerprint": query_fingerprint,
+                        "query": query,
+                        "params_fingerprint": fingerprint(params),
+                        "result_fingerprint": fingerprint(result_json),
+                        "result_json": result_json,
+                        "db_type": self.db_type,
+                    }
+                )
 
             chunks.append(Chunk(
                 path=f"database://{self.db_type}/query",
