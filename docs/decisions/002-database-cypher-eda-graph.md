@@ -311,6 +311,143 @@ Initial Cypher support can be read-only:
 Writes should be blocked until retention, trust, and provenance policies are
 implemented.
 
+### Current Implementation Contract
+
+The first shippable version should not pretend to be a full graph database. It
+should expose a deliberately small, tested, Cypher-shaped read surface over the
+database graph ledger and make the upgrade path to native/shared-library Cypher
+obvious.
+
+Current branch scope:
+
+- persist source topology, query operations, join candidates, structured-source
+  anchors, record shapes, and pinned insights;
+- default to repo-local persisted storage, with explicit memory/no-persist
+  bypass;
+- auto-exclude `.thepipe/database/` from Git while keeping it discoverable by
+  thepipe;
+- reuse fresh operation fingerprints before repeating identical discovery SQL;
+- expose `mode="graph"` so callers can query graph state without opening a live
+  database connection;
+- support JSON/XML/ZIP-like structured source anchors without raw content
+  persistence;
+- return graph query results as ordinary `Chunk` projections so existing thepipe
+  callers are not forced onto a new output primitive.
+
+The current query layer should be treated as `Cypher Level 0`: enough syntax to
+cover real planning queries, not enough to claim general Cypher compatibility.
+It must parse and test the following forms before feature-ship:
+
+```cypher
+MATCH (op:Operation) RETURN op LIMIT 20
+MATCH (i:Insight) WHERE i.pinned = true RETURN i.summary, i.confidence
+MATCH (s:Source)-[:HAS_TABLE]->(t:Table) RETURN s.source_id, t.name
+MATCH (a:Column)-[j:CROSS_SOURCE_JOIN]->(b:Column) RETURN a, j, b LIMIT 25
+MATCH (r:RecordShape) WHERE r.path CONTAINS "customer" RETURN r.path, r.fields
+```
+
+Anything outside the supported subset should fail with a clear unsupported-query
+diagnostic. Silent broad matching is worse than refusing the query because it
+can cause an agent to trust incomplete topology.
+
+`Cypher Level 1` should add enough of the graph grammar for ordinary EDA
+planning:
+
+- multiple labels only where we can evaluate them deterministically;
+- `WHERE` predicates for equality, inequality, boolean literals, numeric
+  comparisons, `CONTAINS`, `STARTS WITH`, and `ENDS WITH`;
+- `RETURN` of aliases, properties, and simple maps;
+- `ORDER BY`, `SKIP`, and `LIMIT`;
+- `count()` and `collect()` on one grouping key;
+- relationship direction and relationship type filtering;
+- stable errors for unsupported path-length, write clauses, subqueries, and
+  procedure calls.
+
+`Cypher Level 2` is the migration target. At that point the ledger should be
+projected into a real graph backend or native shared-library query engine
+through an explicit graph ABI. Thepipe should still own database snapshots,
+privacy policy, source fingerprints, retention, and chunk/digest projections;
+the native engine should own graph indexing and query execution.
+
+### Graph ABI For Native Cypher
+
+The migration seam is a property-graph projection, not private SQLite access.
+The ABI should be simple enough to generate from JSON, SQLite, or in-memory
+snapshots and simple enough for a C shared library to consume without knowing
+database driver details.
+
+Conceptual input:
+
+```json
+{
+  "schema_version": "thepipe-property-graph/v1",
+  "graph_id": "sha256:...",
+  "source": "database-graph-ledger/v1",
+  "nodes": [
+    {
+      "id": "source:warehouse",
+      "labels": ["Source"],
+      "properties": {"kind": "odbc", "display_name": "warehouse"}
+    }
+  ],
+  "edges": [
+    {
+      "id": "source:warehouse->table:orders",
+      "type": "HAS_TABLE",
+      "from": "source:warehouse",
+      "to": "table:orders",
+      "properties": {"confidence": 1.0}
+    }
+  ]
+}
+```
+
+Required native/shared-library calls:
+
+```text
+tp_graph_open(config_json) -> handle
+tp_graph_upsert(handle, property_graph_json) -> result_json
+tp_graph_query(handle, cypher_json) -> result_json
+tp_graph_compact(handle, policy_json) -> result_json
+tp_graph_close(handle) -> void
+```
+
+`cypher_json` should carry the query, parameter map, read-only flag, row limit,
+timeout, and supported grammar level. This lets Python enforce policy before C
+runs the query and lets C report exact grammar support back to Python.
+
+The shared-library path should be promoted only when it beats the Python ledger
+on at least one measured axis without losing policy behavior:
+
+- faster multi-hop graph reads on large ledgers;
+- lower memory for repeated query sessions;
+- better Cypher coverage;
+- stable cross-platform wheels or prebuilt libraries;
+- no requirement to download raw grammar/build clutter during normal install.
+
+The full binary remains a fallback and compatibility harness, not the preferred
+long-term database graph runtime.
+
+### Why Not Directly Use Codegraph Tables
+
+Database graph mode should not read or write private codegraph storage. That
+would couple database EDA to a code-analysis implementation detail, make
+upgrades brittle, and blur privacy boundaries between source code metadata and
+database/source metadata.
+
+The acceptable integration shapes are:
+
+- export database graph facts into a generic property graph ABI;
+- export codegraph facts into the same ABI;
+- query a combined read-only projection;
+- keep each domain's canonical store independent;
+- record cross-domain edges as exchanged facts, such as code entity `USES_TABLE`
+  database table, migration `ALTERS_TABLE`, route `READS_TABLE`, or test
+  `COVERS_QUERY`.
+
+This preserves thepipe's database-specific policies while still allowing a
+future agent to ask cross-domain questions with one Cypher-like grammar.
+
 ## Persistent Middleware Contract
 
 The database graph can become middleware if it obeys a stricter contract than a
@@ -669,7 +806,89 @@ Integration tests:
 - optional PostgreSQL/MySQL/MSSQL containers;
 - optional remote ODBC DSN-less connections in developer-only environments.
 
+### Conformance Matrix
+
+Every graph feature should have three test levels unless the source family makes
+one impossible:
+
+- unit: pure Python fixture, no driver or native dependency;
+- integration: real local source such as SQLite, DuckDB, JSON, XML, ZIP, or an
+  available ODBC driver;
+- backend conformance: same graph query against Python ledger and native backend
+  when native/shared-library support is installed.
+
+Mandatory query conformance cases:
+
+- operation query by kind/status/fingerprint;
+- source-to-table-to-column traversal;
+- cross-source join candidate traversal with confidence/evidence;
+- pinned insight lookup and revoked insight omission;
+- record-shape and citation-anchor lookup for structured sources;
+- unsupported Cypher diagnostic;
+- `LIMIT` behavior;
+- no-persist mode leaves no repo graph files;
+- persisted mode remains discoverable after a fresh process starts.
+
+Mandatory EDA/source conformance cases:
+
+- SQLite schema with primary key, foreign key, index, view, empty table, and
+  weird identifiers;
+- ODBC path using a real local driver when present, otherwise a driver-shaped
+  fake that exercises metadata/result handling;
+- DuckDB-readable CSV/JSON/Parquet where dependencies are present, otherwise
+  skip with explicit reason;
+- multi-source analysis where two sources share a likely join key;
+- repeated query operation where the second run reuses the fresh graph record;
+- stale/forced refresh where the second run does not reuse the graph record;
+- large-table budget fixture that records omissions instead of failing;
+- structured JSON/XML/ZIP source that produces anchors and record shapes without
+  storing raw content.
+
+Performance and footprint checks should be recorded as test output or benchmark
+artifacts, not as claims in docs without measurement:
+
+- cold graph build time;
+- warm graph query time;
+- repeated-operation skip time;
+- graph ledger size after one run, ten runs, and after compaction;
+- emitted compact chunk token estimate;
+- raw snapshot JSON size;
+- native/shared-library binary size when installed;
+- install path size with prebuilt artifacts versus source-build fallback.
+
+### Feature-Ship Definition
+
+This feature is not ready to ship just because a graph file exists. It is ready
+when thepipe can complete this loop reliably:
+
+1. open a database or structured source under read-only/default policy;
+2. capture topology and bounded profiles with diagnostics for omissions;
+3. persist or bypass storage according to explicit policy;
+4. query current and prior graph state with the supported Cypher subset;
+5. avoid repeating fresh discovery work;
+6. pin, revoke, purge, and preserve insight provenance correctly;
+7. emit compact chunks/digests that are smaller than raw graph JSON while still
+   preserving the relationships needed for planning;
+8. recover from missing drivers, missing native graph runtime, partial metadata,
+   stale snapshots, and unsupported Cypher with explicit diagnostics;
+9. run the conformance matrix in CI with optional skips only for genuinely
+   unavailable external drivers or native artifacts.
+
+Native/shared-library support is a performance and capability upgrade, not the
+definition of feature-ship for database graph mode. The Python path must remain
+complete enough for correctness and fallback. The native path becomes the
+default only after it passes the same conformance tests and proves it can reduce
+query latency, memory, or Cypher implementation burden without increasing normal
+install footprint.
+
 ## Delivery Roadmap
+
+### Phase A: Shippable Python Graph Middleware
+
+Goal: make database graph mode useful without native codegraph, extra graph
+dependencies, or a new install burden.
+
+Required work:
 
 1. Define `DatabaseSnapshot` dataclasses and JSON schema.
 2. Render current schema/preview outputs from snapshots.
@@ -680,7 +899,7 @@ Integration tests:
    topology using existing parsers before considering grammar packs.
 7. Add repo-local storage, manifest, git exclude, and user registry.
 8. Add compact snapshot digest and chunk projection.
-9. Add a small read-only Cypher engine or embedded graph query dependency.
+9. Add `Cypher Level 0` over the ledger property graph.
 10. Add relationship heuristics and confidence/evidence reporting.
 11. Add bounded EDA profiling and profile freshness.
 12. Add operation/insight provenance with pin, revoke, purge, and renew policy.
@@ -688,7 +907,91 @@ Integration tests:
 14. Add multi-source `DatasetGroup` and cross-source join candidate discovery.
 15. Add relevant table selection driven by query intent and retained insights.
 16. Add citation anchors for structured document/XML/spreadsheet sources.
-17. Add cross-domain exported facts for codegraph integration.
+
+Exit criteria:
+
+- all existing database mode contracts still pass;
+- `mode="graph"` can answer topology, operation, insight, join, anchor, and
+  record-shape queries without opening a live connection;
+- repeated discovery SQL can be skipped from a fresh operation fingerprint;
+- repo-local graph state is ignored by Git but auto-discoverable;
+- memory/no-persist mode writes no files;
+- output can be projected as compact chunks, JSON rows, and stable test goldens;
+- unsupported Cypher emits explicit diagnostics.
+
+### Phase B: Native-Compatible Property Graph ABI
+
+Goal: make the Python ledger and native/shared-library graph engine speak the
+same facts.
+
+Required work:
+
+1. Add `to_property_graph()` projection from snapshots and ledgers.
+2. Add stable node and edge IDs for every supported graph object.
+3. Add import/export golden tests for property graph JSON.
+4. Add a native adapter interface that can upsert/query a property graph without
+   knowing database connection details.
+5. Add conformance tests that run the same Cypher fixtures against Python and
+   native backends when native is available.
+6. Add compaction policy exchange so native storage can purge or summarize old
+   facts under the same retention rules as Python.
+7. Add benchmark fixtures for small repo-local graphs, medium database graphs,
+   and large multi-source graphs.
+
+Exit criteria:
+
+- Python and native backends return equivalent rows for the supported Cypher
+  subset;
+- native query execution is optional and auto-detected;
+- installation can use prebuilt artifacts without pulling raw grammar source;
+- fallback to Python remains correct when native is absent;
+- native failures degrade to explicit diagnostics, not silent empty results.
+
+### Phase C: Shared-Library Default
+
+Goal: make shared-library graph execution the default when installed, while
+Python remains the policy owner and fallback.
+
+Required work:
+
+1. Ship prebuilt shared libraries for the supported platform matrix.
+2. Keep raw grammar/build clutter out of normal installs.
+3. Build from source only as an explicit fallback path.
+4. Add library version negotiation and ABI capability reporting.
+5. Run graph conformance tests across Python, shared-library, and full-binary
+   fallback backends.
+6. Add size and cold-start regression checks.
+7. Retire duplicated Python query paths only after conformance and fallback are
+   stable.
+
+Exit criteria:
+
+- shared library supports the full database graph query contract;
+- full binary is no longer required for database graph features;
+- Python fallback remains available for pure-Python installs;
+- branch can delete any replaced code instead of carrying three divergent
+  implementations indefinitely.
+
+### Phase D: Cross-Domain Graph Facts
+
+Goal: let database graph and codegraph cooperate without merging their private
+stores.
+
+Required work:
+
+1. Export codegraph facts through the property graph ABI.
+2. Export database graph facts through the same ABI.
+3. Define cross-domain edge types: `USES_TABLE`, `WRITES_TABLE`,
+   `ALTERS_TABLE`, `READS_COLUMN`, `TESTS_QUERY`, `OWNS_MIGRATION`.
+4. Add query fixtures that answer code/database questions from a combined
+   read-only projection.
+5. Keep source-code refresh and database refresh policies separate.
+
+Exit criteria:
+
+- an agent can ask code/database topology questions with one graph query;
+- database privacy policy still controls database-derived facts;
+- codegraph remains optional for database-only mode.
 
 The implementation should stay incremental. Each phase must delete duplicated
 database formatting or repeated crawl logic where possible, not add another
