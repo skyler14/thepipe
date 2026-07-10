@@ -191,3 +191,33 @@ def test_pinned_insights_survive_operation_purge_and_revoke(tmp_path):
 
     ledger.revoke_insight(insight["insight_id"])
     assert ledger.query("MATCH (i:Insight) RETURN i LIMIT 5") == []
+
+
+def test_process_database_graph_mode_queries_ledger_without_db_connect(tmp_path, monkeypatch):
+    graph_path = tmp_path / "graph.json"
+    ledger = DatabaseGraphLedger(str(graph_path))
+    ledger.record_operation(
+        {
+            "kind": "query",
+            "status": "ok",
+            "source_fingerprint": "s",
+            "query_fingerprint": "q",
+            "query": "SELECT 1",
+            "result_fingerprint": "r",
+            "result_json": "[]",
+            "db_type": "sqlite",
+        }
+    )
+
+    def fail_connect(*args, **kwargs):
+        raise AssertionError("graph query should not connect to DB")
+
+    monkeypatch.setattr("thepipe.database_utils.DatabaseManager", fail_connect)
+    chunks = process_database(
+        "unused",
+        mode="graph",
+        options={"database_graph_path": str(graph_path), "database_graph_query": "MATCH (op:Operation) RETURN op LIMIT 5"},
+    )
+
+    assert chunks[0].path == "database://graph/query"
+    assert "SELECT 1" in chunks[0].text

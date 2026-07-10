@@ -14,7 +14,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 from .core import Chunk
-from .database_graph import fingerprint, graph_enabled, ledger_from_options
+from .database_graph import DatabaseGraphLedger, fingerprint, graph_enabled, ledger_from_options
 
 # TODO(jupysql-removal): replace this import with a tiny local adapter module.
 # Required contract: query(sql, params=None) -> pandas.DataFrame,
@@ -1677,6 +1677,14 @@ def process_database(
         print(f"[thepipe] Options: {options}")
     
     try:
+        if mode == "graph":
+            graph_path = options.get("database_graph_path")
+            if not graph_path:
+                raise ValueError("database graph mode requires `database_graph_path`")
+            ledger = DatabaseGraphLedger(graph_path)
+            rows = ledger.query(str(options.get("database_graph_query", "MATCH (op:Operation) RETURN op")))
+            return [Chunk(path="database://graph/query", text=json.dumps(rows, indent=2, sort_keys=True))]
+
         # Initialize database manager with options
         if verbose:
             print(f"[thepipe] Initializing database manager")
