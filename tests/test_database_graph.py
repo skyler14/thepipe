@@ -239,3 +239,12 @@ def test_process_database_graph_mode_queries_ledger_without_db_connect(tmp_path,
 
     assert chunks[0].path == "database://graph/query"
     assert "SELECT 1" in chunks[0].text
+
+
+def test_tool_schema_exposes_database_graph_mode():
+    from thepipe.tool_schema import get_claude_tools
+
+    scrape_database = next(tool for tool in get_claude_tools() if tool["name"] == "thepipe_scrape_database")
+
+    assert "graph" in scrape_database["input_schema"]["properties"]["mode"]["enum"]
+    assert "database_graph_query" in scrape_database["input_schema"]["properties"]

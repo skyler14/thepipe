@@ -350,8 +350,20 @@ TOOLS = [
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["schema", "preview", "query"],
+                    "enum": ["schema", "preview", "query", "graph"],
                     "description": "Operation mode"
+                },
+                "database_graph_query": {
+                    "type": "string",
+                    "description": "Cypher-like query for mode='graph'"
+                },
+                "database_graph_path": {
+                    "type": "string",
+                    "description": "Path to persisted database graph ledger"
+                },
+                "database_graph_persist": {
+                    "type": "boolean",
+                    "description": "Persist database graph data; defaults true when graph mode is enabled"
                 }
             },
             "required": ["filepath"]
