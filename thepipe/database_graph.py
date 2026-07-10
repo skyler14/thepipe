@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from .structured_graph import extract_citation_anchors, extract_record_shapes
+
 
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
@@ -25,6 +27,8 @@ class DatabaseGraphLedger:
             "sources": [],
             "operations": [],
             "join_candidates": [],
+            "citation_anchors": [],
+            "record_shapes": [],
         }
         if self.persist and self.path and self.path.exists():
             self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
@@ -62,6 +66,18 @@ class DatabaseGraphLedger:
                 self.data["join_candidates"].append(candidate)
         self.save()
 
+    def record_structured_source(self, path: str | Path) -> None:
+        source_id = str(path)
+        for anchor in extract_citation_anchors(path):
+            row = {"source_id": source_id, **anchor}
+            if row not in self.data.setdefault("citation_anchors", []):
+                self.data["citation_anchors"].append(row)
+        for shape in extract_record_shapes(path):
+            row = {"source_id": source_id, **shape}
+            if row not in self.data.setdefault("record_shapes", []):
+                self.data["record_shapes"].append(row)
+        self.save()
+
     def query(self, cypher: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         text = cypher.lower()
         if limit is None:
@@ -72,6 +88,10 @@ class DatabaseGraphLedger:
             rows = list(self.data.get("join_candidates", []))
         elif "datasetgroup" in text:
             rows = list(self.data.get("dataset_groups", []))
+        elif "citationanchor" in text:
+            rows = list(self.data.get("citation_anchors", []))
+        elif "recordshape" in text:
+            rows = list(self.data.get("record_shapes", []))
         else:
             rows = []
         return rows[:limit] if limit is not None else rows
