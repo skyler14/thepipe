@@ -26,6 +26,7 @@ class DatabaseGraphLedger:
             "dataset_groups": [],
             "sources": [],
             "operations": [],
+            "insights": [],
             "join_candidates": [],
             "citation_anchors": [],
             "record_shapes": [],
@@ -78,12 +79,58 @@ class DatabaseGraphLedger:
                 self.data["record_shapes"].append(row)
         self.save()
 
+    def pin_insight(self, summary: str, *, evidence_operation_id: Optional[str] = None) -> Dict[str, Any]:
+        insight = {
+            "insight_id": "insight:" + fingerprint({"summary": summary, "evidence": evidence_operation_id})[:16],
+            "summary": summary,
+            "pinned": True,
+            "revoked": False,
+            "evidence_operation_id": evidence_operation_id,
+        }
+        insights = self.data.setdefault("insights", [])
+        for existing in insights:
+            if existing["insight_id"] == insight["insight_id"]:
+                return existing
+        insights.append(insight)
+        self.save()
+        return insight
+
+    def revoke_insight(self, insight_id: str) -> None:
+        for insight in self.data.setdefault("insights", []):
+            if insight.get("insight_id") == insight_id:
+                insight["revoked"] = True
+        self.save()
+
+    def purge_unpinned_operations(self) -> None:
+        pinned_evidence = {
+            insight.get("evidence_operation_id")
+            for insight in self.data.get("insights", [])
+            if insight.get("pinned") and not insight.get("revoked")
+        }
+        for operation in self.data.get("operations", []):
+            if operation.get("operation_id") in pinned_evidence:
+                self.data.setdefault("omissions", []).append(
+                    {
+                        "kind": "purged-operation",
+                        "operation_id": operation.get("operation_id"),
+                        "reason": "operation detail purged; pinned insight retained",
+                    }
+                )
+        self.data["operations"] = [
+            operation for operation in self.data.get("operations", []) if operation.get("pinned")
+        ]
+        self.save()
+
     def query(self, cypher: str, *, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         text = cypher.lower()
         if limit is None:
             limit = _extract_limit(cypher)
         if "operation" in text:
             rows = list(self.data.get("operations", []))
+        elif "insight" in text:
+            rows = [
+                insight for insight in self.data.get("insights", []) if not insight.get("revoked")
+            ]
         elif "cross_source_join" in text or "joincandidate" in text:
             rows = list(self.data.get("join_candidates", []))
         elif "datasetgroup" in text:

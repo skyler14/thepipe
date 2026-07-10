@@ -167,3 +167,27 @@ def test_process_database_records_option_sources(tmp_path):
     data = json.loads(graph_path.read_text())
     assert data["dataset_groups"][0]["name"] == "revenue"
     assert data["join_candidates"][0]["column"] == "customer_id"
+
+
+def test_pinned_insights_survive_operation_purge_and_revoke(tmp_path):
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+    ledger.record_operation(
+        {
+            "kind": "profile",
+            "status": "ok",
+            "source_fingerprint": "s",
+            "query_fingerprint": "q",
+            "query": "SELECT count(*) FROM users",
+            "result_fingerprint": "r",
+            "result_json": "[]",
+            "db_type": "sqlite",
+        }
+    )
+    insight = ledger.pin_insight("users table is small", evidence_operation_id=ledger.data["operations"][0]["operation_id"])
+
+    ledger.purge_unpinned_operations()
+    assert ledger.data["operations"] == []
+    assert ledger.query("MATCH (i:Insight) RETURN i LIMIT 5")[0]["summary"] == "users table is small"
+
+    ledger.revoke_insight(insight["insight_id"])
+    assert ledger.query("MATCH (i:Insight) RETURN i LIMIT 5") == []
