@@ -143,6 +143,9 @@ class test_core(unittest.TestCase):
         self.assertEqual(documents[0].extra_info["language"], "python")
         self.assertEqual(documents[0].extra_info["filepath"], "example.md")
 
+    def test_has_llama_index_reports_capability(self):
+        self.assertIsInstance(core.has_llama_index(), bool)
+
     def test_chunks_to_messages(self):
         chunks = scraper.scrape_file(filepath=self.files_directory + "/example.md")
         messages = core.chunks_to_messages(chunks)

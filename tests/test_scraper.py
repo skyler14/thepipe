@@ -5,6 +5,7 @@ import unittest
 import os
 import sys
 import zipfile
+from unittest import mock
 from PIL import Image
 import pandas as pd
 from openai import OpenAI
@@ -12,6 +13,111 @@ from openai import OpenAI
 sys.path.append("..")
 import thepipe.core as core
 import thepipe.scraper as scraper
+
+
+class TestGithubScrapeSafety(unittest.TestCase):
+    def test_scrape_github_uses_subprocess_without_shell(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            return mock.Mock(returncode=0)
+
+        with mock.patch("thepipe.scraper.subprocess.run", side_effect=fake_run), \
+             mock.patch("thepipe.scraper.scrape_directory", return_value=[core.Chunk(path="repo/a.py", text="ok")]) as scrape_directory:
+            chunks = scraper.scrape_github("https://github.com/example/repo;touch /tmp/pwned")
+
+        self.assertEqual(chunks[0].text, "ok")
+        self.assertEqual(calls[0][0][0:2], ["git", "clone"])
+        self.assertIn("https://github.com/example/repo;touch /tmp/pwned", calls[0][0])
+        self.assertFalse(calls[0][1].get("shell", False))
+        scrape_directory.assert_called_once()
+
+    def test_scrape_github_auth_retry_uses_subprocess_without_shell(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if len(calls) == 1:
+                raise scraper.subprocess.CalledProcessError(128, args)
+            return mock.Mock(returncode=0)
+
+        with mock.patch("thepipe.scraper.subprocess.run", side_effect=fake_run), \
+             mock.patch("thepipe.scraper.scrape_directory", return_value=[core.Chunk(path="repo/a.py", text="ok")]):
+            chunks = scraper.scrape_github(
+                "https://github.com/example/private",
+                options={"github_token": "secret-token"},
+            )
+
+        self.assertEqual(chunks[0].text, "ok")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("https://secret-token@github.com/example/private", calls[1][0])
+        self.assertFalse(calls[1][1].get("shell", False))
+
+
+class TestWebScrapeHardening(unittest.TestCase):
+    def test_extract_page_content_uses_bounded_navigation_timeout(self):
+        class FakePage:
+            viewport_size = {"height": 600}
+
+            def __init__(self):
+                self.goto_kwargs = None
+                self.waits = []
+
+            def goto(self, url, **kwargs):
+                self.goto_kwargs = kwargs
+
+            def evaluate(self, script):
+                if script == "document.body.scrollHeight":
+                    return 0
+                return None
+
+            def content(self):
+                return "<html><body><main>Hello</main></body></html>"
+
+            def query_selector_all(self, selector):
+                return []
+
+            def wait_for_timeout(self, value):
+                self.waits.append(value)
+
+        class FakeBrowser:
+            def __init__(self, page):
+                self.page = page
+
+            def new_context(self, **kwargs):
+                return self
+
+            def new_page(self):
+                return self.page
+
+            def close(self):
+                pass
+
+        class FakeChromium:
+            def __init__(self, page):
+                self.page = page
+
+            def launch(self):
+                return FakeBrowser(self.page)
+
+        class FakePlaywright:
+            def __init__(self, page):
+                self.chromium = FakeChromium(page)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        page = FakePage()
+        with mock.patch("playwright.sync_api.sync_playwright", return_value=FakePlaywright(page)):
+            chunk = scraper.extract_page_content("https://example.com", include_output_images=False)
+
+        self.assertIn("Hello", chunk.text or "")
+        self.assertEqual(page.goto_kwargs, {"wait_until": "domcontentloaded", "timeout": 10000})
+        self.assertIn(1000, page.waits)
 
 
 @unittest.skipUnless(os.environ.get("THEPIPE_SCRAPER_TESTS"), "requires scraper integration deps")

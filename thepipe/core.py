@@ -5,10 +5,19 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import requests
 from PIL import Image
-from llama_index.core.schema import Document, ImageDocument
+
+try:
+    from llama_index.core.schema import Document as _LlamaDocument
+    from llama_index.core.schema import ImageDocument as _LlamaImageDocument
+except ImportError:
+    _LlamaDocument = None
+    _LlamaImageDocument = None
+
+Document = _LlamaDocument
+ImageDocument = _LlamaImageDocument
 
 # LLM provider info, defaults to openai
 DEFAULT_AI_MODEL = os.getenv("DEFAULT_AI_MODEL", "gpt-4o")
@@ -39,6 +48,33 @@ def prepare_image(image: Image.Image) -> Image.Image:
         pass
 
     return prepared_image
+
+
+def _ensure_llama_index() -> Tuple[Any, Any]:
+    global Document, ImageDocument, _LlamaDocument, _LlamaImageDocument
+    if _LlamaDocument is not None and _LlamaImageDocument is not None:
+        return _LlamaDocument, _LlamaImageDocument
+    try:
+        from llama_index.core.schema import Document as document_cls
+        from llama_index.core.schema import ImageDocument as image_document_cls
+    except ImportError as exc:
+        raise ImportError(
+            "LlamaIndex support is optional. Install it with "
+            "`pip install thepipe-api[llama-index]` to use `Chunk.to_llamaindex`."
+        ) from exc
+    _LlamaDocument = document_cls
+    _LlamaImageDocument = image_document_cls
+    Document = document_cls
+    ImageDocument = image_document_cls
+    return document_cls, image_document_cls
+
+
+def has_llama_index() -> bool:
+    try:
+        _ensure_llama_index()
+        return True
+    except ImportError:
+        return False
 
 
 class Chunk:
@@ -98,7 +134,8 @@ class Chunk:
     def __str__(self) -> str:
         return self.__repr__()
 
-    def to_llamaindex(self) -> Union[List[Document], List[ImageDocument]]:
+    def to_llamaindex(self) -> Union[List[Any], List[Any]]:
+        DocumentCls, ImageDocumentCls = _ensure_llama_index()
         document_text = self.text if self.text else ""
         metadata = dict(self.meta) if self.meta else {}
         if self.path:
@@ -106,7 +143,7 @@ class Chunk:
 
         # If we have PIL Image objects in self.images, convert them to base64 strings
         if self.images:
-            image_docs: List[ImageDocument] = []
+            image_docs: List[Any] = []
             for img in self.images:
                 # Encode the image to JPEG (or use its original format if available)
                 buffer = BytesIO()
@@ -120,7 +157,7 @@ class Chunk:
                 img_b64 = base64.b64encode(img_bytes).decode("utf-8")
 
                 image_docs.append(
-                    ImageDocument(
+                    ImageDocumentCls(
                         text=document_text,
                         image=img_b64,
                         extra_info=metadata,
@@ -129,7 +166,7 @@ class Chunk:
             return image_docs
 
         # Fallback to plain text Document
-        return [Document(text=document_text, extra_info=metadata)]
+        return [DocumentCls(text=document_text, extra_info=metadata)]
 
     def to_message(
         self,

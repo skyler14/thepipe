@@ -7,6 +7,7 @@ import math
 import re
 import fnmatch
 import os
+import subprocess
 import tempfile
 from urllib.parse import urlparse
 import zipfile
@@ -976,7 +977,8 @@ def extract_page_content(
         try:
             context = browser.new_context(user_agent="USER_AGENT_STRING")
             page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded")
+            page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            page.wait_for_timeout(1000)
 
             # Scroll to the bottom of the page to load dynamic content
             if not page.viewport_size:
@@ -991,7 +993,7 @@ def extract_page_content(
             scrolldowns, max_scrolldowns = 0, 20  # Finite to prevent infinite scroll
 
             while current_scroll_position < total_height and scrolldowns < max_scrolldowns:
-                page.wait_for_timeout(200)  # Wait for dynamic content to load
+                page.wait_for_timeout(500)  # Wait for dynamic content to load
                 current_scroll_position += viewport_height
                 page.evaluate(f"window.scrollTo(0, {current_scroll_position})")
                 scrolldowns += 1
@@ -1317,10 +1319,10 @@ def scrape_github(
     """Scrape content from a GitHub repository with optional authentication."""
     with tempfile.TemporaryDirectory() as temp_dir:
         # Try unauthenticated clone first
-        clone_result = os.system(f"git clone {github_url} {temp_dir} --quiet")
+        clone_result = _clone_github_repo(github_url, temp_dir, branch=branch)
         
         # If clone fails and we have token options/env, try authenticated clone
-        if clone_result != 0:
+        if clone_result is not None:
             # Check options first, then environment variable
             token = None
             if options:
@@ -1332,8 +1334,8 @@ def scrape_github(
                 if verbose:
                     print(f"[thepipe] Attempting authenticated clone...")
                 auth_url = github_url.replace("https://", f"https://{token}@")
-                clone_result = os.system(f"git clone {auth_url} {temp_dir} --quiet")
-                if clone_result != 0:
+                clone_result = _clone_github_repo(auth_url, temp_dir, branch=branch)
+                if clone_result is not None:
                     return [Chunk(path=github_url, text=f"Failed to clone repository even with authentication: {github_url}")]
             else:
                 return [Chunk(path=github_url, text=f"Repository requires authentication. Set GITHUB_TOKEN environment variable or provide token in options")]
@@ -1366,6 +1368,17 @@ def scrape_github(
             if verbose:
                 print(f"[thepipe] Error processing repository contents: {str(e)}")
             return [Chunk(path=github_url, text=f"Error processing repository contents: {str(e)}")]
+
+
+def _clone_github_repo(github_url: str, target_dir: str, *, branch: str = "main") -> Optional[subprocess.CalledProcessError]:
+    command = ["git", "clone", github_url, target_dir, "--quiet"]
+    if branch:
+        command = ["git", "clone", "--branch", branch, "--single-branch", github_url, target_dir, "--quiet"]
+    try:
+        subprocess.run(command, check=True)
+        return None
+    except subprocess.CalledProcessError as exc:
+        return exc
 
 def scrape_docx(
     file_path: str,
