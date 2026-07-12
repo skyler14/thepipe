@@ -113,6 +113,26 @@ def test_find_join_candidates_across_sources():
     ]
 
 
+def test_find_join_candidates_handles_source_ids_with_dots():
+    candidates = find_join_candidates(
+        [
+            {
+                "source_id": "odbc://?connect=DRIVER%3D/path/libsqlite3odbc.dylib%3BDatabase%3D/private/tmp/crm.sqlite",
+                "tables": [{"name": "customers", "columns": ["customer_id"]}],
+            },
+            {
+                "source_id": "odbc://?connect=DRIVER%3D/path/libsqlite3odbc.dylib%3BDatabase%3D/private/tmp/warehouse.sqlite",
+                "tables": [{"name": "orders", "columns": ["customer_id"]}],
+            },
+        ]
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["column"] == "customer_id"
+    assert candidates[0]["left"].endswith("crm.sqlite.customers.customer_id")
+    assert candidates[0]["right"].endswith("warehouse.sqlite.orders.customer_id")
+
+
 def test_ledger_records_dataset_group_join_candidates(tmp_path):
     graph_path = tmp_path / "graph.json"
     ledger = DatabaseGraphLedger(str(graph_path))
@@ -129,6 +149,28 @@ def test_ledger_records_dataset_group_join_candidates(tmp_path):
     assert data["dataset_groups"] == [{"name": "revenue", "sources": ["crm", "warehouse"]}]
     assert data["join_candidates"][0]["left"] == "crm.customers.customer_id"
     assert data["join_candidates"][0]["right"] == "warehouse.orders.customer_id"
+
+
+def test_ledger_recomputes_join_candidates_for_incremental_group_sources(tmp_path):
+    ledger = DatabaseGraphLedger(str(tmp_path / "graph.json"))
+
+    ledger.record_sources(
+        "revenue",
+        [{"source_id": "crm", "tables": [{"name": "customers", "columns": ["customer_id"]}]}],
+    )
+    ledger.record_sources(
+        "revenue",
+        [{"source_id": "warehouse", "tables": [{"name": "orders", "columns": ["customer_id"]}]}],
+    )
+
+    joins = ledger.query("MATCH (a:Column)-[j:CROSS_SOURCE_JOIN]->(b:Column) RETURN a.qualified_name, b.qualified_name LIMIT 5")
+
+    assert joins == [
+        {
+            "a.qualified_name": "crm.customers.customer_id",
+            "b.qualified_name": "warehouse.orders.customer_id",
+        }
+    ]
 
 
 def test_ledger_query_supports_operation_and_join_candidate_reads(tmp_path):

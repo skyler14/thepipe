@@ -55,15 +55,34 @@ class DatabaseGraphLedger:
 
     def record_sources(self, group_name: str, sources: List[Dict[str, Any]]) -> None:
         source_ids = [str(source.get("source_id", "source")) for source in sources]
-        group = {"name": group_name, "sources": source_ids}
         groups = self.data.setdefault("dataset_groups", [])
-        if group not in groups:
+        group = next((existing for existing in groups if existing.get("name") == group_name), None)
+        if group is None:
+            group = {"name": group_name, "sources": []}
             groups.append(group)
+        for source_id in source_ids:
+            if source_id not in group.setdefault("sources", []):
+                group["sources"].append(source_id)
         known_sources = self.data.setdefault("sources", [])
         for source in sources:
-            if source not in known_sources:
+            existing_index = next(
+                (
+                    index
+                    for index, known in enumerate(known_sources)
+                    if str(known.get("source_id", "source")) == str(source.get("source_id", "source"))
+                ),
+                None,
+            )
+            if existing_index is None:
                 known_sources.append(source)
-        for candidate in find_join_candidates(sources):
+            else:
+                known_sources[existing_index] = source
+        group_sources = [
+            source
+            for source in known_sources
+            if str(source.get("source_id", "source")) in set(group.get("sources", []))
+        ]
+        for candidate in find_join_candidates(group_sources):
             if candidate not in self.data.setdefault("join_candidates", []):
                 self.data["join_candidates"].append(candidate)
         self.save()
@@ -470,22 +489,20 @@ def dataframe_records_json(result: Any) -> Optional[str]:
 
 
 def find_join_candidates(sources: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen: Dict[str, List[str]] = {}
+    seen: Dict[str, List[tuple[str, str]]] = {}
     for source in sources:
-        source_id = source.get("source_id", "source")
+        source_id = str(source.get("source_id", "source"))
         for table in source.get("tables", []):
             table_name = table.get("name", "table")
             for column in table.get("columns", []):
-                seen.setdefault(str(column), []).append(f"{source_id}.{table_name}.{column}")
+                seen.setdefault(str(column), []).append((source_id, f"{source_id}.{table_name}.{column}"))
 
     candidates: List[Dict[str, Any]] = []
     for column, refs in sorted(seen.items()):
         if len(refs) < 2:
             continue
-        for index, left in enumerate(refs):
-            for right in refs[index + 1:]:
-                left_source = left.split(".", 1)[0]
-                right_source = right.split(".", 1)[0]
+        for index, (left_source, left) in enumerate(refs):
+            for right_source, right in refs[index + 1:]:
                 if left_source == right_source:
                     continue
                 candidates.append(
