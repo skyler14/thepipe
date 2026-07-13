@@ -33,6 +33,118 @@ DUCKDB_FORGIVING_SOURCE_TYPES = {"json", "jsonl", "csv"}
 logger = logging.getLogger(__name__)
 
 
+def _markdown_table(frame: pd.DataFrame, *, max_rows: int = DEFAULT_MAX_ROWS) -> str:
+    display = frame.head(max_rows).copy()
+    columns = [str(column) for column in display.columns]
+    lines = ["| " + " | ".join(columns) + " |"]
+    lines.append("|" + "|".join(["---" for _ in columns]) + "|")
+    for _, row in display.iterrows():
+        values = [str(row[column]) for column in display.columns]
+        lines.append("| " + " | ".join(values) + " |")
+    if len(frame) > max_rows:
+        lines.append(f"\n_Showing {max_rows} of {len(frame)} rows._")
+    return "\n".join(lines)
+
+
+def _render_numeric_summary(frame: pd.DataFrame) -> str:
+    numeric_columns = [column for column in frame.columns if pd.api.types.is_numeric_dtype(frame[column])]
+    if not numeric_columns:
+        return ""
+    lines = ["### Numeric Summary\n"]
+    lines.append("| Column | Count | Nulls | Min | Max | Mean |")
+    lines.append("|---|---:|---:|---:|---:|---:|")
+    for column in numeric_columns:
+        series = frame[column]
+        non_null = series.dropna()
+        if non_null.empty:
+            min_value = max_value = mean_value = "N/A"
+        else:
+            min_value = f"{non_null.min():.6g}"
+            max_value = f"{non_null.max():.6g}"
+            mean_value = f"{non_null.mean():.6g}"
+        lines.append(
+            f"| {column} | {int(non_null.count())} | {int(series.isna().sum())} | {min_value} | {max_value} | {mean_value} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_categorical_summary(frame: pd.DataFrame, *, max_columns: int = 6, max_values: int = 5) -> str:
+    categorical_columns = [
+        column
+        for column in frame.columns
+        if not pd.api.types.is_numeric_dtype(frame[column])
+    ][:max_columns]
+    if not categorical_columns:
+        return ""
+    lines = ["### Categorical Summary\n"]
+    for column in categorical_columns:
+        series = frame[column]
+        lines.append(f"#### {column}")
+        lines.append(f"Distinct values: {series.nunique(dropna=True)}")
+        top_values = series.value_counts(dropna=False).head(max_values)
+        if not top_values.empty:
+            lines.append("Top values:")
+            for value, count in top_values.items():
+                percentage = (count / len(series) * 100) if len(series) else 0
+                lines.append(f"- {value}: {int(count)} ({percentage:.2f}%)")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _render_query_result_text(
+    query: str,
+    result: Any,
+    *,
+    cached: bool = False,
+    max_rows: int = DEFAULT_MAX_ROWS,
+) -> tuple[str, Optional[str]]:
+    result_text = f"## SQL Query\n\n```sql\n{query}\n```\n\n"
+    if isinstance(result, pd.DataFrame):
+        result_json = result.to_json(orient="records", indent=2) if not result.empty else "[]"
+        cached_note = " (cached)" if cached else ""
+        result_text += f"## Results{cached_note} ({len(result)} rows)\n\n"
+        if cached:
+            result_text += "Reused cached database graph operation.\n\n"
+        result_text += "## Result Summary\n\n"
+        result_text += f"Rows: {len(result)}\n"
+        result_text += f"Columns: {len(result.columns)}\n"
+        if len(result.columns):
+            result_text += f"Column names: {', '.join(str(column) for column in result.columns)}\n"
+        result_text += "\n"
+        if not result.empty:
+            result_text += "## Result Table\n\n"
+            result_text += _markdown_table(result, max_rows=max_rows)
+            result_text += "\n\n"
+            numeric_summary = _render_numeric_summary(result)
+            if numeric_summary:
+                result_text += numeric_summary + "\n\n"
+            categorical_summary = _render_categorical_summary(result)
+            if categorical_summary:
+                result_text += categorical_summary + "\n\n"
+        else:
+            result_text += "*No rows returned*\n\n"
+        result_text += "## Result JSON\n\n```json\n"
+        result_text += result_json
+        result_text += "\n```"
+        return result_text, result_json
+
+    result_text += "## Results\n\n"
+    if cached:
+        result_text += "Reused cached database graph operation.\n\n"
+    result_text += "Query executed successfully."
+    return result_text, None
+
+
+def _dataframe_from_records_json(result_json: str) -> pd.DataFrame:
+    try:
+        records = json.loads(result_json)
+    except json.JSONDecodeError:
+        records = []
+    if isinstance(records, list):
+        return pd.DataFrame.from_records(records)
+    return pd.DataFrame()
+
+
 class DatabaseManager:
     """
     Manager class that handles database operations.
@@ -875,12 +987,13 @@ class DatabaseManager:
                 query_fingerprint=query_fingerprint,
             )
             if cached_operation and cached_operation.get("result_json") is not None:
-                result_text = f"## SQL Query\n\n```sql\n{query}\n```\n\n"
-                result_text += "## Results (cached)\n\n"
-                result_text += "Reused cached database graph operation.\n\n"
-                result_text += "```json\n"
-                result_text += cached_operation["result_json"]
-                result_text += "\n```"
+                cached_frame = _dataframe_from_records_json(str(cached_operation["result_json"]))
+                result_text, _ = _render_query_result_text(
+                    query,
+                    cached_frame,
+                    cached=True,
+                    max_rows=int(self.options.get("max_rows", DEFAULT_MAX_ROWS)),
+                )
                 return [
                     self.get_schema(),
                     Chunk(
@@ -1009,26 +1122,11 @@ class DatabaseManager:
             else:
                 result = self.db.query(query, params=params)
 
-            # Format the result
-            result_text = f"## SQL Query\n\n```sql\n{query}\n```\n\n"
-
-            if isinstance(result, pd.DataFrame):
-                result_text += f"## Results ({len(result)} rows)\n\n"
-
-                if not result.empty:
-                    # Convert to JSON for consistent formatting
-                    result_json = result.to_json(orient='records', indent=2)
-                    result_text += "```json\n"
-                    result_text += result_json
-                    result_text += "\n```"
-                else:
-                    result_json = "[]"
-                    result_text += "*No rows returned*"
-            else:
-                result_json = None
-                # Non-DataFrame result (e.g., for non-SELECT queries)
-                result_text += f"## Results\n\n"
-                result_text += "Query executed successfully."
+            result_text, result_json = _render_query_result_text(
+                query,
+                result,
+                max_rows=int(self.options.get("max_rows", DEFAULT_MAX_ROWS)),
+            )
 
             if graph_ledger:
                 graph_ledger.record_operation(

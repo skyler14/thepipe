@@ -390,6 +390,85 @@ class TestJSONLHandling(unittest.TestCase):
         finally:
             os.unlink(csv_gz_path)
 
+class TestSQLQueryChunkOutput(unittest.TestCase):
+    def test_sql_query_chunk_includes_result_table_and_summary_stats(self):
+        from thepipe.database_utils import process_database
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as f:
+            db_path = f.name
+
+        seed = sqlite3.connect(db_path)
+        try:
+            seed.execute("CREATE TABLE orders (customer TEXT, total REAL, status TEXT)")
+            seed.execute("INSERT INTO orders VALUES ('Alice', 10.5, 'paid')")
+            seed.execute("INSERT INTO orders VALUES ('Bob', 20.0, 'open')")
+            seed.execute("INSERT INTO orders VALUES ('Alice', 30.0, 'paid')")
+            seed.commit()
+        finally:
+            seed.close()
+
+        try:
+            chunks = process_database(
+                connection_info=f"sqlite:///{db_path}",
+                query="SELECT customer, total, status FROM orders ORDER BY total",
+                verbose=False,
+            )
+
+            query_chunk = next(chunk for chunk in chunks if "query" in chunk.path)
+            self.assertIn("## Result Summary", query_chunk.text)
+            self.assertIn("Rows: 3", query_chunk.text)
+            self.assertIn("Columns: 3", query_chunk.text)
+            self.assertIn("## Result Table", query_chunk.text)
+            self.assertIn("| customer | total | status |", query_chunk.text)
+            self.assertIn("### Numeric Summary", query_chunk.text)
+            self.assertIn("| total |", query_chunk.text)
+            self.assertIn("### Categorical Summary", query_chunk.text)
+            self.assertIn("Alice", query_chunk.text)
+        finally:
+            os.unlink(db_path)
+
+    def test_cached_database_graph_query_preserves_result_table_and_summary_stats(self):
+        from thepipe.database_utils import process_database
+
+        with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as f:
+            db_path = f.name
+        graph_path = Path(db_path).with_suffix(".graph.json")
+
+        seed = sqlite3.connect(db_path)
+        try:
+            seed.execute("CREATE TABLE orders (customer TEXT, total REAL, status TEXT)")
+            seed.execute("INSERT INTO orders VALUES ('Alice', 10.5, 'paid')")
+            seed.execute("INSERT INTO orders VALUES ('Bob', 20.0, 'open')")
+            seed.commit()
+        finally:
+            seed.close()
+
+        options = {"database_graph": "auto", "database_graph_path": str(graph_path)}
+        try:
+            process_database(
+                connection_info=f"sqlite:///{db_path}",
+                query="SELECT customer, total, status FROM orders ORDER BY total",
+                options=options,
+                verbose=False,
+            )
+            chunks = process_database(
+                connection_info=f"sqlite:///{db_path}",
+                query="SELECT customer, total, status FROM orders ORDER BY total",
+                options=options,
+                verbose=False,
+            )
+
+            query_chunk = next(chunk for chunk in chunks if "query" in chunk.path)
+            self.assertIn("Reused cached database graph operation", query_chunk.text)
+            self.assertIn("## Result Summary", query_chunk.text)
+            self.assertIn("## Result Table", query_chunk.text)
+            self.assertIn("### Numeric Summary", query_chunk.text)
+            self.assertIn("### Categorical Summary", query_chunk.text)
+        finally:
+            os.unlink(db_path)
+            if graph_path.exists():
+                graph_path.unlink()
+
 
 class TestODBCHandling(unittest.TestCase):
     def test_odbc_missing_pyodbc_fails_clearly(self):
